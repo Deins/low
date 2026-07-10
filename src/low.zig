@@ -1,0 +1,30 @@
+const builtin = @import("builtin");
+const common = @import("common.zig");
+const input = @import("input.zig");
+
+pub const BackendRequest = common.BackendRequest;
+pub const BackendKind = common.BackendKind;
+pub const Environment = common.Environment;
+pub const detectBackend = common.detectBackend;
+pub const Size = common.Size;
+pub const Point = common.Point;
+pub const ContentScale = common.ContentScale;
+
+pub const Action = input.Action;
+pub const MouseButton = input.MouseButton;
+pub const Modifiers = input.Modifiers;
+pub const CursorShape = input.CursorShape;
+pub const Key = input.Key;
+
+const impl = if (builtin.target.os.tag == .linux)
+    @import("linux/backend.zig")
+else
+    @import("stub.zig");
+
+pub const DecorationMode = impl.DecorationMode;
+pub const WindowState = impl.WindowState;
+pub const InitOptions = impl.InitOptions;
+pub const WindowOptions = impl.WindowOptions;
+pub const WindowCallbacks = impl.WindowCallbacks;
+pub const Context = impl.Context;
+pub const Window = impl.Window;
