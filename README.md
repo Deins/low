@@ -6,9 +6,8 @@ Small cross-platform windowing and desktop-input library for standalone Zig appl
 
 - Linux Wayland
 - Linux X11
+- Windows (Win32)
 - Other platforms: stub implementation returning `UnsupportedPlatform`
-
-Windows is planned in future.
 
 ## Features
 
@@ -62,3 +61,6 @@ The current Linux implementation is still a combined dispatch module, so both na
 libraries remain link dependencies. The options prevent selection of the disabled
 backend; separating the implementation files is needed to remove the unused native
 library from the final link.
+
+The Windows backend is implemented with Win32 and exposes the same `Context` and
+`Window` API, including native HWND access for Vulkan (`VK_KHR_win32_surface`).

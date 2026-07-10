@@ -25,6 +25,8 @@ pub fn build(b: *Build) !void {
 
     if (target.result.os.tag == .linux) {
         addLinuxWaylandSupport(b, low, target, optimize, enable_x11, enable_wayland);
+    } else if (target.result.os.tag == .windows) {
+        addWindowsSupport(b, low);
     } else {
         low.link_libc = true;
     }
@@ -37,6 +39,8 @@ pub fn build(b: *Build) !void {
     if (target.result.os.tag == .linux) {
         test_module.addOptions("build_options", options);
         addLinuxWaylandSupport(b, test_module, target, optimize, enable_x11, enable_wayland);
+    } else if (target.result.os.tag == .windows) {
+        addWindowsSupport(b, test_module);
     } else {
         test_module.link_libc = true;
     }
@@ -48,6 +52,13 @@ pub fn build(b: *Build) !void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run low tests");
     test_step.dependOn(&run_tests.step);
+}
+
+fn addWindowsSupport(b: *Build, module: *Build.Module) void {
+    const win32 = b.lazyDependency("win32", .{}) orelse
+        @panic("low: win32 dependency unavailable");
+    module.addImport("win32", win32.module("win32"));
+    module.link_libc = true;
 }
 
 fn addLinuxWaylandSupport(

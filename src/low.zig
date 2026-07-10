@@ -3,7 +3,7 @@ const common = @import("common.zig");
 const input = @import("input.zig");
 
 pub const BackendRequest = common.BackendRequest;
-pub const BackendKind = common.BackendKind;
+pub const BackendKind = impl.BackendKind;
 pub const Environment = common.Environment;
 pub const detectBackend = common.detectBackend;
 pub const Size = common.Size;
@@ -18,6 +18,8 @@ pub const Key = input.Key;
 
 const impl = if (builtin.target.os.tag == .linux)
     @import("linux/backend.zig")
+else if (builtin.target.os.tag == .windows)
+    @import("windows/backend.zig")
 else
     @import("stub.zig");
 
