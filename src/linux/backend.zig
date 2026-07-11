@@ -2,7 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const types = @import("../internal/types.zig");
 const runtime = @import("../internal/runtime.zig");
-const wayland_backend = @import("wayland_backend.zig");
+const wayland_backend = if (build_options.wayland) @import("wayland_backend.zig") else struct {};
 const x11_backend = @import("x11_backend.zig");
 const offscreen_backend = @import("../offscreen_backend.zig").Backend(runtime);
 

@@ -184,7 +184,7 @@ fn show(window: *Window) void {
 }
 
 fn hide(window: *Window) void {
-    _ = win32.ShowWindow(windowHandle(window), .{ .HIDE = 1 });
+    _ = win32.ShowWindow(windowHandle(window), win32.SW_HIDE);
 }
 
 fn maximize(window: *Window) void {

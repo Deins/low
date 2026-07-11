@@ -25,7 +25,7 @@ pub fn build(b: *Build) !void {
     });
     low.addOptions("build_options", options);
 
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .linux and enable_wayland) {
         addLinuxWaylandSupport(b, low, target, optimize);
     } else if (target.result.os.tag == .windows) {
         addWindowsSupport(b, low);
@@ -39,7 +39,7 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     });
     test_module.addOptions("build_options", options);
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .linux and enable_wayland) {
         addLinuxWaylandSupport(b, test_module, target, optimize);
     } else if (target.result.os.tag == .windows) {
         addWindowsSupport(b, test_module);
