@@ -12,6 +12,8 @@ pub const detectBackend = common.detectBackend;
 pub const Size = api.Size;
 pub const Point = api.Point;
 pub const ContentScale = api.ContentScale;
+pub const TextInputRect = api.TextInputRect;
+pub const ColorScheme = api.ColorScheme;
 pub const Action = api.Action;
 pub const MouseButton = api.MouseButton;
 pub const Modifiers = api.Modifiers;
@@ -83,6 +85,15 @@ pub const Context = struct {
     }
     pub fn wake(self: *Context) void {
         self.state.wake();
+    }
+    pub fn clipboardText(self: *Context, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        return self.state.clipboardText(allocator);
+    }
+    pub fn clipboardTextSet(self: *Context, text: []const u8) std.mem.Allocator.Error!void {
+        return self.state.clipboardTextSet(text);
+    }
+    pub fn preferredColorScheme(self: *Context) ?ColorScheme {
+        return self.state.preferredColorScheme();
     }
 };
 

@@ -8,6 +8,8 @@ pub const BackendKind = common.BackendKind;
 pub const Size = common.Size;
 pub const Point = common.Point;
 pub const ContentScale = common.ContentScale;
+pub const TextInputRect = common.TextInputRect;
+pub const ColorScheme = common.ColorScheme;
 pub const Action = input.Action;
 pub const MouseButton = input.MouseButton;
 pub const Modifiers = input.Modifiers;
@@ -102,9 +104,28 @@ pub const State = struct {
     backend_data: *anyopaque,
     vtable: *const VTable,
     event_error_reported: bool = false,
+    clipboard: common.Clipboard = .{},
 
     pub fn deinit(self: *State) void {
         self.vtable.deinit(self);
+    }
+
+    pub fn clipboardText(self: *State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        return self.clipboard.get(allocator);
+    }
+
+    pub fn clipboardTextSet(self: *State, text: []const u8) std.mem.Allocator.Error!void {
+        return self.clipboard.set(self.allocator, text);
+    }
+
+    pub fn preferredColorScheme(_: *State) ?ColorScheme {
+        // Desktop portals and toolkit settings are backend-specific.  The
+        // explicit environment override is useful for minimal compositors and
+        // keeps the result deterministic for headless integration tests.
+        const value = std.mem.span(std.c.getenv("COLORSCHEME") orelse return null);
+        if (std.ascii.eqlIgnoreCase(value, "dark")) return .dark;
+        if (std.ascii.eqlIgnoreCase(value, "light")) return .light;
+        return null;
     }
 
     pub fn nativeDisplay(self: *State) *anyopaque {
@@ -175,6 +196,7 @@ pub const Window = struct {
     framebuffer_size: Size,
     content_scale: ContentScale = .{},
     cursor_pos: Point = .{ .x = 0, .y = 0 },
+    text_input_rect: ?TextInputRect = null,
     pressed_keys: std.EnumSet(Key) = .empty,
     pressed_buttons: std.EnumSet(MouseButton) = .empty,
 
@@ -325,6 +347,10 @@ pub const Window = struct {
     pub fn setCursor(self: *Window, shape: CursorShape) void {
         self.cursor_shape = shape;
         self.ctx.vtable.set_cursor(self, shape);
+    }
+
+    pub fn setTextInputRect(self: *Window, rect: ?TextInputRect) void {
+        self.text_input_rect = rect;
     }
 
     pub fn updateScale(self: *Window, scale: f32) void {

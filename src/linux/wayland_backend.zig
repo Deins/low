@@ -59,6 +59,7 @@ fn deinit(state: *api.State) void {
     d.windows.deinit(d.allocator);
     d.native_state.deinit();
     const allocator = d.allocator;
+    state.clipboard.deinit(allocator);
     allocator.destroy(d);
     allocator.destroy(state);
 }

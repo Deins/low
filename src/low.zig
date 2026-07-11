@@ -9,6 +9,8 @@ pub const detectBackend = common.detectBackend;
 pub const Size = common.Size;
 pub const Point = common.Point;
 pub const ContentScale = common.ContentScale;
+pub const TextInputRect = common.TextInputRect;
+pub const ColorScheme = common.ColorScheme;
 
 pub const Action = input.Action;
 pub const MouseButton = input.MouseButton;

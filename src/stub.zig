@@ -9,6 +9,8 @@ pub const detectBackend = common.detectBackend;
 pub const Size = common.Size;
 pub const Point = common.Point;
 pub const ContentScale = common.ContentScale;
+pub const TextInputRect = common.TextInputRect;
+pub const ColorScheme = common.ColorScheme;
 
 pub const Action = input.Action;
 pub const MouseButton = input.MouseButton;
@@ -47,11 +49,16 @@ pub const WindowOptions = struct {
 pub const WindowCallbacks = struct {};
 
 pub const Context = struct {
-    pub fn init(_: std.mem.Allocator, _: InitOptions) !Context {
+    allocator: std.mem.Allocator,
+    clipboard: common.Clipboard = .{},
+    pub fn init(allocator: std.mem.Allocator, _: InitOptions) !Context {
+        _ = allocator;
         return error.UnsupportedPlatform;
     }
 
-    pub fn deinit(_: *Context) void {}
+    pub fn deinit(self: *Context) void {
+        self.clipboard.deinit(self.allocator);
+    }
 
     pub fn createWindow(_: *Context, _: WindowOptions) !*Window {
         return error.UnsupportedPlatform;
@@ -62,8 +69,18 @@ pub const Context = struct {
         return error.UnsupportedPlatform;
     }
     pub fn wake(_: *Context) void {}
+    pub fn clipboardText(self: *Context, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        return self.clipboard.get(allocator);
+    }
+    pub fn clipboardTextSet(self: *Context, text: []const u8) std.mem.Allocator.Error!void {
+        return self.clipboard.set(self.allocator, text);
+    }
+    pub fn preferredColorScheme(_: *Context) ?ColorScheme {
+        return null;
+    }
 };
 
 pub const Window = struct {
     pub fn deinit(_: *Window) void {}
+    pub fn setTextInputRect(_: *Window, _: ?TextInputRect) void {}
 };

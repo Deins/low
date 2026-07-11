@@ -46,6 +46,42 @@ pub const ContentScale = struct {
     y: f32 = 1,
 };
 
+/// A rectangle in a window's logical coordinate space.
+///
+/// This is used to place platform text-input UI (for example an IME candidate
+/// window) next to the active text field.
+pub const TextInputRect = struct {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+};
+
+/// The desktop colour preference when the platform can determine one.
+pub const ColorScheme = enum { light, dark };
+
+/// A small, allocator-owned clipboard fallback.  Backends which have a native
+/// clipboard can replace this later without changing the public API; keeping a
+/// copy here makes copy/paste reliable between all `low` windows, including
+/// the unsupported-platform stub.
+pub const Clipboard = struct {
+    text: std.ArrayListUnmanaged(u8) = .empty,
+
+    pub fn deinit(self: *Clipboard, allocator: std.mem.Allocator) void {
+        self.text.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn get(self: *const Clipboard, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        return allocator.dupe(u8, self.text.items);
+    }
+
+    pub fn set(self: *Clipboard, allocator: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error!void {
+        self.text.clearRetainingCapacity();
+        try self.text.appendSlice(allocator, value);
+    }
+};
+
 pub fn scaledSize(size: Size, scale: ContentScale) Size {
     return .{
         .width = @intFromFloat(@max(1.0, @as(f64, @floatFromInt(size.width)) * @as(f64, scale.x))),
@@ -76,4 +112,14 @@ test "scaledSize" {
     const size = scaledSize(.{ .width = 100, .height = 50 }, .{ .x = 1.5, .y = 2.0 });
     try std.testing.expectEqual(@as(i32, 150), size.width);
     try std.testing.expectEqual(@as(i32, 100), size.height);
+}
+
+test "clipboard owns its text and returns an independent copy" {
+    var clipboard: Clipboard = .{};
+    defer clipboard.deinit(std.testing.allocator);
+
+    try clipboard.set(std.testing.allocator, "low clipboard");
+    const text = try clipboard.get(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("low clipboard", text);
 }

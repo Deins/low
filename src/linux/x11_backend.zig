@@ -91,6 +91,7 @@ fn deinit(state: *api.State) void {
     _ = std.os.linux.close(data.wake_fd);
     _ = x11.XCloseDisplay(data.display);
     const allocator = data.allocator;
+    state.clipboard.deinit(allocator);
     allocator.destroy(data);
     allocator.destroy(state);
 }
