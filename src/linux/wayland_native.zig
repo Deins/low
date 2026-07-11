@@ -1099,6 +1099,12 @@ pub const Window = struct {
         return self.user_data;
     }
 
+    /// Replaces all window event callbacks. Callbacks execute during
+    /// `Context.pollEvents` or `Context.waitEvents` on the calling thread.
+    pub fn setCallbacks(self: *Window, callbacks: WindowCallbacks) void {
+        self.callbacks = callbacks;
+    }
+
     pub fn setTitle(self: *Window, title: [:0]const u8) void {
         c.xdg_toplevel_set_title(self.xdg_toplevel, title.ptr);
     }

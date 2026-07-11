@@ -220,6 +220,12 @@ pub const Window = struct {
         return self.user_data;
     }
 
+    /// Replaces all window event callbacks. Callbacks execute during
+    /// `Context.pollEvents` or `Context.waitEvents` on the calling thread.
+    pub fn setCallbacks(self: *Window, callbacks: WindowCallbacks) void {
+        self.callbacks = callbacks;
+    }
+
     pub fn setTitle(self: *Window, title: [:0]const u8) void {
         self.ctx.vtable.set_title(self, title);
     }

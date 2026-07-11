@@ -82,5 +82,6 @@ pub const Context = struct {
 
 pub const Window = struct {
     pub fn deinit(_: *Window) void {}
+    pub fn setCallbacks(_: *Window, _: WindowCallbacks) void {}
     pub fn setTextInputRect(_: *Window, _: ?TextInputRect) void {}
 };

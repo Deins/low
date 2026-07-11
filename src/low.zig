@@ -11,6 +11,7 @@ pub const Point = common.Point;
 pub const ContentScale = common.ContentScale;
 pub const TextInputRect = common.TextInputRect;
 pub const ColorScheme = common.ColorScheme;
+pub const vulkan = @import("vulkan.zig");
 
 pub const Action = input.Action;
 pub const MouseButton = input.MouseButton;

@@ -98,3 +98,11 @@ to be installed on the destination machine at runtime.
 
 The Windows backend is implemented with Win32 and exposes the same `Context` and
 `Window` API, including native HWND access for Vulkan (`VK_KHR_win32_surface`).
+
+## Standalone Vulkan example
+
+[`examples/multiwindow_triangles`](examples/multiwindow_triangles) is a complete,
+independent Zig package that uses `low`, `vulkan-zig`, and no rendering or UI
+framework. It opens two windows with separate surfaces and swapchains, while
+sharing a Vulkan 1.3 device and pipeline. Its README includes the from-scratch
+build command and SDK setup.
