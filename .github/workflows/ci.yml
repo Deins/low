@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  linux-build-and-test:
+    name: Linux build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2.0.5
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev
+      - name: Build
+        run: zig build compile -Dvk_extras=true --summary all
+      - name: Test
+        run: zig build test -Dvk_extras=true --summary all
+
+  linux-cross-windows:
+    name: Linux cross-compiles Windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2.0.5
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Cross-compile Windows executable
+        run: zig build compile -Dtarget=x86_64-windows-gnu -Dvk_extras=true --summary all
+
+  windows-build:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2.0.5
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build
+        shell: bash
+        run: zig build compile -Dvk_extras=true --summary all
+
+  windows-cross-linux:
+    name: Windows cross-compiles Linux
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2.0.5
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Cross-compile Linux binary
+        shell: bash
+        run: zig build compile -Dtarget=x86_64-linux-gnu -Dvk_extras=true --summary all

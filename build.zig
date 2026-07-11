@@ -51,6 +51,9 @@ pub fn build(b: *Build) !void {
         .root_module = test_module,
     });
 
+    const compile_step = b.step("compile", "Compile low and its tests");
+    compile_step.dependOn(&tests.step);
+
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run low tests");
     test_step.dependOn(&run_tests.step);
