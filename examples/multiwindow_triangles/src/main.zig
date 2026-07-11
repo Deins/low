@@ -5,6 +5,7 @@ const vk = @import("vulkan");
 const RenderTarget = low.vulkan.targets().RenderTarget;
 const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
 const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
+const triangle_half_size_px: f32 = 70.0;
 
 fn lowPhysicalDevice(value: vk.PhysicalDevice) low.vulkan.api.PhysicalDevice {
     return @ptrFromInt(@intFromEnum(value));
@@ -20,8 +21,7 @@ fn lowFormat(value: vk.Format) low.vulkan.api.Format {
 
 const PushConstants = extern struct {
     offset: [2]f32,
-    // A vec3 has 16-byte alignment in the GLSL push-constant block.
-    _padding: [2]f32 = .{ 0, 0 },
+    screen_size: [2]f32,
     color: [3]f32,
 };
 
@@ -171,13 +171,20 @@ const AppWindow = struct {
     }
 
     fn update(self: *AppWindow, dt: f32) void {
+        const framebuffer_size = self.window.getFramebufferSize();
+        const width: f32 = @floatFromInt(@max(framebuffer_size.width, 1));
+        const height: f32 = @floatFromInt(@max(framebuffer_size.height, 1));
+        const bounds = [2]f32{
+            @max(0.0, 1.0 - 2.0 * triangle_half_size_px / width),
+            @max(0.0, 1.0 - 2.0 * triangle_half_size_px / height),
+        };
         for (0..2) |axis| {
             self.position[axis] += self.velocity[axis] * dt;
-            if (self.position[axis] > 0.74) {
-                self.position[axis] = 0.74;
+            if (self.position[axis] > bounds[axis]) {
+                self.position[axis] = bounds[axis];
                 self.velocity[axis] = -@abs(self.velocity[axis]);
-            } else if (self.position[axis] < -0.74) {
-                self.position[axis] = -0.74;
+            } else if (self.position[axis] < -bounds[axis]) {
+                self.position[axis] = -bounds[axis];
                 self.velocity[axis] = @abs(self.velocity[axis]);
             }
         }
@@ -220,7 +227,11 @@ const AppWindow = struct {
         renderer.device.cmdSetViewport(command_buffer, 0, &.{viewport});
         renderer.device.cmdSetScissor(command_buffer, 0, &.{scissor});
         renderer.device.cmdBindPipeline(command_buffer, .graphics, renderer.pipeline);
-        const push = PushConstants{ .offset = self.position, .color = self.color };
+        const push = PushConstants{
+            .offset = self.position,
+            .screen_size = .{ @floatFromInt(extent.width), @floatFromInt(extent.height) },
+            .color = self.color,
+        };
         renderer.device.cmdPushConstants(command_buffer, renderer.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), @ptrCast(&push));
         renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
         renderer.device.cmdEndRendering(command_buffer);
