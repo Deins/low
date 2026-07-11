@@ -219,7 +219,14 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
         },
         win32.WM_MOUSEWHEEL, win32.WM_MOUSEHWHEEL => { const delta: i16 = @bitCast(win32.hiword(wparam)); if (window.callbacks.scroll) |cb| cb(window, if (message == win32.WM_MOUSEHWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0, if (message == win32.WM_MOUSEWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0); return 0; },
         win32.WM_SIZE => { var rect: win32.RECT = undefined; _ = win32.GetClientRect(hwnd, &rect); const size = Size{ .width = rect.right, .height = rect.bottom }; window.size = size; window.framebuffer_size = size; if (window.callbacks.resize) |cb| cb(window, size); if (window.callbacks.framebuffer_resize) |cb| cb(window, size); },
-        win32.WM_CHAR => { var utf8: [4]u8 = undefined; const len = std.unicode.utf8Encode(@intCast(wparam), &utf8) catch 0; if (len != 0) if (window.callbacks.text) |cb| cb(window, utf8[0..len]); return 0; },
+        win32.WM_CHAR => {
+            var utf8: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(@intCast(wparam), &utf8) catch 0;
+            if (len != 0 and input.isPrintableText(utf8[0..len])) {
+                if (window.callbacks.text) |cb| cb(window, utf8[0..len]);
+            }
+            return 0;
+        },
         win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN, win32.WM_KEYUP, win32.WM_SYSKEYUP => {
             const key = virtualKeyToKey(@enumFromInt(wparam));
             const released = message == win32.WM_KEYUP or message == win32.WM_SYSKEYUP;

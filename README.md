@@ -1,6 +1,7 @@
 # low — let me open window
 
-Small cross-platform windowing and desktop-input library for standalone Zig applications.
+Basic cross-platform desktop windowing library for standalone Zig vulkan applications.
+With goal to be as **portable** and **cross-compilable** as possible.
 
 ## Platforms
 
@@ -8,6 +9,7 @@ Small cross-platform windowing and desktop-input library for standalone Zig appl
 - Linux X11
 - Windows (Win32)
 - Other platforms: stub implementation returning `UnsupportedPlatform`
+
 
 ## Features
 
@@ -19,9 +21,32 @@ Small cross-platform windowing and desktop-input library for standalone Zig appl
 - Vulkan surface integration via `VK_KHR_surface` plus the selected backend's Wayland or Xlib extension
 - Compositor-provided Wayland cursor shapes through `wp_cursor_shape_manager_v1`
 
-## Backend selection
+## Backend selection and runtime dependencies
 
 Pass `.auto`, `.wayland`, or `.x11` through `InitOptions.backend`. Automatic selection uses the session type and display environment, with `XDG_SESSION_TYPE` taking precedence when set.
+
+The selected backend loads only its own system libraries at runtime:
+
+- Wayland: `libwayland-client.so.0` and `libxkbcommon.so.0`
+- X11: `libX11.so.6`
+
+They are loaded with `dlopen` through Zig's dynamic-library API after backend
+selection. Thus one executable can run on a Wayland-only or X11-only system,
+and missing libraries are reported as `error.BackendLibraryUnavailable` instead
+of preventing process startup. In `.auto` mode, if both display sockets are
+present, `low` also tries the other enabled backend after a library/connection
+failure. Explicit `.wayland` and `.x11` requests remain strict.
+
+The loaded handles intentionally remain alive for the process lifetime, so
+generated Wayland protocol calls and live windows cannot retain invalid
+function pointers.
+
+This is not a fully static desktop executable model. Static Linux executables
+cannot reliably load ordinary shared X11/Wayland client libraries and their
+dependency graphs. `low` returns `error.StaticExecutableUnsupported` before
+attempting that path. Distribute a dynamically linked core instead; for a
+widely compatible glibc build, choose a suitable old GNU target such as
+`x86_64-linux-gnu.2.17`.
 
 ## Limitations
 
@@ -31,9 +56,12 @@ Pass `.auto`, `.wayland`, or `.x11` through `InitOptions.backend`. Automatic sel
 
 `Context` is a thin handle over heap-backed backend state so Wayland listener userdata remains valid after initialization. Input and cursor enums are intentionally small and GLFW-like.
 
-The Linux backend uses Wayland client APIs, xkbcommon, X11/Xlib, and generated Wayland protocols.
+The Linux backend uses runtime bindings for Wayland client APIs, xkbcommon, and
+X11/Xlib, plus generated Wayland protocols.
 The protocol sources are vendored under `src/wayland/protocols`; they retain the upstream copyright and MIT license notices.
-Linux dispatch lives in `src/linux/backend.zig`; X11 definitions are isolated in `src/x11/backend.zig`, while Wayland protocol assets remain under `src/wayland`.
+Linux dispatch lives in `src/linux/backend.zig`; header-free X11 and xkbcommon
+ABI bindings live in `src/linux`, while Wayland protocol assets remain under
+`src/wayland`.
 
 ## Build and test
 
@@ -50,17 +78,23 @@ The parent project enables this backend with `-Dlow`:
 zig build run-app -Dlow
 ```
 
-Both Linux backends are enabled by default. They can be restricted at build time:
+Both Linux backends are enabled by default. They can be disabled for smaller binaries or otherwise:
 
 ```sh
 zig build -Dlow -Dlow_wayland=false  # X11-only runtime
 zig build -Dlow -Dlow_x11=false      # Wayland-only runtime
 ```
 
-The current Linux implementation is still a combined dispatch module, so both native
-libraries remain link dependencies. The options prevent selection of the disabled
-backend; separating the implementation files is needed to remove the unused native
-library from the final link.
+For the parent project, a portable glibc baseline can be selected without
+installing GUI development packages:
+
+```sh
+zig build -Dlow -Dtarget=x86_64-linux-gnu.2.17
+```
+
+The resulting ELF has no `DT_NEEDED` entries for `libX11`,
+`libwayland-client`, or `libxkbcommon`; only the selected desktop stack needs
+to be installed on the destination machine at runtime.
 
 The Windows backend is implemented with Win32 and exposes the same `Context` and
 `Window` API, including native HWND access for Vulkan (`VK_KHR_win32_surface`).

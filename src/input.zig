@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const Action = enum {
     release,
     press,
@@ -23,6 +25,25 @@ pub const Modifiers = packed struct {
     caps_lock: bool = false,
     num_lock: bool = false,
 };
+
+/// Keyboard text callbacks carry text input, not the control bytes generated
+/// by keys such as Backspace, Enter, and Tab.  Those keys are delivered by the
+/// key callback instead.
+pub fn isPrintableText(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    for (bytes) |byte| {
+        if (byte < 0x20 or byte == 0x7f) return false;
+    }
+    return true;
+}
+
+test "control bytes are not text input" {
+    try std.testing.expect(isPrintableText("a"));
+    try std.testing.expect(isPrintableText("ä"));
+    try std.testing.expect(!isPrintableText("\x08"));
+    try std.testing.expect(!isPrintableText("\x01"));
+    try std.testing.expect(!isPrintableText("\x7f"));
+}
 
 pub const CursorShape = enum {
     arrow,

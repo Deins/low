@@ -24,7 +24,7 @@ pub fn build(b: *Build) !void {
     low.addOptions("build_options", options);
 
     if (target.result.os.tag == .linux) {
-        addLinuxWaylandSupport(b, low, target, optimize, enable_x11, enable_wayland);
+        addLinuxWaylandSupport(b, low, target, optimize);
     } else if (target.result.os.tag == .windows) {
         addWindowsSupport(b, low);
     } else {
@@ -38,7 +38,7 @@ pub fn build(b: *Build) !void {
     });
     if (target.result.os.tag == .linux) {
         test_module.addOptions("build_options", options);
-        addLinuxWaylandSupport(b, test_module, target, optimize, enable_x11, enable_wayland);
+        addLinuxWaylandSupport(b, test_module, target, optimize);
     } else if (target.result.os.tag == .windows) {
         addWindowsSupport(b, test_module);
     } else {
@@ -66,14 +66,16 @@ fn addLinuxWaylandSupport(
     module: *Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    enable_x11: bool,
-    enable_wayland: bool,
 ) void {
     const wayland = b.lazyImport(@This(), "wayland") orelse
         @panic("low: wayland dependency unavailable");
     const scanner = wayland.Scanner.create(b, .{
         .wayland_xml = b.path("src/wayland/protocols/wayland.xml"),
         .wayland_protocols = b.path("src/wayland/protocols"),
+        // Keep libwayland-client out of the executable's DT_NEEDED entries.
+        // The imported module supplies the scanner's FFI through dlopen after
+        // the Wayland backend has been selected at runtime.
+        .ffi_import = "wayland_ffi",
     });
     scanner.addCustomProtocol(b.path("src/wayland/protocols/xdg-shell.xml"));
     scanner.addCustomProtocol(b.path("src/wayland/protocols/xdg-decoration-unstable-v1.xml"));
@@ -86,19 +88,32 @@ fn addLinuxWaylandSupport(
     scanner.generate("zxdg_decoration_manager_v1", 2);
     scanner.generate("wp_cursor_shape_manager_v1", 1);
 
+    const runtime_loader = b.createModule(.{
+        .root_source_file = b.path("src/linux/runtime_loader.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const wayland_ffi = b.createModule(.{
+        .root_source_file = b.path("src/linux/wayland_ffi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
     const wayland_mod = b.createModule(.{
         .root_source_file = scanner.result,
         .target = target,
         .optimize = optimize,
     });
+    // This intentional import cycle is the extension point provided by
+    // zig-wayland's Scanner.Options.ffi_import: the generated API owns the
+    // protocol types, while the FFI module owns runtime-loaded function
+    // pointers using those types.
+    wayland_mod.addImport("wayland_ffi", wayland_ffi);
+    wayland_ffi.addImport("wayland", wayland_mod);
+    wayland_ffi.addImport("runtime_loader", runtime_loader);
     module.addImport("wayland", wayland_mod);
+    module.addImport("wayland_ffi", wayland_ffi);
+    module.addImport("runtime_loader", runtime_loader);
     module.link_libc = true;
-    // The current Linux implementation keeps both native backends in one
-    // module, so both native libraries must remain linkable whenever the low
-    // backend is built. The options still control which backend may be
-    // selected at runtime; splitting the implementation is required before
-    // these dependencies can be eliminated from the link entirely.
-    if (enable_x11 or enable_wayland) module.linkSystemLibrary("wayland-client", .{});
-    if (enable_x11 or enable_wayland) module.linkSystemLibrary("xkbcommon", .{});
-    if (enable_x11 or enable_wayland) module.linkSystemLibrary("X11", .{});
 }
