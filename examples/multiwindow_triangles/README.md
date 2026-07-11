@@ -2,7 +2,8 @@
 
 This directory is a standalone Zig project: it depends on `low` through the
 local `../..` path and otherwise only fetches `vulkan-zig` and lazy Vulkan
-headers. It intentionally has no UI, rendering, or Vulkan helper libraries.
+headers. It uses `low.vulkan.targets(vk).RenderTarget` for target and frame
+lifecycle while keeping shaders and rendering commands in the example.
 
 It opens two native `low` windows. Each has an independent Vulkan surface and
 swapchain while sharing one Vulkan 1.3 device and graphics pipeline. Either
@@ -26,7 +27,13 @@ paths (the default is `low`'s automatic selection):
 ```sh
 zig build run -- --wayland
 zig build run -- --x11
+zig build run -- --offscreen
 ```
+
+`--offscreen` runs a small surface-free path: it creates an offscreen window,
+delivers a synthetic close event on one continuous frame, and exits. The
+triangle renderer itself uses presentation swapchains; an offscreen renderer
+should instead create Vulkan images directly.
 
 Without `VULKAN_SDK`, binding generation falls back to the lazy
 `vulkan_headers` dependency. You can also point the build at a registry:
@@ -41,5 +48,6 @@ zig build -Dvk_registry=/path/to/registry/vk.xml
 
 `low.vulkan.Loader(vk)` dynamically opens the system Vulkan loader, avoiding a
 link-time dependency. `low.vulkan.requiredInstanceExtensions(&context)` uses
-the backend chosen by `low`, and `low.vulkan.createSurface(vk, &context,
-window, instance)` creates the matching Wayland, Xlib, or Win32 surface.
+the backend chosen by `low`. `RenderTarget` creates the matching Wayland,
+Xlib, or Win32 surface and owns its swapchain, image views, command buffers,
+semaphores, fences, and recreation path.

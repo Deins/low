@@ -4,7 +4,7 @@ const input = @import("../input.zig");
 const win32 = @import("win32").everything;
 
 pub const BackendRequest = common.BackendRequest;
-pub const BackendKind = enum { windows };
+pub const BackendKind = common.BackendKind;
 pub const Size = common.Size;
 pub const Point = common.Point;
 pub const ContentScale = common.ContentScale;
@@ -16,27 +16,14 @@ pub const Modifiers = input.Modifiers;
 pub const CursorShape = input.CursorShape;
 pub const Key = input.Key;
 
-pub const DecorationMode = enum { auto, server_side, client_side };
-pub const WindowState = enum { normal, maximize, fullscreen };
-pub const Error = error{ OutOfMemory, WindowClassRegistrationFailed, WindowCreationFailed };
-
-pub const InitOptions = struct {
-    backend: BackendRequest = .auto,
-    app_name: [:0]const u8 = "low",
-};
-
-pub const WindowOptions = struct {
-    title: [:0]const u8,
-    size: Size = .{ .width = 1280, .height = 720 },
-    app_id: ?[:0]const u8 = null,
-    resizable: bool = true,
-    decorated: bool = true,
-    titlebar: DecorationMode = .auto,
-    state: WindowState = .normal,
-    visible: bool = true,
-    min_size: ?Size = null,
-    max_size: ?Size = null,
-};
+pub const DecorationMode = common.DecorationMode;
+pub const WindowState = common.WindowState;
+pub const Error = error{ UnsupportedPlatform, OutOfMemory, WindowClassRegistrationFailed, WindowCreationFailed };
+pub const FrameMode = common.FrameMode;
+pub const OffscreenOptions = common.OffscreenOptions;
+pub const Event = common.Event;
+pub const InitOptions = common.InitOptions;
+pub const WindowOptions = common.WindowOptions;
 
 pub const WindowCallbacks = struct {
     close: ?*const fn (*Window) void = null,
@@ -60,7 +47,8 @@ pub const Context = struct {
     windows: std.ArrayListUnmanaged(*Window) = .empty,
     clipboard: common.Clipboard = .{},
 
-    pub fn init(allocator: std.mem.Allocator, _: InitOptions) Error!Context {
+    pub fn init(allocator: std.mem.Allocator, options: InitOptions) Error!Context {
+        if (options.backend == .offscreen) return error.UnsupportedPlatform;
         if (!class_registered) {
             const wc: win32.WNDCLASSEXW = .{
                 .cbSize = @sizeOf(win32.WNDCLASSEXW),
@@ -130,6 +118,12 @@ pub const Context = struct {
     pub fn wake(_: *Context) void {
         _ = win32.PostMessageW(null, win32.WM_NULL, 0, 0);
     }
+    pub fn step(_: *Context) Error!void {
+        return error.UnsupportedPlatform;
+    }
+    pub fn nextFrame(_: *Context) Error!void {
+        return error.UnsupportedPlatform;
+    }
     pub fn clipboardText(self: *Context, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
         return self.clipboard.get(allocator);
     }
@@ -194,6 +188,9 @@ pub const Window = struct {
     /// `Context.pollEvents` or `Context.waitEvents` on the calling thread.
     pub fn setCallbacks(self: *Window, callbacks: WindowCallbacks) void {
         self.callbacks = callbacks;
+    }
+    pub fn injectEvent(_: *Window, _: Event) Error!void {
+        return error.UnsupportedPlatform;
     }
     pub fn setTitle(self: *Window, title: [:0]const u8) void {
         const wide = std.unicode.utf8ToUtf16LeAllocZ(self.ctx.allocator, title) catch return;

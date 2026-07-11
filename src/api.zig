@@ -1,6 +1,6 @@
 const std = @import("std");
-const common = @import("../common.zig");
-const input = @import("../input.zig");
+const common = @import("common.zig");
+const input = @import("input.zig");
 
 const log = std.log.scoped(.low);
 
@@ -16,48 +16,33 @@ pub const Modifiers = input.Modifiers;
 pub const CursorShape = input.CursorShape;
 pub const Key = input.Key;
 
-pub const DecorationMode = enum {
-    auto,
-    server_side,
-    client_side,
-};
-
-pub const WindowState = enum {
-    normal,
-    maximize,
-    fullscreen,
-};
+pub const DecorationMode = common.DecorationMode;
+pub const WindowState = common.WindowState;
 
 pub const Error = error{
     UnsupportedPlatform,
     BackendLibraryUnavailable,
-    StaticExecutableUnsupported,
     DisplayConnectionFailed,
     MissingRequiredGlobal,
     OutOfMemory,
     WaylandProtocolError,
     XkbInitFailed,
     SystemResources,
+    NotOffscreen,
+    ManualFrameStepping,
 };
 
-pub const InitOptions = struct {
-    backend: common.BackendRequest = .auto,
-    app_name: [:0]const u8 = "low",
-    display_name: ?[:0]const u8 = null,
-};
+/// How an offscreen context advances rendering boundaries. Rendering remains
+/// application-owned: call `nextFrame` before each rendered frame, or call
+/// `step` explicitly in manual mode.
+pub const FrameMode = common.FrameMode;
+pub const OffscreenOptions = common.OffscreenOptions;
+pub const InitOptions = common.InitOptions;
 
-pub const WindowOptions = struct {
-    title: [:0]const u8,
-    size: Size = .{ .width = 1280, .height = 720 },
-    app_id: ?[:0]const u8 = null,
-    resizable: bool = true,
-    decorated: bool = true,
-    titlebar: DecorationMode = .auto,
-    state: WindowState = .normal,
-    visible: bool = true,
-    min_size: ?Size = null,
-    max_size: ?Size = null,
-};
+/// An event injected into an offscreen window. Text is copied when queued, so
+/// its bytes need only remain valid for the duration of `injectEvent`.
+pub const Event = common.Event;
+pub const WindowOptions = common.WindowOptions;
 
 pub const WindowCallbacks = struct {
     close: ?*const fn (*Window) void = null,
@@ -80,6 +65,9 @@ pub const VTable = struct {
     create_window: *const fn (*State, WindowOptions) Error!*Window,
     pump_events: *const fn (*State, i32) Error!bool,
     wake: *const fn (*State) void,
+    step: *const fn (*State) Error!void,
+    next_frame: *const fn (*State) Error!void,
+    inject_event: *const fn (*Window, Event) Error!void,
 
     destroy_window: *const fn (*Window) void,
     native_surface: *const fn (*Window) usize,
@@ -170,6 +158,17 @@ pub const State = struct {
     pub fn wake(self: *State) void {
         self.vtable.wake(self);
     }
+
+    /// Delivers all queued offscreen events without waiting for a frame.
+    pub fn step(self: *State) Error!void {
+        return self.vtable.step(self);
+    }
+
+    /// Waits for the configured offscreen frame deadline, then delivers queued
+    /// events. In manual mode use `step` instead.
+    pub fn nextFrame(self: *State) Error!void {
+        return self.vtable.next_frame(self);
+    }
 };
 
 pub const Window = struct {
@@ -224,6 +223,12 @@ pub const Window = struct {
     /// `Context.pollEvents` or `Context.waitEvents` on the calling thread.
     pub fn setCallbacks(self: *Window, callbacks: WindowCallbacks) void {
         self.callbacks = callbacks;
+    }
+
+    /// Queues a synthetic event for an offscreen window. It is delivered by
+    /// `Context.step`, `Context.nextFrame`, or event polling.
+    pub fn injectEvent(self: *Window, event: Event) Error!void {
+        return self.ctx.vtable.inject_event(self, event);
     }
 
     pub fn setTitle(self: *Window, title: [:0]const u8) void {

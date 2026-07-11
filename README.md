@@ -8,12 +8,14 @@ With goal to be as **portable** and **cross-compilable** as possible.
 - Linux Wayland
 - Linux X11
 - Windows (Win32)
+- Offscreen / headless with injectable events for testing etc.
 - Other platforms: stub implementation returning `UnsupportedPlatform`
 
 
 ## Features
 
 - Runtime backend selection from `WAYLAND_DISPLAY`, `DISPLAY`, and `XDG_SESSION_TYPE`
+- A Linux offscreen backend for deterministic, display-server-free testing and rendering
 - Multi-window support
 - Window state queries and callbacks for resize, focus, pointer, keyboard, text, and close events
 - Wayland titlebar/decorations preference via `xdg-decoration` when available
@@ -23,7 +25,86 @@ With goal to be as **portable** and **cross-compilable** as possible.
 
 ## Backend selection and runtime dependencies
 
-Pass `.auto`, `.wayland`, or `.x11` through `InitOptions.backend`. Automatic selection uses the session type and display environment, with `XDG_SESSION_TYPE` taking precedence when set.
+On Linux, pass `.auto`, `.wayland`, `.x11`, or `.offscreen` through `InitOptions.backend`.
+Automatic selection uses the session type and display environment, with
+`XDG_SESSION_TYPE` taking precedence when set. `.offscreen` has no desktop environment and doesn't load/connect to a desktop library, instead creates vulkan render target and allows inject events as needed.
+
+### Offscreen frames and input
+
+The offscreen backend creates logical windows only: it has no native surface,
+requires no Vulkan instance extensions, and `vulkan.createSurface` returns
+`error.OffscreenSurfaceUnavailable`. Applications still own rendering.
+
+Use the default `.manual` mode when a test or renderer should advance exactly
+when it chooses:
+
+```zig
+var context = try low.Context.init(allocator, .{ .backend = .offscreen });
+defer context.deinit();
+const window = try context.createWindow(.{ .title = "test" });
+
+try window.injectEvent(.{ .key = .{ .key = .a, .action = .press } });
+try context.step(); // delivers the queued key callback
+// render one frame here
+```
+
+For a conventional rendering loop, set `.offscreen.frame_mode` to
+`.continuous`. `interval_ns = null` runs as fast as the caller renders;
+`1_000_000_000 / 60` rate-limits to 60 Hz. Each `nextFrame()` waits as needed
+and then delivers queued events. `Window.injectEvent` supports close, resize,
+scale, focus, pointer enter/motion, mouse buttons, scrolling, keys, and UTF-8
+text. The text bytes are copied when injected.
+
+```zig
+var context = try low.Context.init(allocator, .{
+    .backend = .offscreen,
+    .offscreen = .{ .frame_mode = .{ .continuous = .{
+        .interval_ns = 1_000_000_000 / 60,
+    } } },
+});
+while (!window.shouldClose()) {
+    try context.nextFrame();
+    // render one frame here
+}
+```
+
+### Optional Vulkan render-target helpers
+
+The base module remains windowing and event only. Enable the optional
+binding-agnostic render-target layer with `-Dvulkan_helpers=true`, then pass
+the generated Vulkan binding to `low.vulkan.targets(vk)`. `RenderTarget` owns
+the desktop surface/swapchain or an offscreen image ring, frame command
+buffers, synchronization, resize recreation, and layout transitions:
+
+```zig
+const RenderTarget = low.vulkan.targets(vk).RenderTarget;
+var target = try RenderTarget.init(allocator, .{
+    .context = &context,
+    .window = window,
+    .instance = instance,
+    .physical_device = physical_device,
+    .device = device,
+    .graphics_queue = graphics_queue,
+    .graphics_queue_family = graphics_queue_family,
+    .command_pool = command_pool,
+    .color_format = color_format,
+    .frames_in_flight = 2,
+    // Required only for `.offscreen` contexts:
+    // .memory_allocator = .{ .allocate_and_bind = allocate, .free = free },
+});
+defer target.deinit();
+
+var frame = try target.acquire();
+defer frame.abort();
+// Record application commands using frame.command_buffer, frame.image,
+// frame.view, and frame.extent.
+try frame.submitAndPresent();
+```
+
+The helper assumes Vulkan 1.3 synchronization-2 commands are available on
+the supplied device. On desktop, `submitAndPresent` presents the acquired
+swapchain image; offscreen targets never create a surface or swapchain and
+leave the rendered image in `transfer_src_optimal`.
 
 The selected backend loads only its own system libraries at runtime:
 
@@ -40,13 +121,6 @@ failure. Explicit `.wayland` and `.x11` requests remain strict.
 The loaded handles intentionally remain alive for the process lifetime, so
 generated Wayland protocol calls and live windows cannot retain invalid
 function pointers.
-
-This is not a fully static desktop executable model. Static Linux executables
-cannot reliably load ordinary shared X11/Wayland client libraries and their
-dependency graphs. `low` returns `error.StaticExecutableUnsupported` before
-attempting that path. Distribute a dynamically linked core instead; for a
-widely compatible glibc build, choose a suitable old GNU target such as
-`x86_64-linux-gnu.2.17`.
 
 ## Limitations
 
@@ -99,10 +173,14 @@ to be installed on the destination machine at runtime.
 The Windows backend is implemented with Win32 and exposes the same `Context` and
 `Window` API, including native HWND access for Vulkan (`VK_KHR_win32_surface`).
 
-## Standalone Vulkan example
+## Standalone Vulkan examples
+
+[`examples/basic_low_level`](examples/basic_low_level) shows the explicit,
+raw setup path: low window, Vulkan surface, device, swapchain, and image
+views. It does not enable the helper layer.
 
 [`examples/multiwindow_triangles`](examples/multiwindow_triangles) is a complete,
-independent Zig package that uses `low`, `vulkan-zig`, and no rendering or UI
-framework. It opens two windows with separate surfaces and swapchains, while
-sharing a Vulkan 1.3 device and pipeline. Its README includes the from-scratch
-build command and SDK setup.
+independent Zig package that uses `low`, `vulkan-zig`, and the optional
+`RenderTarget` layer. It opens two windows with separate targets while sharing
+a Vulkan 1.3 device and pipeline. Its README includes the from-scratch build
+command and SDK setup.

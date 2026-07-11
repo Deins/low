@@ -1,5 +1,5 @@
 const std = @import("std");
-const api = @import("api.zig");
+const api = @import("../api.zig");
 const native = @import("wayland_native.zig");
 
 const Data = struct {
@@ -30,7 +30,6 @@ fn mapError(err: anyerror) api.Error {
     return switch (err) {
         error.UnsupportedPlatform => error.UnsupportedPlatform,
         error.BackendLibraryUnavailable => error.BackendLibraryUnavailable,
-        error.StaticExecutableUnsupported => error.StaticExecutableUnsupported,
         error.DisplayConnectionFailed => error.DisplayConnectionFailed,
         error.MissingRequiredGlobal => error.MissingRequiredGlobal,
         error.OutOfMemory => error.OutOfMemory,
@@ -134,6 +133,15 @@ fn destroyWindow(window: *api.Window) void {
 
 fn nativeSurface(window: *api.Window) usize {
     return nativeWindow(window).nativeSurface();
+}
+fn step(_: *api.State) api.Error!void {
+    return error.NotOffscreen;
+}
+fn nextFrame(_: *api.State) api.Error!void {
+    return error.NotOffscreen;
+}
+fn injectEvent(_: *api.Window, _: api.Event) api.Error!void {
+    return error.NotOffscreen;
 }
 
 fn setTitle(window: *api.Window, title: [:0]const u8) void {
@@ -247,6 +255,9 @@ const vtable: api.VTable = .{
     .create_window = createWindow,
     .pump_events = pumpEvents,
     .wake = wake,
+    .step = step,
+    .next_frame = nextFrame,
+    .inject_event = injectEvent,
     .destroy_window = destroyWindow,
     .native_surface = nativeSurface,
     .set_title = setTitle,

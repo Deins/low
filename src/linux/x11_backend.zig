@@ -1,5 +1,5 @@
 const std = @import("std");
-const api = @import("api.zig");
+const api = @import("../api.zig");
 const input = @import("../input.zig");
 const x11 = @import("x11.zig");
 
@@ -66,7 +66,6 @@ pub fn init(allocator: std.mem.Allocator, options: api.InitOptions) api.Error!*a
 
 fn mapLibraryLoadError(err: anyerror) api.Error {
     return switch (err) {
-        error.StaticExecutableUnsupported => error.StaticExecutableUnsupported,
         else => error.BackendLibraryUnavailable,
     };
 }
@@ -170,6 +169,15 @@ fn destroyWindow(window: *api.Window) void {
 
 fn nativeSurface(window: *api.Window) usize {
     return windowData(window).handle;
+}
+fn step(_: *api.State) api.Error!void {
+    return error.NotOffscreen;
+}
+fn nextFrame(_: *api.State) api.Error!void {
+    return error.NotOffscreen;
+}
+fn injectEvent(_: *api.Window, _: api.Event) api.Error!void {
+    return error.NotOffscreen;
 }
 fn setTitle(window: *api.Window, title: [:0]const u8) void {
     setTitleNative(stateData(window.ctx), windowData(window).handle, title);
@@ -509,6 +517,9 @@ const vtable: api.VTable = .{
     .create_window = createWindow,
     .pump_events = pumpEvents,
     .wake = wake,
+    .step = step,
+    .next_frame = nextFrame,
+    .inject_event = injectEvent,
     .destroy_window = destroyWindow,
     .native_surface = nativeSurface,
     .set_title = setTitle,

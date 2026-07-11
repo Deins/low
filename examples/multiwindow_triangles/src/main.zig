@@ -3,6 +3,7 @@ const low = @import("low");
 const vk = @import("vulkan");
 
 const VulkanLoader = low.vulkan.Loader(vk);
+const RenderTarget = low.vulkan.targets(vk).RenderTarget;
 const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
 const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
 
@@ -34,9 +35,8 @@ const Renderer = struct {
     fn init(
         gpa: std.mem.Allocator,
         instance: vk.InstanceProxy,
-        surfaces: []const vk.SurfaceKHR,
     ) !Renderer {
-        const selection = try findDevice(gpa, instance, surfaces);
+        const selection = try findDevice(gpa, instance);
 
         var features_13 = vk.PhysicalDeviceVulkan13Features{
             .synchronization_2 = .true,
@@ -73,13 +73,7 @@ const Renderer = struct {
         }, null);
         errdefer device.destroyCommandPool(command_pool, null);
 
-        const formats = try instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
-            selection.physical_device,
-            surfaces[0],
-            gpa,
-        );
-        defer gpa.free(formats);
-        const color_format = chooseSurfaceFormat(formats).format;
+        const color_format: vk.Format = .b8g8r8a8_unorm;
 
         const pipeline_layout = try createPipelineLayout(device);
         errdefer device.destroyPipelineLayout(pipeline_layout, null);
@@ -113,16 +107,7 @@ const Renderer = struct {
 
 const AppWindow = struct {
     window: *low.Window,
-    surface: vk.SurfaceKHR,
-    swapchain: vk.SwapchainKHR = .null_handle,
-    images: []vk.Image = &.{},
-    image_views: []vk.ImageView = &.{},
-    extent: vk.Extent2D = .{ .width = 0, .height = 0 },
-    command_buffer: vk.CommandBuffer = .null_handle,
-    image_available: vk.Semaphore = .null_handle,
-    render_finished: vk.Semaphore = .null_handle,
-    in_flight: vk.Fence = .null_handle,
-    needs_recreate: bool = false,
+    target: RenderTarget,
     position: [2]f32,
     velocity: [2]f32,
     color: [3]f32,
@@ -130,52 +115,39 @@ const AppWindow = struct {
     fn init(
         gpa: std.mem.Allocator,
         renderer: *const Renderer,
+        context: *low.Context,
         window: *low.Window,
-        surface: vk.SurfaceKHR,
         position: [2]f32,
         velocity: [2]f32,
         color: [3]f32,
     ) !AppWindow {
-        var result: AppWindow = .{
+        return .{
             .window = window,
-            .surface = surface,
+            .target = try RenderTarget.init(gpa, .{
+                .context = context,
+                .window = window,
+                .instance = renderer.instance,
+                .physical_device = renderer.physical_device,
+                .device = renderer.device,
+                .graphics_queue = renderer.graphics_queue,
+                .graphics_queue_family = renderer.graphics_queue_family,
+                .command_pool = renderer.command_pool,
+                .color_format = renderer.color_format,
+                .frames_in_flight = 2,
+            }),
             .position = position,
             .velocity = velocity,
             .color = color,
         };
-        errdefer result.deinit(gpa, renderer);
-
-        try result.createSwapchain(gpa, renderer);
-        var command_buffers: [1]vk.CommandBuffer = undefined;
-        try renderer.device.allocateCommandBuffers(&.{
-            .command_pool = renderer.command_pool,
-            .level = .primary,
-            .command_buffer_count = command_buffers.len,
-        }, &command_buffers);
-        result.command_buffer = command_buffers[0];
-        result.image_available = try renderer.device.createSemaphore(&.{}, null);
-        result.render_finished = try renderer.device.createSemaphore(&.{}, null);
-        result.in_flight = try renderer.device.createFence(&.{
-            .flags = .{ .signaled_bit = true },
-        }, null);
-
-        return result;
     }
 
     fn installCallbacks(self: *AppWindow) void {
         self.window.setUserData(self);
-        self.window.setCallbacks(.{
-            .framebuffer_resize = onFramebufferResize,
-            .mouse_button = onMouseButton,
-        });
+        self.window.setCallbacks(.{ .mouse_button = onMouseButton });
     }
 
-    fn deinit(self: *AppWindow, gpa: std.mem.Allocator, renderer: *const Renderer) void {
-        if (self.in_flight != .null_handle) renderer.device.destroyFence(self.in_flight, null);
-        if (self.render_finished != .null_handle) renderer.device.destroySemaphore(self.render_finished, null);
-        if (self.image_available != .null_handle) renderer.device.destroySemaphore(self.image_available, null);
-        self.destroySwapchain(gpa, renderer);
-        if (self.surface != .null_handle) renderer.instance.destroySurfaceKHR(self.surface, null);
+    fn deinit(self: *AppWindow) void {
+        self.target.deinit();
         self.window.deinit();
         self.* = undefined;
     }
@@ -193,49 +165,15 @@ const AppWindow = struct {
         }
     }
 
-    fn draw(self: *AppWindow, gpa: std.mem.Allocator, renderer: *const Renderer) !void {
-        if (self.needs_recreate) {
-            try self.recreateSwapchain(gpa, renderer);
-            return;
-        }
-        if (self.extent.width == 0 or self.extent.height == 0) return;
-
-        _ = try renderer.device.waitForFences(&.{self.in_flight}, .true, std.math.maxInt(u64));
-        const acquired = renderer.device.acquireNextImageKHR(
-            self.swapchain,
-            std.math.maxInt(u64),
-            self.image_available,
-            .null_handle,
-        ) catch |err| switch (err) {
-            error.OutOfDateKHR => {
-                self.needs_recreate = true;
-                return;
-            },
+    fn draw(self: *AppWindow, renderer: *const Renderer) !void {
+        var frame = self.target.acquire() catch |err| switch (err) {
+            error.FrameSkipped, error.FrameOutOfDate => return,
             else => return err,
         };
-        const recreate_after_present = acquired.result == .suboptimal_khr;
-
-        try renderer.device.resetFences(&.{self.in_flight});
-        try renderer.device.resetCommandBuffer(self.command_buffer, .{});
-        try renderer.device.beginCommandBuffer(self.command_buffer, &.{
-            .flags = .{ .one_time_submit_bit = true },
-        });
-
-        const image = self.image_views[acquired.image_index];
-        transitionImage(
-            renderer.device,
-            self.command_buffer,
-            self.swapchainImage(acquired.image_index),
-            .undefined,
-            .color_attachment_optimal,
-            .{},
-            .{},
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-        );
-
+        defer frame.abort();
+        const command_buffer = frame.command_buffer;
         const color_attachment = vk.RenderingAttachmentInfo{
-            .image_view = image,
+            .image_view = frame.view,
             .image_layout = .color_attachment_optimal,
             .resolve_mode = .{},
             .resolve_image_layout = .undefined,
@@ -243,8 +181,8 @@ const AppWindow = struct {
             .store_op = .store,
             .clear_value = .{ .color = .{ .float_32 = .{ 0.018, 0.025, 0.06, 1.0 } } },
         };
-        renderer.device.cmdBeginRendering(self.command_buffer, &.{
-            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.extent },
+        renderer.device.cmdBeginRendering(command_buffer, &.{
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = frame.extent },
             .layer_count = 1,
             .view_mask = 0,
             .color_attachment_count = 1,
@@ -253,163 +191,20 @@ const AppWindow = struct {
         const viewport = vk.Viewport{
             .x = 0,
             .y = 0,
-            .width = @floatFromInt(self.extent.width),
-            .height = @floatFromInt(self.extent.height),
+            .width = @floatFromInt(frame.extent.width),
+            .height = @floatFromInt(frame.extent.height),
             .min_depth = 0,
             .max_depth = 1,
         };
-        const scissor = vk.Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = self.extent };
-        renderer.device.cmdSetViewport(self.command_buffer, 0, &.{viewport});
-        renderer.device.cmdSetScissor(self.command_buffer, 0, &.{scissor});
-        renderer.device.cmdBindPipeline(self.command_buffer, .graphics, renderer.pipeline);
+        const scissor = vk.Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = frame.extent };
+        renderer.device.cmdSetViewport(command_buffer, 0, &.{viewport});
+        renderer.device.cmdSetScissor(command_buffer, 0, &.{scissor});
+        renderer.device.cmdBindPipeline(command_buffer, .graphics, renderer.pipeline);
         const push = PushConstants{ .offset = self.position, .color = self.color };
-        renderer.device.cmdPushConstants(
-            self.command_buffer,
-            renderer.pipeline_layout,
-            .{ .vertex_bit = true },
-            0,
-            @sizeOf(PushConstants),
-            @ptrCast(&push),
-        );
-        renderer.device.cmdDraw(self.command_buffer, 3, 1, 0, 0);
-        renderer.device.cmdEndRendering(self.command_buffer);
-
-        transitionImage(
-            renderer.device,
-            self.command_buffer,
-            self.swapchainImage(acquired.image_index),
-            .color_attachment_optimal,
-            .present_src_khr,
-            .{ .color_attachment_output_bit = true },
-            .{ .color_attachment_write_bit = true },
-            .{},
-            .{},
-        );
-        try renderer.device.endCommandBuffer(self.command_buffer);
-
-        const wait_info = [_]vk.SemaphoreSubmitInfo{.{
-            .semaphore = self.image_available,
-            .value = 0,
-            .stage_mask = .{ .color_attachment_output_bit = true },
-            .device_index = 0,
-        }};
-        const command_info = [_]vk.CommandBufferSubmitInfo{.{
-            .command_buffer = self.command_buffer,
-            .device_mask = 0,
-        }};
-        const signal_info = [_]vk.SemaphoreSubmitInfo{.{
-            .semaphore = self.render_finished,
-            .value = 0,
-            .stage_mask = .{ .all_graphics_bit = true },
-            .device_index = 0,
-        }};
-        try renderer.device.queueSubmit2(renderer.graphics_queue, &.{.{
-            .wait_semaphore_info_count = wait_info.len,
-            .p_wait_semaphore_infos = &wait_info,
-            .command_buffer_info_count = command_info.len,
-            .p_command_buffer_infos = &command_info,
-            .signal_semaphore_info_count = signal_info.len,
-            .p_signal_semaphore_infos = &signal_info,
-        }}, self.in_flight);
-
-        const swapchains = [_]vk.SwapchainKHR{self.swapchain};
-        const indices = [_]u32{acquired.image_index};
-        const present = renderer.device.queuePresentKHR(renderer.graphics_queue, &.{
-            .wait_semaphore_count = 1,
-            .p_wait_semaphores = &.{self.render_finished},
-            .swapchain_count = 1,
-            .p_swapchains = &swapchains,
-            .p_image_indices = &indices,
-        }) catch |err| switch (err) {
-            error.OutOfDateKHR => {
-                self.needs_recreate = true;
-                return;
-            },
-            else => return err,
-        };
-        self.needs_recreate = recreate_after_present or present == .suboptimal_khr;
-    }
-
-    fn swapchainImage(self: *const AppWindow, index: u32) vk.Image {
-        return self.images[index];
-    }
-
-    fn createSwapchain(self: *AppWindow, gpa: std.mem.Allocator, renderer: *const Renderer) !void {
-        const capabilities = try renderer.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
-            renderer.physical_device,
-            self.surface,
-        );
-        const formats = try renderer.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
-            renderer.physical_device,
-            self.surface,
-            gpa,
-        );
-        defer gpa.free(formats);
-        const format = findFormat(formats, renderer.color_format) orelse return error.IncompatibleSurfaceFormats;
-
-        self.extent = chooseExtent(capabilities, self.window.getFramebufferSize());
-        if (self.extent.width == 0 or self.extent.height == 0) {
-            self.needs_recreate = true;
-            return;
-        }
-        var image_count = capabilities.min_image_count + 1;
-        if (capabilities.max_image_count != 0) image_count = @min(image_count, capabilities.max_image_count);
-
-        self.swapchain = try renderer.device.createSwapchainKHR(&.{
-            .surface = self.surface,
-            .min_image_count = image_count,
-            .image_format = format.format,
-            .image_color_space = format.color_space,
-            .image_extent = self.extent,
-            .image_array_layers = 1,
-            .image_usage = .{ .color_attachment_bit = true },
-            .image_sharing_mode = .exclusive,
-            .pre_transform = capabilities.current_transform,
-            .composite_alpha = chooseCompositeAlpha(capabilities.supported_composite_alpha),
-            .present_mode = .fifo_khr,
-            .clipped = .true,
-        }, null);
-        errdefer self.destroySwapchain(gpa, renderer);
-
-        self.images = try renderer.device.getSwapchainImagesAllocKHR(self.swapchain, gpa);
-        self.image_views = try gpa.alloc(vk.ImageView, self.images.len);
-        @memset(self.image_views, .null_handle);
-        for (self.images, self.image_views) |image, *view| {
-            view.* = try renderer.device.createImageView(&.{
-                .image = image,
-                .view_type = .@"2d",
-                .format = renderer.color_format,
-                .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-                .subresource_range = .{
-                    .aspect_mask = .{ .color_bit = true },
-                    .base_mip_level = 0,
-                    .level_count = 1,
-                    .base_array_layer = 0,
-                    .layer_count = 1,
-                },
-            }, null);
-        }
-    }
-
-    fn destroySwapchain(self: *AppWindow, gpa: std.mem.Allocator, renderer: *const Renderer) void {
-        for (self.image_views) |view| {
-            if (view != .null_handle) renderer.device.destroyImageView(view, null);
-        }
-        if (self.image_views.len != 0) gpa.free(self.image_views);
-        if (self.images.len != 0) gpa.free(self.images);
-        if (self.swapchain != .null_handle) renderer.device.destroySwapchainKHR(self.swapchain, null);
-        self.swapchain = .null_handle;
-        self.image_views = &.{};
-        self.images = &.{};
-    }
-
-    fn recreateSwapchain(self: *AppWindow, gpa: std.mem.Allocator, renderer: *const Renderer) !void {
-        const size = self.window.getFramebufferSize();
-        if (size.width <= 0 or size.height <= 0) return;
-        try renderer.device.deviceWaitIdle();
-        self.destroySwapchain(gpa, renderer);
-        try self.createSwapchain(gpa, renderer);
-        self.needs_recreate = false;
+        renderer.device.cmdPushConstants(command_buffer, renderer.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), @ptrCast(&push));
+        renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
+        renderer.device.cmdEndRendering(command_buffer);
+        try frame.submitAndPresent();
     }
 };
 
@@ -418,12 +213,14 @@ pub fn main(init: std.process.Init) !void {
     defer std.debug.assert(gpa_state.deinit() == .ok);
     const gpa = gpa_state.allocator();
 
+    const backend = try requestedBackend(try init.minimal.args.toSlice(init.arena.allocator()));
+    if (backend == .offscreen) return runOffscreen(gpa);
+
     try VulkanLoader.init();
     defer VulkanLoader.deinit();
     const get_instance_proc_addr = try VulkanLoader.getInstanceProcAddr();
     const base = vk.BaseWrapper.load(get_instance_proc_addr);
 
-    const backend = try requestedBackend(try init.minimal.args.toSlice(init.arena.allocator()));
     var context = try low.Context.init(gpa, .{
         .app_name = "low.multiwindow_triangles",
         .backend = backend,
@@ -453,35 +250,33 @@ pub fn main(init: std.process.Init) !void {
         .title = "low Vulkan — coral triangle",
         .size = .{ .width = 640, .height = 480 },
     });
-    const first_surface = try low.vulkan.createSurface(vk, &context, first_window, instance);
     const second_window = try context.createWindow(.{
         .title = "low Vulkan — cyan triangle",
         .size = .{ .width = 520, .height = 400 },
     });
-    const second_surface = try low.vulkan.createSurface(vk, &context, second_window, instance);
 
-    var renderer = try Renderer.init(gpa, instance, &.{ first_surface, second_surface });
+    var renderer = try Renderer.init(gpa, instance);
     defer renderer.deinit();
     var first: ?AppWindow = try AppWindow.init(
         gpa,
         &renderer,
+        &context,
         first_window,
-        first_surface,
         .{ -0.3, 0.1 },
         .{ 0.73, 0.52 },
         .{ 1.0, 0.30, 0.20 },
     );
-    defer if (first) |*app_window| app_window.deinit(gpa, &renderer);
+    defer if (first) |*app_window| app_window.deinit();
     var second: ?AppWindow = try AppWindow.init(
         gpa,
         &renderer,
+        &context,
         second_window,
-        second_surface,
         .{ 0.25, -0.2 },
         .{ -0.61, 0.67 },
         .{ 0.18, 0.90, 0.95 },
     );
-    defer if (second) |*app_window| app_window.deinit(gpa, &renderer);
+    defer if (second) |*app_window| app_window.deinit();
     first.?.installCallbacks();
     second.?.installCallbacks();
 
@@ -497,11 +292,11 @@ pub fn main(init: std.process.Init) !void {
             // until its in-flight Vulkan work can no longer reference it.
             try renderer.device.deviceWaitIdle();
             if (close_first) {
-                if (first) |*app_window| app_window.deinit(gpa, &renderer);
+                if (first) |*app_window| app_window.deinit();
                 first = null;
             }
             if (close_second) {
-                if (second) |*app_window| app_window.deinit(gpa, &renderer);
+                if (second) |*app_window| app_window.deinit();
                 second = null;
             }
             if (first == null and second == null) break;
@@ -512,17 +307,35 @@ pub fn main(init: std.process.Init) !void {
         previous = now;
         if (first) |*app_window| {
             app_window.update(dt);
-            try app_window.draw(gpa, &renderer);
+            try app_window.draw(&renderer);
         }
         if (second) |*app_window| {
             app_window.update(dt);
-            try app_window.draw(gpa, &renderer);
+            try app_window.draw(&renderer);
         }
     }
     try renderer.device.deviceWaitIdle();
 }
 
-fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy, surfaces: []const vk.SurfaceKHR) !DeviceSelection {
+/// The triangle demo renders to presentation swapchains, so it cannot render
+/// through `low`'s surface-free backend. Keep the command useful by exercising
+/// offscreen window creation, queued input, and a continuous frame boundary.
+fn runOffscreen(allocator: std.mem.Allocator) !void {
+    var context = try low.Context.init(allocator, .{
+        .app_name = "low.multiwindow_triangles",
+        .backend = .offscreen,
+        .offscreen = .{ .frame_mode = .{ .continuous = .{} } },
+    });
+    defer context.deinit();
+
+    const window = try context.createWindow(.{ .title = "offscreen triangle demo" });
+    try window.injectEvent(.close);
+    try context.nextFrame();
+    std.debug.assert(window.shouldClose());
+    std.log.info("using offscreen backend (one unpresented frame)", .{});
+}
+
+fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy) !DeviceSelection {
     const physical_devices = try instance.enumeratePhysicalDevicesAlloc(gpa);
     defer gpa.free(physical_devices);
     for (physical_devices) |physical_device| {
@@ -533,14 +346,7 @@ fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy, surfaces: []co
         defer gpa.free(families);
         for (families, 0..) |family, index| {
             if (!family.queue_flags.graphics_bit) continue;
-            var can_present_everywhere = true;
-            for (surfaces) |surface| {
-                if (try instance.getPhysicalDeviceSurfaceSupportKHR(physical_device, @intCast(index), surface) != .true) {
-                    can_present_everywhere = false;
-                    break;
-                }
-            }
-            if (can_present_everywhere) return .{
+            return .{
                 .physical_device = physical_device,
                 .graphics_queue_family = @intCast(index),
             };
@@ -654,68 +460,6 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
     return pipelines[0];
 }
 
-fn transitionImage(
-    device: vk.DeviceProxy,
-    command_buffer: vk.CommandBuffer,
-    image: vk.Image,
-    old_layout: vk.ImageLayout,
-    new_layout: vk.ImageLayout,
-    src_stage: vk.PipelineStageFlags2,
-    src_access: vk.AccessFlags2,
-    dst_stage: vk.PipelineStageFlags2,
-    dst_access: vk.AccessFlags2,
-) void {
-    const barrier = vk.ImageMemoryBarrier2{
-        .src_stage_mask = src_stage,
-        .src_access_mask = src_access,
-        .dst_stage_mask = dst_stage,
-        .dst_access_mask = dst_access,
-        .old_layout = old_layout,
-        .new_layout = new_layout,
-        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-        .image = image,
-        .subresource_range = .{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        },
-    };
-    device.cmdPipelineBarrier2(command_buffer, &.{
-        .image_memory_barrier_count = 1,
-        .p_image_memory_barriers = @ptrCast(&barrier),
-    });
-}
-
-fn chooseSurfaceFormat(formats: []const vk.SurfaceFormatKHR) vk.SurfaceFormatKHR {
-    for (formats) |format| {
-        if (format.format == .b8g8r8a8_unorm and format.color_space == .srgb_nonlinear_khr) return format;
-    }
-    return formats[0];
-}
-
-fn findFormat(formats: []const vk.SurfaceFormatKHR, desired: vk.Format) ?vk.SurfaceFormatKHR {
-    for (formats) |format| if (format.format == desired) return format;
-    return null;
-}
-
-fn chooseExtent(capabilities: vk.SurfaceCapabilitiesKHR, size: low.Size) vk.Extent2D {
-    if (capabilities.current_extent.width != std.math.maxInt(u32)) return capabilities.current_extent;
-    return .{
-        .width = std.math.clamp(@as(u32, @intCast(@max(size.width, 1))), capabilities.min_image_extent.width, capabilities.max_image_extent.width),
-        .height = std.math.clamp(@as(u32, @intCast(@max(size.height, 1))), capabilities.min_image_extent.height, capabilities.max_image_extent.height),
-    };
-}
-
-fn chooseCompositeAlpha(supported: vk.CompositeAlphaFlagsKHR) vk.CompositeAlphaFlagsKHR {
-    if (supported.opaque_bit_khr) return .{ .opaque_bit_khr = true };
-    if (supported.pre_multiplied_bit_khr) return .{ .pre_multiplied_bit_khr = true };
-    if (supported.post_multiplied_bit_khr) return .{ .post_multiplied_bit_khr = true };
-    return .{ .inherit_bit_khr = true };
-}
-
 fn requestedBackend(args: []const [:0]const u8) !low.BackendRequest {
     var selected: ?low.BackendRequest = null;
     for (args[1..]) |arg| {
@@ -723,17 +467,14 @@ fn requestedBackend(args: []const [:0]const u8) !low.BackendRequest {
             .x11
         else if (std.mem.eql(u8, arg, "--wayland"))
             .wayland
+        else if (std.mem.eql(u8, arg, "--offscreen"))
+            .offscreen
         else
             return error.UnknownArgument;
         if (selected != null) return error.ConflictingBackendArguments;
         selected = backend;
     }
     return selected orelse .auto;
-}
-
-fn onFramebufferResize(window: *low.Window, _: low.Size) void {
-    const self: *AppWindow = @ptrCast(@alignCast(window.getUserData() orelse return));
-    self.needs_recreate = true;
 }
 
 fn onMouseButton(window: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {

@@ -5,6 +5,15 @@
 //! ownership of its Vulkan version and loader strategy.
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
+
+/// Optional, binding-agnostic Vulkan render-target helpers. Enable with
+/// `-Dvulkan_helpers=true`; callers still supply their own `vulkan-zig`
+/// module, device proxy, and memory allocator.
+pub fn targets(comptime vk: type) type {
+    if (!build_options.vulkan_helpers) @compileError("enable -Dvulkan_helpers=true");
+    return @import("vulkan/targets.zig").Api(vk);
+}
 
 /// The instance extensions required by the backend selected by `context`.
 ///
@@ -38,6 +47,8 @@ pub fn createSurface(comptime vk: type, context: anytype, window: anytype, insta
                 .dpy = @ptrCast(@alignCast(window.nativeDisplay())),
                 .window = @intCast(window.nativeSurface()),
             }, null),
+            .offscreen => error.OffscreenSurfaceUnavailable,
+            .windows => error.UnsupportedPlatform,
         };
     }
 

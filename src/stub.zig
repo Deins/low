@@ -17,34 +17,13 @@ pub const MouseButton = input.MouseButton;
 pub const Modifiers = input.Modifiers;
 pub const CursorShape = input.CursorShape;
 pub const Key = input.Key;
-pub const DecorationMode = enum {
-    auto,
-    server_side,
-    client_side,
-};
-pub const WindowState = enum {
-    normal,
-    maximize,
-    fullscreen,
-};
-
-pub const InitOptions = struct {
-    backend: BackendRequest = .auto,
-    app_name: [:0]const u8 = "low",
-};
-
-pub const WindowOptions = struct {
-    title: [:0]const u8,
-    size: Size = .{ .width = 1280, .height = 720 },
-    app_id: ?[:0]const u8 = null,
-    resizable: bool = true,
-    decorated: bool = true,
-    titlebar: DecorationMode = .auto,
-    state: WindowState = .normal,
-    visible: bool = true,
-    min_size: ?Size = null,
-    max_size: ?Size = null,
-};
+pub const DecorationMode = common.DecorationMode;
+pub const WindowState = common.WindowState;
+pub const FrameMode = common.FrameMode;
+pub const OffscreenOptions = common.OffscreenOptions;
+pub const Event = common.Event;
+pub const InitOptions = common.InitOptions;
+pub const WindowOptions = common.WindowOptions;
 
 pub const WindowCallbacks = struct {};
 
@@ -69,6 +48,12 @@ pub const Context = struct {
         return error.UnsupportedPlatform;
     }
     pub fn wake(_: *Context) void {}
+    pub fn step(_: *Context) !void {
+        return error.UnsupportedPlatform;
+    }
+    pub fn nextFrame(_: *Context) !void {
+        return error.UnsupportedPlatform;
+    }
     pub fn clipboardText(self: *Context, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
         return self.clipboard.get(allocator);
     }
@@ -84,4 +69,7 @@ pub const Window = struct {
     pub fn deinit(_: *Window) void {}
     pub fn setCallbacks(_: *Window, _: WindowCallbacks) void {}
     pub fn setTextInputRect(_: *Window, _: ?TextInputRect) void {}
+    pub fn injectEvent(_: *Window, _: Event) !void {
+        return error.UnsupportedPlatform;
+    }
 };

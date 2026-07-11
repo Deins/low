@@ -1,9 +1,10 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const common = @import("../common.zig");
-const api = @import("api.zig");
+const api = @import("../api.zig");
 const wayland_backend = @import("wayland_backend.zig");
 const x11_backend = @import("x11_backend.zig");
+const offscreen_backend = @import("../offscreen_backend.zig").Backend(api);
 
 pub const BackendRequest = common.BackendRequest;
 pub const BackendKind = api.BackendKind;
@@ -22,6 +23,9 @@ pub const Key = api.Key;
 pub const DecorationMode = api.DecorationMode;
 pub const WindowState = api.WindowState;
 pub const Error = api.Error;
+pub const FrameMode = api.FrameMode;
+pub const OffscreenOptions = api.OffscreenOptions;
+pub const Event = api.Event;
 pub const InitOptions = api.InitOptions;
 pub const WindowOptions = api.WindowOptions;
 pub const WindowCallbacks = api.WindowCallbacks;
@@ -37,6 +41,7 @@ pub const Context = struct {
             .display = environmentValue("DISPLAY"),
         };
         const selected = switch (options.backend) {
+            .offscreen => return .{ .state = try initBackend(allocator, options, .offscreen) },
             .wayland => return .{ .state = try initBackend(allocator, options, .wayland) },
             .x11 => return .{ .state = try initBackend(allocator, options, .x11) },
             .auto => common.detectBackend(env),
@@ -45,10 +50,14 @@ pub const Context = struct {
             const alternate: BackendKind = switch (selected) {
                 .wayland => .x11,
                 .x11 => .wayland,
+                .offscreen => unreachable,
+                .windows => unreachable,
             };
             const available = switch (alternate) {
                 .wayland => env.wayland_display != null and build_options.wayland,
                 .x11 => env.display != null and build_options.x11,
+                .offscreen => true,
+                .windows => false,
             };
             if (available and shouldFallback(first_error)) {
                 return .{ .state = initBackend(allocator, options, alternate) catch |fallback_error| return fallback_error };
@@ -86,6 +95,12 @@ pub const Context = struct {
     pub fn wake(self: *Context) void {
         self.state.wake();
     }
+    pub fn step(self: *Context) Error!void {
+        return self.state.step();
+    }
+    pub fn nextFrame(self: *Context) Error!void {
+        return self.state.nextFrame();
+    }
     pub fn clipboardText(self: *Context, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
         return self.state.clipboardText(allocator);
     }
@@ -101,6 +116,8 @@ fn initBackend(allocator: std.mem.Allocator, options: InitOptions, selected: Bac
     return switch (selected) {
         .wayland => if (build_options.wayland) wayland_backend.init(allocator, options) else error.UnsupportedPlatform,
         .x11 => if (build_options.x11) x11_backend.init(allocator, options) else error.UnsupportedPlatform,
+        .offscreen => offscreen_backend.init(allocator, options),
+        .windows => error.UnsupportedPlatform,
     };
 }
 

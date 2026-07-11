@@ -1,14 +1,19 @@
 const std = @import("std");
+const input = @import("input.zig");
 
 pub const BackendRequest = enum {
     auto,
     wayland,
     x11,
+    /// An in-process backend which never connects to a display server.
+    offscreen,
 };
 
 pub const BackendKind = enum {
     wayland,
     x11,
+    offscreen,
+    windows,
 };
 
 pub const Environment = struct {
@@ -59,6 +64,58 @@ pub const TextInputRect = struct {
 
 /// The desktop colour preference when the platform can determine one.
 pub const ColorScheme = enum { light, dark };
+
+/// Backend-neutral window configuration.
+pub const DecorationMode = enum { auto, server_side, client_side };
+pub const WindowState = enum { normal, maximize, fullscreen };
+
+/// How an offscreen context advances application-owned render boundaries.
+pub const FrameMode = union(enum) {
+    manual,
+    /// `interval_ns = null` runs without deliberate throttling.
+    continuous: struct { interval_ns: ?u64 = null },
+};
+
+pub const OffscreenOptions = struct {
+    frame_mode: FrameMode = .manual,
+};
+
+pub const InitOptions = struct {
+    backend: BackendRequest = .auto,
+    app_name: [:0]const u8 = "low",
+    /// Used by desktop backends that support selecting a named display.
+    display_name: ?[:0]const u8 = null,
+    offscreen: OffscreenOptions = .{},
+};
+
+pub const WindowOptions = struct {
+    title: [:0]const u8,
+    size: Size = .{ .width = 1280, .height = 720 },
+    app_id: ?[:0]const u8 = null,
+    resizable: bool = true,
+    decorated: bool = true,
+    titlebar: DecorationMode = .auto,
+    state: WindowState = .normal,
+    visible: bool = true,
+    min_size: ?Size = null,
+    max_size: ?Size = null,
+};
+
+/// A synthetic event for an offscreen window. Text is copied by the offscreen
+/// backend when queued.
+pub const Event = union(enum) {
+    close: void,
+    resize: Size,
+    framebuffer_resize: Size,
+    scale: ContentScale,
+    focus: bool,
+    cursor_enter: bool,
+    cursor_motion: Point,
+    mouse_button: struct { button: input.MouseButton, action: input.Action, mods: input.Modifiers = .{} },
+    scroll: struct { x: f64, y: f64 },
+    key: struct { key: input.Key, raw_keycode: u32 = 0, action: input.Action, mods: input.Modifiers = .{} },
+    text: []const u8,
+};
 
 /// A small, allocator-owned clipboard fallback.  Backends which have a native
 /// clipboard can replace this later without changing the public API; keeping a

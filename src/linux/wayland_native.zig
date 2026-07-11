@@ -549,7 +549,6 @@ pub const WindowState = enum {
 pub const Error = error{
     UnsupportedPlatform,
     BackendLibraryUnavailable,
-    StaticExecutableUnsupported,
     DisplayConnectionFailed,
     MissingRequiredGlobal,
     OutOfMemory,
@@ -683,7 +682,6 @@ pub const State = struct {
 
     fn mapLibraryLoadError(err: wayland_ffi.Error) Error {
         return switch (err) {
-            error.StaticExecutableUnsupported => error.StaticExecutableUnsupported,
             error.LibraryNotFound, error.MissingSymbol => error.BackendLibraryUnavailable,
         };
     }
