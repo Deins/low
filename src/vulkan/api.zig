@@ -63,6 +63,7 @@ pub const StructureType = enum(i32) {
     device_create_info = 3,
     submit_info = 4,
     memory_allocate_info = 5,
+    buffer_create_info = 12,
     fence_create_info = 8,
     semaphore_create_info = 9,
     image_create_info = 14,
@@ -70,6 +71,7 @@ pub const StructureType = enum(i32) {
     command_pool_create_info = 39,
     command_buffer_allocate_info = 40,
     command_buffer_begin_info = 42,
+    buffer_memory_barrier = 44,
     image_memory_barrier = 45,
     win32_surface_create_info_khr = 1000009000,
     xlib_surface_create_info_khr = 1000004000,
@@ -136,6 +138,7 @@ pub const present_mode = struct {
 };
 
 pub const ImageUsageFlags = u32;
+pub const BufferUsageFlags = u32;
 pub const ImageAspectFlags = u32;
 pub const PipelineStageFlags = u32;
 pub const AccessFlags = u32;
@@ -167,15 +170,17 @@ pub const image_aspect = struct {
 
 pub const pipeline_stage = struct {
     pub const top_of_pipe_bit: PipelineStageFlags = 1 << 0;
-    pub const transfer_bit: PipelineStageFlags = 1 << 10;
-    pub const color_attachment_output_bit: PipelineStageFlags = 1 << 13;
-    pub const bottom_of_pipe_bit: PipelineStageFlags = 1 << 15;
+    pub const color_attachment_output_bit: PipelineStageFlags = 1 << 10;
+    pub const transfer_bit: PipelineStageFlags = 1 << 12;
+    pub const bottom_of_pipe_bit: PipelineStageFlags = 1 << 13;
+    pub const host_bit: PipelineStageFlags = 1 << 14;
 };
 
 pub const access = struct {
     pub const transfer_read_bit: AccessFlags = 1 << 11;
     pub const transfer_write_bit: AccessFlags = 1 << 12;
-    pub const color_attachment_write_bit: AccessFlags = 1 << 7;
+    pub const host_read_bit: AccessFlags = 1 << 13;
+    pub const color_attachment_write_bit: AccessFlags = 1 << 8;
 };
 
 pub const command_buffer_usage = struct {
@@ -207,6 +212,12 @@ pub const queue = struct {
 
 pub const memory_property = struct {
     pub const device_local_bit: MemoryPropertyFlags = 1 << 0;
+    pub const host_visible_bit: MemoryPropertyFlags = 1 << 1;
+    pub const host_coherent_bit: MemoryPropertyFlags = 1 << 2;
+};
+
+pub const buffer_usage = struct {
+    pub const transfer_dst_bit: BufferUsageFlags = 1 << 1;
 };
 
 pub const sample_count = struct {
@@ -304,6 +315,35 @@ pub const MemoryAllocateInfo = extern struct {
     p_next: ?*const anyopaque,
     allocation_size: u64,
     memory_type_index: u32,
+};
+
+pub const BufferCreateInfo = extern struct {
+    s_type: StructureType,
+    p_next: ?*const anyopaque,
+    flags: u32,
+    size: u64,
+    usage: BufferUsageFlags,
+    sharing_mode: SharingMode,
+    queue_family_index_count: u32,
+    p_queue_family_indices: ?[*]const u32,
+};
+
+pub const ImageSubresourceLayers = extern struct {
+    aspect_mask: ImageAspectFlags,
+    mip_level: u32,
+    base_array_layer: u32,
+    layer_count: u32,
+};
+
+pub const Offset3D = extern struct { x: i32, y: i32, z: i32 };
+
+pub const BufferImageCopy = extern struct {
+    buffer_offset: u64,
+    buffer_row_length: u32,
+    buffer_image_height: u32,
+    image_subresource: ImageSubresourceLayers,
+    image_offset: Offset3D,
+    image_extent: Extent3D,
 };
 
 pub const MemoryBarrier = extern struct {
@@ -478,6 +518,7 @@ pub const PfnCreateXlibSurfaceKHR = *const fn (InstanceHandle, *const XlibSurfac
 
 pub const PfnDeviceWaitIdle = *const fn (DeviceHandle) callconv(call_conv) Result;
 pub const PfnWaitForFences = *const fn (DeviceHandle, u32, [*]const Fence, Bool32, u64) callconv(call_conv) Result;
+pub const PfnResetFences = *const fn (DeviceHandle, u32, [*]const Fence) callconv(call_conv) Result;
 pub const PfnAcquireNextImageKHR = *const fn (DeviceHandle, SwapchainKHR, u64, Semaphore, Fence, *u32) callconv(call_conv) Result;
 pub const PfnResetCommandBuffer = *const fn (CommandBuffer, CommandBufferResetFlags) callconv(call_conv) Result;
 pub const PfnBeginCommandBuffer = *const fn (CommandBuffer, *const CommandBufferBeginInfo) callconv(call_conv) Result;
@@ -501,4 +542,11 @@ pub const PfnCreateImage = *const fn (DeviceHandle, *const ImageCreateInfo, ?*co
 pub const PfnDestroyImage = *const fn (DeviceHandle, Image, ?*const anyopaque) callconv(call_conv) void;
 pub const PfnGetImageMemoryRequirements = *const fn (DeviceHandle, Image, *MemoryRequirements) callconv(call_conv) void;
 pub const PfnBindImageMemory = *const fn (DeviceHandle, Image, DeviceMemory, u64) callconv(call_conv) Result;
+pub const PfnCreateBuffer = *const fn (DeviceHandle, *const BufferCreateInfo, ?*const anyopaque, *Buffer) callconv(call_conv) Result;
+pub const PfnDestroyBuffer = *const fn (DeviceHandle, Buffer, ?*const anyopaque) callconv(call_conv) void;
+pub const PfnGetBufferMemoryRequirements = *const fn (DeviceHandle, Buffer, *MemoryRequirements) callconv(call_conv) void;
+pub const PfnBindBufferMemory = *const fn (DeviceHandle, Buffer, DeviceMemory, u64) callconv(call_conv) Result;
+pub const PfnMapMemory = *const fn (DeviceHandle, DeviceMemory, u64, u64, u32, *?*anyopaque) callconv(call_conv) Result;
+pub const PfnUnmapMemory = *const fn (DeviceHandle, DeviceMemory) callconv(call_conv) void;
+pub const PfnCmdCopyImageToBuffer = *const fn (CommandBuffer, Image, ImageLayout, Buffer, u32, [*]const BufferImageCopy) callconv(call_conv) void;
 pub const PfnCmdPipelineBarrier = *const fn (CommandBuffer, PipelineStageFlags, PipelineStageFlags, DependencyFlags, u32, ?[*]const MemoryBarrier, u32, ?[*]const BufferMemoryBarrier, u32, ?[*]const ImageMemoryBarrier) callconv(call_conv) void;

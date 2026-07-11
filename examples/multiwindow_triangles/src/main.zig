@@ -194,7 +194,7 @@ const AppWindow = struct {
         }
     }
 
-    fn draw(self: *AppWindow, renderer: *const Renderer) !void {
+    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8) !void {
         var frame = self.target.acquire() catch |err| switch (err) {
             error.FrameSkipped, error.FrameOutOfDate => return,
             else => return err,
@@ -239,7 +239,13 @@ const AppWindow = struct {
         renderer.device.cmdPushConstants(command_buffer, renderer.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), @ptrCast(&push));
         renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
         renderer.device.cmdEndRendering(command_buffer);
-        try frame.submitAndPresent();
+        if (dump_path) |path| {
+            var readback = try frame.submitAndReadback(renderer.gpa);
+            defer readback.deinit();
+            try readback.writeBmp(io, path);
+        } else {
+            try frame.submitAndPresent();
+        }
     }
 };
 
@@ -317,8 +323,10 @@ pub fn main(init: std.process.Init) !void {
 
     var previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
     var offscreen_frames: u32 = 0;
+    const offscreen = context.backendKind() == .offscreen;
+    if (offscreen) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
     while (first != null or second != null) {
-        if (context.backendKind() == .offscreen) try context.nextFrame();
+        if (offscreen) try context.nextFrame();
         context.pollEvents();
 
         const close_first = if (first) |app_window| app_window.window.shouldClose() else false;
@@ -344,13 +352,17 @@ pub fn main(init: std.process.Init) !void {
         previous = now;
         if (first) |*app_window| {
             app_window.update(dt);
-            try app_window.draw(&renderer);
+            var path_buffer: [64]u8 = undefined;
+            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{offscreen_frames + 1}) else null;
+            try app_window.draw(&renderer, init.io, path);
         }
         if (second) |*app_window| {
             app_window.update(dt);
-            try app_window.draw(&renderer);
+            var path_buffer: [64]u8 = undefined;
+            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{offscreen_frames + 1}) else null;
+            try app_window.draw(&renderer, init.io, path);
         }
-        if (context.backendKind() == .offscreen) {
+        if (offscreen) {
             offscreen_frames += 1;
             if (offscreen_frames == 10) {
                 if (first) |app_window| try app_window.window.injectEvent(.close);

@@ -25,6 +25,42 @@ pub const RenderTarget = struct {
         FrameAlreadyFinished,
         FrameSkipped,
         FrameOutOfDate,
+        ReadbackUnavailable,
+    };
+
+    pub const Readback = struct {
+        allocator: std.mem.Allocator,
+        pixels: []u8,
+        extent: vk.Extent2D,
+        /// Pixels are tightly packed BGRA8, from the top-left row downward.
+        format: enum { bgra8_unorm } = .bgra8_unorm,
+
+        pub fn deinit(self: *Readback) void {
+            self.allocator.free(self.pixels);
+            self.* = undefined;
+        }
+
+        /// Writes the readback as an uncompressed 32-bit BMP. The BGRA8 pixel
+        /// data can be written directly; a negative height preserves its
+        /// top-to-bottom row order.
+        pub fn writeBmp(self: *const Readback, io: std.Io, path: []const u8) !void {
+            var header: [54]u8 = @splat(0);
+            header[0] = 'B';
+            header[1] = 'M';
+            std.mem.writeInt(u32, header[2..6], @intCast(header.len + self.pixels.len), .little);
+            std.mem.writeInt(u32, header[10..14], header.len, .little);
+            std.mem.writeInt(u32, header[14..18], 40, .little);
+            std.mem.writeInt(i32, header[18..22], @intCast(self.extent.width), .little);
+            std.mem.writeInt(i32, header[22..26], -@as(i32, @intCast(self.extent.height)), .little);
+            std.mem.writeInt(u16, header[26..28], 1, .little);
+            std.mem.writeInt(u16, header[28..30], 32, .little);
+            std.mem.writeInt(u32, header[34..38], @intCast(self.pixels.len), .little);
+
+            var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, &header);
+            try file.writeStreamingAll(io, self.pixels);
+        }
     };
 
     pub const Frame = struct {
@@ -34,6 +70,7 @@ pub const RenderTarget = struct {
         extent: vk.Extent2D,
         command_buffer: vk.CommandBuffer,
         submit_fn: *const fn (?*anyopaque) anyerror!void,
+        readback_fn: *const fn (?*anyopaque, std.mem.Allocator) anyerror!Readback,
         abort_fn: *const fn (?*anyopaque) void,
         state: ?*anyopaque,
 
@@ -41,6 +78,16 @@ pub const RenderTarget = struct {
             const state = self.state orelse return error.FrameAlreadyFinished;
             try self.submit_fn(state);
             self.state = null;
+        }
+
+        /// Submits the frame and waits until its tightly packed pixels have
+        /// been copied into allocator-owned CPU memory. Onscreen frames are
+        /// presented after the copy.
+        pub fn submitAndReadback(self: *Frame, allocator: std.mem.Allocator) !Readback {
+            const state = self.state orelse return error.FrameAlreadyFinished;
+            const result = try self.readback_fn(state, allocator);
+            self.state = null;
+            return result;
         }
 
         pub fn abort(self: *Frame) void {
@@ -69,6 +116,9 @@ pub const RenderTarget = struct {
                 image_available: vk.Semaphore = 0,
                 render_finished: vk.Semaphore = 0,
                 fence: vk.Fence = 0,
+                readback_buffer: vk.Buffer = 0,
+                readback_memory: vk.DeviceMemory = 0,
+                readback_capacity: u64 = 0,
             };
 
             allocator: std.mem.Allocator,
@@ -116,7 +166,12 @@ pub const RenderTarget = struct {
 
             fn submitOpaque(ptr: ?*anyopaque) anyerror!void {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
-                return self.submitFrame();
+                _ = try self.submitFrame(null);
+            }
+
+            fn readbackOpaque(ptr: ?*anyopaque, output_allocator: std.mem.Allocator) anyerror!Readback {
+                const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
+                return (try self.submitFrame(output_allocator)).?;
             }
 
             fn abortOpaque(ptr: ?*anyopaque) void {
@@ -187,14 +242,17 @@ pub const RenderTarget = struct {
 
                 const image_handle = self.image(image_index);
                 const old_layout = self.imageLayout(image_index);
-                const source_stage: vk.PipelineStageFlags = if (old_layout == .undefined)
-                    vk.pipeline_stage.top_of_pipe_bit
-                else
-                    vk.pipeline_stage.color_attachment_output_bit;
-                const source_access: vk.AccessFlags = if (old_layout == .undefined)
-                    0
-                else
-                    vk.access.color_attachment_write_bit;
+                const source_stage: vk.PipelineStageFlags = switch (old_layout) {
+                    .undefined => vk.pipeline_stage.top_of_pipe_bit,
+                    .transfer_src_optimal => vk.pipeline_stage.transfer_bit,
+                    .present_src_khr => vk.pipeline_stage.bottom_of_pipe_bit,
+                    else => vk.pipeline_stage.color_attachment_output_bit,
+                };
+                const source_access: vk.AccessFlags = switch (old_layout) {
+                    .undefined, .present_src_khr => 0,
+                    .transfer_src_optimal => vk.access.transfer_read_bit,
+                    else => vk.access.color_attachment_write_bit,
+                };
                 transitionImage(self.device, slot.command_buffer, image_handle, old_layout, .color_attachment_optimal, source_stage, source_access, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit);
 
                 self.active_slot = slot_index;
@@ -207,18 +265,46 @@ pub const RenderTarget = struct {
                     .extent = self.extent,
                     .command_buffer = slot.command_buffer,
                     .submit_fn = submitOpaque,
+                    .readback_fn = readbackOpaque,
                     .abort_fn = abortOpaque,
                     .state = ptr,
                 };
             }
 
-            fn submitFrame(self: *StateSelf) anyerror!void {
+            fn submitFrame(self: *StateSelf, readback_allocator: ?std.mem.Allocator) anyerror!?Readback {
                 const slot_index = self.active_slot orelse return error.FrameAlreadyFinished;
                 const image_index = self.active_image orelse return error.FrameAlreadyFinished;
                 const slot = &self.slots[slot_index];
                 const image_handle = self.image(image_index);
-                const final_layout: vk.ImageLayout = if (self.surface != 0) .present_src_khr else .transfer_src_optimal;
-                transitionImage(self.device, slot.command_buffer, image_handle, .color_attachment_optimal, final_layout, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit, if (self.surface != 0) vk.pipeline_stage.bottom_of_pipe_bit else vk.pipeline_stage.transfer_bit, 0);
+                if (readback_allocator != null) {
+                    if (self.color_format != vk.format.b8g8r8a8_unorm) return error.ReadbackUnavailable;
+                    try self.ensureReadbackBuffer(slot, @as(u64, self.extent.width) * self.extent.height * 4);
+                }
+                const copy_image = readback_allocator != null;
+                const post_render_layout: vk.ImageLayout = if (copy_image or self.surface == 0) .transfer_src_optimal else .present_src_khr;
+                transitionImage(self.device, slot.command_buffer, image_handle, .color_attachment_optimal, post_render_layout, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit, if (post_render_layout == .transfer_src_optimal) vk.pipeline_stage.transfer_bit else vk.pipeline_stage.bottom_of_pipe_bit, if (post_render_layout == .transfer_src_optimal) vk.access.transfer_read_bit else 0);
+                if (readback_allocator != null) {
+                    self.device.cmdCopyImageToBuffer(slot.command_buffer, image_handle, .transfer_src_optimal, slot.readback_buffer, &.{
+                        .buffer_offset = 0,
+                        .buffer_row_length = 0,
+                        .buffer_image_height = 0,
+                        .image_subresource = .{ .aspect_mask = vk.image_aspect.color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+                        .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+                        .image_extent = .{ .width = self.extent.width, .height = self.extent.height, .depth = 1 },
+                    });
+                    self.device.cmdBufferPipelineBarrier(slot.command_buffer, vk.pipeline_stage.transfer_bit, vk.pipeline_stage.host_bit, &.{
+                        .s_type = .buffer_memory_barrier,
+                        .p_next = null,
+                        .src_access_mask = vk.access.transfer_write_bit,
+                        .dst_access_mask = vk.access.host_read_bit,
+                        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                        .buffer = slot.readback_buffer,
+                        .offset = 0,
+                        .size = @as(u64, self.extent.width) * self.extent.height * 4,
+                    });
+                    if (self.surface != 0) transitionImage(self.device, slot.command_buffer, image_handle, .transfer_src_optimal, .present_src_khr, vk.pipeline_stage.transfer_bit, vk.access.transfer_read_bit, vk.pipeline_stage.bottom_of_pipe_bit, 0);
+                }
                 try self.device.endCommandBuffer(slot.command_buffer);
 
                 const command_buffers = [_]vk.CommandBuffer{slot.command_buffer};
@@ -246,9 +332,10 @@ pub const RenderTarget = struct {
                     submit_info.signal_semaphore_count = 1;
                     submit_info.p_signal_semaphores = signal_semaphores[0..].ptr;
                 }
+                try self.device.resetFences(&.{slot.fence});
                 try self.device.queueSubmit(self.graphics_queue, &submit_info, slot.fence);
                 self.submitted = true;
-                self.setImageLayout(image_index, final_layout);
+                self.setImageLayout(image_index, if (self.surface != 0) .present_src_khr else .transfer_src_optimal);
                 self.active_slot = null;
 
                 if (self.surface != 0) {
@@ -272,6 +359,48 @@ pub const RenderTarget = struct {
                     };
                     if (present == .suboptimal_khr) self.recreate_pending = true;
                 }
+                if (readback_allocator) |output_allocator| {
+                    _ = try self.device.waitForFences(&.{slot.fence}, true, std.math.maxInt(u64));
+                    const len: usize = @intCast(@as(u64, self.extent.width) * self.extent.height * 4);
+                    const pixels = try output_allocator.alloc(u8, len);
+                    errdefer output_allocator.free(pixels);
+                    const mapped = try self.device.mapMemory(slot.readback_memory, 0, len);
+                    defer self.device.unmapMemory(slot.readback_memory);
+                    @memcpy(pixels, @as([*]const u8, @ptrCast(mapped))[0..len]);
+                    return .{ .allocator = output_allocator, .pixels = pixels, .extent = self.extent };
+                }
+                return null;
+            }
+
+            fn ensureReadbackBuffer(self: *StateSelf, slot: *Slot, size: u64) !void {
+                if (slot.readback_capacity >= size) return;
+                if (slot.readback_buffer != 0) self.device.destroyBuffer(slot.readback_buffer);
+                if (slot.readback_memory != 0) self.device.freeMemory(slot.readback_memory);
+                slot.readback_buffer = 0;
+                slot.readback_memory = 0;
+                slot.readback_capacity = 0;
+                slot.readback_buffer = try self.device.createBuffer(&.{ .s_type = .buffer_create_info, .p_next = null, .flags = 0, .size = size, .usage = vk.buffer_usage.transfer_dst_bit, .sharing_mode = .exclusive, .queue_family_index_count = 0, .p_queue_family_indices = null });
+                errdefer {
+                    self.device.destroyBuffer(slot.readback_buffer);
+                    slot.readback_buffer = 0;
+                }
+                const requirements = self.device.getBufferMemoryRequirements(slot.readback_buffer);
+                var memory_type: ?u32 = null;
+                for (0..self.memory_properties.memory_type_count) |index| {
+                    if (requirements.memory_type_bits & (@as(u32, 1) << @intCast(index)) == 0) continue;
+                    const wanted = vk.memory_property.host_visible_bit | vk.memory_property.host_coherent_bit;
+                    if (self.memory_properties.memory_types[index].property_flags & wanted == wanted) {
+                        memory_type = @intCast(index);
+                        break;
+                    }
+                }
+                slot.readback_memory = try self.device.allocateMemory(&.{ .s_type = .memory_allocate_info, .p_next = null, .allocation_size = requirements.size, .memory_type_index = memory_type orelse return error.NoCompatibleMemoryType });
+                errdefer {
+                    self.device.freeMemory(slot.readback_memory);
+                    slot.readback_memory = 0;
+                }
+                try self.device.bindBufferMemory(slot.readback_buffer, slot.readback_memory, 0);
+                slot.readback_capacity = size;
             }
 
             fn abortFrame(self: *StateSelf) void {
@@ -342,7 +471,7 @@ pub const RenderTarget = struct {
                     .image_color_space = selected_format.color_space,
                     .image_extent = wanted_extent,
                     .image_array_layers = 1,
-                    .image_usage = vk.image_usage.color_attachment_bit,
+                    .image_usage = vk.image_usage.color_attachment_bit | vk.image_usage.transfer_src_bit,
                     .image_sharing_mode = .exclusive,
                     .queue_family_index_count = 0,
                     .p_queue_family_indices = null,
@@ -422,6 +551,8 @@ pub const RenderTarget = struct {
 
             fn destroySync(self: *StateSelf) void {
                 for (self.slots) |slot| {
+                    if (slot.readback_buffer != 0) self.device.destroyBuffer(slot.readback_buffer);
+                    if (slot.readback_memory != 0) self.device.freeMemory(slot.readback_memory);
                     if (slot.fence != 0) self.device.destroyFence(slot.fence);
                     if (slot.render_finished != 0) self.device.destroySemaphore(slot.render_finished);
                     if (slot.image_available != 0) self.device.destroySemaphore(slot.image_available);
@@ -469,6 +600,7 @@ pub const RenderTarget = struct {
         };
         errdefer State.deinitOpaque(@ptrCast(state));
 
+        state.memory_properties = state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
         if (options.context.backendKind() != .offscreen) {
             state.surface = try Vulkan.createSurface(
                 state.instance,
@@ -478,7 +610,6 @@ pub const RenderTarget = struct {
             );
             if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, options.graphics_queue_family, state.surface) != vk.TRUE) return error.QueueFamilyCannotPresent;
         } else {
-            state.memory_properties = state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
             if (state.memory_allocator == null) state.memory_allocator = .{
                 .context = state,
                 .allocate_and_bind = State.allocateDefaultMemory,

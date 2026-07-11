@@ -188,6 +188,7 @@ pub const Device = struct {
     pub const Dispatch = struct {
         device_wait_idle: api.PfnDeviceWaitIdle,
         wait_for_fences: api.PfnWaitForFences,
+        reset_fences: api.PfnResetFences,
         acquire_next_image_khr: ?api.PfnAcquireNextImageKHR,
         reset_command_buffer: api.PfnResetCommandBuffer,
         begin_command_buffer: api.PfnBeginCommandBuffer,
@@ -209,9 +210,16 @@ pub const Device = struct {
         destroy_image: api.PfnDestroyImage,
         get_image_memory_requirements: api.PfnGetImageMemoryRequirements,
         bind_image_memory: api.PfnBindImageMemory,
+        create_buffer: api.PfnCreateBuffer,
+        destroy_buffer: api.PfnDestroyBuffer,
+        get_buffer_memory_requirements: api.PfnGetBufferMemoryRequirements,
+        bind_buffer_memory: api.PfnBindBufferMemory,
+        map_memory: api.PfnMapMemory,
+        unmap_memory: api.PfnUnmapMemory,
         allocate_memory: api.PfnAllocateMemory,
         free_memory: api.PfnFreeMemory,
         cmd_pipeline_barrier: api.PfnCmdPipelineBarrier,
+        cmd_copy_image_to_buffer: api.PfnCmdCopyImageToBuffer,
     };
 
     handle: api.DeviceHandle,
@@ -224,6 +232,7 @@ pub const Device = struct {
             .dispatch = .{
                 .device_wait_idle = try loadDevice(gpa, handle, api.PfnDeviceWaitIdle, "vkDeviceWaitIdle"),
                 .wait_for_fences = try loadDevice(gpa, handle, api.PfnWaitForFences, "vkWaitForFences"),
+                .reset_fences = try loadDevice(gpa, handle, api.PfnResetFences, "vkResetFences"),
                 .acquire_next_image_khr = loadOptionalDevice(gpa, handle, api.PfnAcquireNextImageKHR, "vkAcquireNextImageKHR"),
                 .reset_command_buffer = try loadDevice(gpa, handle, api.PfnResetCommandBuffer, "vkResetCommandBuffer"),
                 .begin_command_buffer = try loadDevice(gpa, handle, api.PfnBeginCommandBuffer, "vkBeginCommandBuffer"),
@@ -245,9 +254,16 @@ pub const Device = struct {
                 .destroy_image = try loadDevice(gpa, handle, api.PfnDestroyImage, "vkDestroyImage"),
                 .get_image_memory_requirements = try loadDevice(gpa, handle, api.PfnGetImageMemoryRequirements, "vkGetImageMemoryRequirements"),
                 .bind_image_memory = try loadDevice(gpa, handle, api.PfnBindImageMemory, "vkBindImageMemory"),
+                .create_buffer = try loadDevice(gpa, handle, api.PfnCreateBuffer, "vkCreateBuffer"),
+                .destroy_buffer = try loadDevice(gpa, handle, api.PfnDestroyBuffer, "vkDestroyBuffer"),
+                .get_buffer_memory_requirements = try loadDevice(gpa, handle, api.PfnGetBufferMemoryRequirements, "vkGetBufferMemoryRequirements"),
+                .bind_buffer_memory = try loadDevice(gpa, handle, api.PfnBindBufferMemory, "vkBindBufferMemory"),
+                .map_memory = try loadDevice(gpa, handle, api.PfnMapMemory, "vkMapMemory"),
+                .unmap_memory = try loadDevice(gpa, handle, api.PfnUnmapMemory, "vkUnmapMemory"),
                 .allocate_memory = try loadDevice(gpa, handle, api.PfnAllocateMemory, "vkAllocateMemory"),
                 .free_memory = try loadDevice(gpa, handle, api.PfnFreeMemory, "vkFreeMemory"),
                 .cmd_pipeline_barrier = try loadDevice(gpa, handle, api.PfnCmdPipelineBarrier, "vkCmdPipelineBarrier"),
+                .cmd_copy_image_to_buffer = try loadDevice(gpa, handle, api.PfnCmdCopyImageToBuffer, "vkCmdCopyImageToBuffer"),
             },
         };
     }
@@ -258,6 +274,10 @@ pub const Device = struct {
 
     pub fn waitForFences(self: *const Self, fences: []const api.Fence, wait_all: bool, timeout: u64) !api.Result {
         return try allowStatus(self.dispatch.wait_for_fences(self.handle, @intCast(fences.len), fences.ptr, if (wait_all) api.TRUE else api.FALSE, timeout));
+    }
+
+    pub fn resetFences(self: *const Self, fences: []const api.Fence) !void {
+        try check(self.dispatch.reset_fences(self.handle, @intCast(fences.len), fences.ptr));
     }
 
     pub const AcquireResult = struct {
@@ -396,6 +416,32 @@ pub const Device = struct {
         try check(self.dispatch.bind_image_memory(self.handle, image, memory, offset));
     }
 
+    pub fn createBuffer(self: *const Self, info: *const api.BufferCreateInfo) !api.Buffer {
+        var buffer: api.Buffer = 0;
+        try check(self.dispatch.create_buffer(self.handle, info, null, &buffer));
+        return buffer;
+    }
+
+    pub fn destroyBuffer(self: *const Self, buffer: api.Buffer) void {
+        self.dispatch.destroy_buffer(self.handle, buffer, null);
+    }
+    pub fn getBufferMemoryRequirements(self: *const Self, buffer: api.Buffer) api.MemoryRequirements {
+        var requirements: api.MemoryRequirements = undefined;
+        self.dispatch.get_buffer_memory_requirements(self.handle, buffer, &requirements);
+        return requirements;
+    }
+    pub fn bindBufferMemory(self: *const Self, buffer: api.Buffer, memory: api.DeviceMemory, offset: u64) !void {
+        try check(self.dispatch.bind_buffer_memory(self.handle, buffer, memory, offset));
+    }
+    pub fn mapMemory(self: *const Self, memory: api.DeviceMemory, offset: u64, size: u64) !*anyopaque {
+        var ptr: ?*anyopaque = null;
+        try check(self.dispatch.map_memory(self.handle, memory, offset, size, 0, &ptr));
+        return ptr.?;
+    }
+    pub fn unmapMemory(self: *const Self, memory: api.DeviceMemory) void {
+        self.dispatch.unmap_memory(self.handle, memory);
+    }
+
     pub fn allocateMemory(self: *const Self, info: *const api.MemoryAllocateInfo) !api.DeviceMemory {
         var memory: api.DeviceMemory = 0;
         try check(self.dispatch.allocate_memory(self.handle, info, null, &memory));
@@ -414,6 +460,20 @@ pub const Device = struct {
         barrier: *const api.ImageMemoryBarrier,
     ) void {
         self.dispatch.cmd_pipeline_barrier(command_buffer, src_stage, dst_stage, 0, 0, null, 0, null, 1, @ptrCast(barrier));
+    }
+
+    pub fn cmdBufferPipelineBarrier(
+        self: *const Self,
+        command_buffer: api.CommandBuffer,
+        src_stage: api.PipelineStageFlags,
+        dst_stage: api.PipelineStageFlags,
+        barrier: *const api.BufferMemoryBarrier,
+    ) void {
+        self.dispatch.cmd_pipeline_barrier(command_buffer, src_stage, dst_stage, 0, 0, null, 1, @ptrCast(barrier), 0, null);
+    }
+
+    pub fn cmdCopyImageToBuffer(self: *const Self, command_buffer: api.CommandBuffer, image: api.Image, layout: api.ImageLayout, buffer: api.Buffer, region: *const api.BufferImageCopy) void {
+        self.dispatch.cmd_copy_image_to_buffer(command_buffer, image, layout, buffer, 1, @ptrCast(region));
     }
 };
 

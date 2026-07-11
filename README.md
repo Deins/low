@@ -23,7 +23,8 @@ zig build run --build-file ./examples/basic_low_level/build.zig
 cd ./examples/$EXAMPLE && zig build run
 ```
 
-
-
 The examples are standalone Zig packages. See their READMEs for Vulkan SDK,
 shader compiler, and run instructions.
+
+### Deployment & cross-compilation
+Zig builds & optimizes for specific hostmachine. For portable deployments or cross-compilation specify target such as `-Dtarget=x86_64-windows-gnu` or `-Dtarget=x86_64-linux-gnu`.
