@@ -4,7 +4,12 @@ const Build = std.Build;
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const low_dep = b.dependency("low", .{ .target = target, .optimize = optimize });
+    const low_dep = b.dependency("low", .{
+        .target = target,
+        .optimize = optimize,
+        .x11 = b.option(bool, "x11", "Enable the X11 backend") orelse (target.result.os.tag == .linux),
+        .wayland = b.option(bool, "wayland", "Enable the Wayland backend") orelse (target.result.os.tag == .linux),
+    });
     const vk_registry = try vulkanRegistry(b);
     const vulkan_dep = b.dependency("vulkan", .{ .registry = vk_registry });
 

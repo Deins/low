@@ -105,9 +105,9 @@ jobs:
           zig build --build-file examples/multiwindow_triangles/build.zig --fetch=all
       - name: Cross-compile Linux binary
         shell: bash
-        run: zig build compile -Dtarget=x86_64-linux-gnu -Dx11=true -Dwayland=false -Dvk_extras=true --summary all
+        run: zig build compile -Dtarget=x86_64-linux-gnu -Dvk_extras=true --summary all
       - name: Cross-compile examples for Linux
         shell: bash
         run: |
-          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-linux-gnu -Dx11=true -Dwayland=false --summary all
-          zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-linux-gnu -Dx11=true -Dwayland=false --summary all
+          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-linux-gnu --summary all
+          zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-linux-gnu --summary all

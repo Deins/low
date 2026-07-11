@@ -10,8 +10,8 @@
             .lazy = true,
         },
         .wayland = .{
-            .url = "git+https://github.com/ifreund/zig-wayland#a8e10e87e5ebb49ce518ac3d2198909c87ee615a",
-            .hash = "wayland-0.7.0-dev-lQa1kjT8AQDBstL61Gy3WCMtGwVaMN1p6w5wGfdDvP15",
+            .url = "git+https://codeberg.org/Deins/zig-wayland#606066c33324ddf7cbf7bc934d021814cf049dfa",
+            .hash = "wayland-0.7.0-dev-lQa1kl38AQC-kQolS5D4jV1GJ2rH2jv1VWHr14YLVnyn",
             .lazy = true,
         },
     },

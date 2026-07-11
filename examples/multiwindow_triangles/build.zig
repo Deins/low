@@ -9,6 +9,8 @@ pub fn build(b: *Build) !void {
         .target = target,
         .optimize = optimize,
         .vk_extras = true,
+        .x11 = b.option(bool, "x11", "Enable the X11 backend") orelse (target.result.os.tag == .linux),
+        .wayland = b.option(bool, "wayland", "Enable the Wayland backend") orelse (target.result.os.tag == .linux),
     });
     const vk_registry = try vulkanRegistry(b);
     const vulkan_dep = b.dependency("vulkan", .{ .registry = vk_registry });

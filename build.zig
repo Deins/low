@@ -25,8 +25,8 @@ pub fn build(b: *Build) !void {
     });
     low.addOptions("build_options", options);
 
-    if (target.result.os.tag == .linux and enable_wayland) {
-        addLinuxWaylandSupport(b, low, target, optimize);
+    if (target.result.os.tag == .linux) {
+        addLinuxWaylandSupport(b, low, target, optimize, enable_wayland);
     } else if (target.result.os.tag == .windows) {
         addWindowsSupport(b, low);
     } else {
@@ -39,8 +39,8 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     });
     test_module.addOptions("build_options", options);
-    if (target.result.os.tag == .linux and enable_wayland) {
-        addLinuxWaylandSupport(b, test_module, target, optimize);
+    if (target.result.os.tag == .linux) {
+        addLinuxWaylandSupport(b, test_module, target, optimize, enable_wayland);
     } else if (target.result.os.tag == .windows) {
         addWindowsSupport(b, test_module);
     } else {
@@ -71,7 +71,19 @@ fn addLinuxWaylandSupport(
     module: *Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    enable_wayland: bool,
 ) void {
+    const runtime_loader = b.createModule(.{
+        .root_source_file = b.path("src/linux/runtime_loader.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("runtime_loader", runtime_loader);
+    module.link_libc = true;
+
+    if (!enable_wayland) return;
+
     const wayland = b.lazyImport(@This(), "wayland") orelse
         @panic("low: wayland dependency unavailable");
     const scanner = wayland.Scanner.create(b, .{
@@ -93,12 +105,6 @@ fn addLinuxWaylandSupport(
     scanner.generate("zxdg_decoration_manager_v1", 2);
     scanner.generate("wp_cursor_shape_manager_v1", 1);
 
-    const runtime_loader = b.createModule(.{
-        .root_source_file = b.path("src/linux/runtime_loader.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
     const wayland_ffi = b.createModule(.{
         .root_source_file = b.path("src/linux/wayland_ffi.zig"),
         .target = target,
@@ -119,6 +125,5 @@ fn addLinuxWaylandSupport(
     wayland_ffi.addImport("runtime_loader", runtime_loader);
     module.addImport("wayland", wayland_mod);
     module.addImport("wayland_ffi", wayland_ffi);
-    module.addImport("runtime_loader", runtime_loader);
     module.link_libc = true;
 }
