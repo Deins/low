@@ -1,5 +1,5 @@
 const std = @import("std");
-const common = @import("common.zig");
+const common = @import("internal/types.zig");
 
 /// Creates an offscreen backend for a platform's public window API.  The
 /// implementation deliberately has no OS, display-server, or desktop-library

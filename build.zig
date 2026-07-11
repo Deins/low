@@ -7,7 +7,7 @@ pub fn build(b: *Build) !void {
     const linux_target = target.result.os.tag == .linux;
     const enable_x11 = b.option(bool, "x11", "Enable the X11 backend") orelse linux_target;
     const enable_wayland = b.option(bool, "wayland", "Enable the Wayland backend") orelse linux_target;
-    const enable_vulkan_helpers = b.option(bool, "vulkan_helpers", "Expose optional Vulkan render-target helpers") orelse false;
+    const enable_vk_extras = b.option(bool, "vk_extras", "Expose optional Vulkan render-target helpers") orelse false;
 
     if (linux_target and !enable_x11 and !enable_wayland) {
         @panic("low: at least one of -Dx11 and -Dwayland must be enabled");
@@ -16,7 +16,7 @@ pub fn build(b: *Build) !void {
     const options = b.addOptions();
     options.addOption(bool, "x11", enable_x11);
     options.addOption(bool, "wayland", enable_wayland);
-    options.addOption(bool, "vulkan_helpers", enable_vulkan_helpers);
+    options.addOption(bool, "vk_extras", enable_vk_extras);
 
     const low = b.addModule("low", .{
         .root_source_file = b.path("src/low.zig"),

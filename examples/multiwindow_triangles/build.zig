@@ -8,7 +8,7 @@ pub fn build(b: *Build) !void {
     const low_dep = b.dependency("low", .{
         .target = target,
         .optimize = optimize,
-        .vulkan_helpers = true,
+        .vk_extras = true,
     });
     const vk_registry = try vulkanRegistry(b);
     const vulkan_dep = b.dependency("vulkan", .{ .registry = vk_registry });

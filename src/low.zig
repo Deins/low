@@ -1,20 +1,38 @@
 const builtin = @import("builtin");
-const common = @import("common.zig");
-const input = @import("input.zig");
+const types = @import("internal/types.zig");
+const input = @import("internal/input.zig");
+const runtime = @import("internal/runtime.zig");
 
-pub const BackendRequest = common.BackendRequest;
-pub const BackendKind = impl.BackendKind;
-pub const Environment = common.Environment;
-pub const detectBackend = common.detectBackend;
-pub const Size = common.Size;
-pub const Point = common.Point;
-pub const ContentScale = common.ContentScale;
-pub const TextInputRect = common.TextInputRect;
-pub const ColorScheme = common.ColorScheme;
-pub const FrameMode = common.FrameMode;
-pub const OffscreenOptions = common.OffscreenOptions;
-pub const Event = common.Event;
-pub const vulkan = @import("vulkan.zig");
+const platform = if (builtin.target.os.tag == .linux)
+    @import("linux/backend.zig")
+else if (builtin.target.os.tag == .windows)
+    @import("windows/backend.zig")
+else
+    @import("stub.zig");
+
+// This module is the complete supported public surface of low. Platform
+// modules and the shared runtime are implementation details.
+pub const Context = platform.Context;
+pub const Window = platform.Window;
+pub const Error = runtime.Error;
+pub const WindowCallbacks = runtime.WindowCallbacks;
+
+pub const InitOptions = types.InitOptions;
+pub const WindowOptions = types.WindowOptions;
+pub const BackendRequest = types.BackendRequest;
+pub const BackendKind = types.BackendKind;
+pub const Environment = types.Environment;
+pub const detectBackend = types.detectBackend;
+pub const Size = types.Size;
+pub const Point = types.Point;
+pub const ContentScale = types.ContentScale;
+pub const TextInputRect = types.TextInputRect;
+pub const ColorScheme = types.ColorScheme;
+pub const DecorationMode = types.DecorationMode;
+pub const WindowState = types.WindowState;
+pub const FrameMode = types.FrameMode;
+pub const OffscreenOptions = types.OffscreenOptions;
+pub const Event = types.Event;
 
 pub const Action = input.Action;
 pub const MouseButton = input.MouseButton;
@@ -22,17 +40,40 @@ pub const Modifiers = input.Modifiers;
 pub const CursorShape = input.CursorShape;
 pub const Key = input.Key;
 
-const impl = if (builtin.target.os.tag == .linux)
-    @import("linux/backend.zig")
-else if (builtin.target.os.tag == .windows)
-    @import("windows/backend.zig")
-else
-    @import("stub.zig");
+pub const vulkan = @import("vulkan.zig");
 
-pub const DecorationMode = common.DecorationMode;
-pub const WindowState = common.WindowState;
-pub const InitOptions = common.InitOptions;
-pub const WindowOptions = common.WindowOptions;
-pub const WindowCallbacks = impl.WindowCallbacks;
-pub const Context = impl.Context;
-pub const Window = impl.Window;
+test "root API exposes the supported contract" {
+    // These declarations intentionally use only the root module. Keeping this
+    // test here catches accidental platform-specific public aliases.
+    const callbacks: WindowCallbacks = .{};
+    _ = callbacks;
+    _ = Context.init;
+    _ = Window.deinit;
+    _ = Error;
+    _ = InitOptions{};
+    _ = WindowOptions;
+    _ = BackendRequest.auto;
+    _ = BackendKind.offscreen;
+    _ = Environment{};
+    _ = detectBackend;
+    _ = Size;
+    _ = Point;
+    _ = ContentScale;
+    _ = TextInputRect;
+    _ = ColorScheme;
+    _ = DecorationMode.auto;
+    _ = WindowState.normal;
+    _ = FrameMode.manual;
+    _ = OffscreenOptions{};
+    _ = Event{ .close = {} };
+    _ = Action.press;
+    _ = MouseButton.left;
+    _ = Modifiers{};
+    _ = CursorShape.arrow;
+    _ = Key.unknown;
+    _ = vulkan;
+    try @import("std").testing.expect(@hasDecl(@This(), "Error"));
+    try @import("std").testing.expect(@hasDecl(@This(), "WindowCallbacks"));
+    try @import("std").testing.expect(!@hasDecl(@This(), "State"));
+    try @import("std").testing.expect(!@hasDecl(@This(), "VTable"));
+}

@@ -2,10 +2,21 @@ const std = @import("std");
 const low = @import("low");
 const vk = @import("vulkan");
 
-const VulkanLoader = low.vulkan.Loader(vk);
-const RenderTarget = low.vulkan.targets(vk).RenderTarget;
+const RenderTarget = low.vulkan.targets().RenderTarget;
 const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
 const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
+
+fn lowPhysicalDevice(value: vk.PhysicalDevice) low.vulkan.api.PhysicalDevice {
+    return @ptrFromInt(@intFromEnum(value));
+}
+
+fn lowQueue(value: vk.Queue) low.vulkan.api.Queue {
+    return @ptrFromInt(@intFromEnum(value));
+}
+
+fn lowFormat(value: vk.Format) low.vulkan.api.Format {
+    return @intCast(@intFromEnum(value));
+}
 
 const PushConstants = extern struct {
     offset: [2]f32,
@@ -22,9 +33,11 @@ const DeviceSelection = struct {
 const Renderer = struct {
     gpa: std.mem.Allocator,
     instance: vk.InstanceProxy,
+    low_instance: low.vulkan.Instance,
     physical_device: vk.PhysicalDevice,
     device_wrapper: *vk.DeviceWrapper,
     device: vk.DeviceProxy,
+    low_device: low.vulkan.Device,
     graphics_queue: vk.Queue,
     graphics_queue_family: u32,
     command_pool: vk.CommandPool,
@@ -34,6 +47,7 @@ const Renderer = struct {
 
     fn init(
         gpa: std.mem.Allocator,
+        loader: *const low.vulkan.Loader,
         instance: vk.InstanceProxy,
     ) !Renderer {
         const selection = try findDevice(gpa, instance);
@@ -66,6 +80,8 @@ const Renderer = struct {
         if (device_wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
         const device = vk.DeviceProxy.init(device_handle, device_wrapper);
         errdefer device.destroyDevice(null);
+        const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance.handle)));
+        const low_device = try low.vulkan.Device.init(&low_instance, @ptrFromInt(@intFromEnum(device_handle)));
 
         const command_pool = try device.createCommandPool(&.{
             .flags = .{ .reset_command_buffer_bit = true },
@@ -83,9 +99,11 @@ const Renderer = struct {
         return .{
             .gpa = gpa,
             .instance = instance,
+            .low_instance = low_instance,
             .physical_device = selection.physical_device,
             .device_wrapper = device_wrapper,
             .device = device,
+            .low_device = low_device,
             .graphics_queue = device.getDeviceQueue(selection.graphics_queue_family, 0),
             .graphics_queue_family = selection.graphics_queue_family,
             .command_pool = command_pool,
@@ -126,13 +144,13 @@ const AppWindow = struct {
             .target = try RenderTarget.init(gpa, .{
                 .context = context,
                 .window = window,
-                .instance = renderer.instance,
-                .physical_device = renderer.physical_device,
-                .device = renderer.device,
-                .graphics_queue = renderer.graphics_queue,
+                .instance = &renderer.low_instance,
+                .physical_device = lowPhysicalDevice(renderer.physical_device),
+                .device = &renderer.low_device,
+                .graphics_queue = lowQueue(renderer.graphics_queue),
                 .graphics_queue_family = renderer.graphics_queue_family,
-                .command_pool = renderer.command_pool,
-                .color_format = renderer.color_format,
+                .command_pool = @intFromEnum(renderer.command_pool),
+                .color_format = lowFormat(renderer.color_format),
                 .frames_in_flight = 2,
             }),
             .position = position,
@@ -171,9 +189,11 @@ const AppWindow = struct {
             else => return err,
         };
         defer frame.abort();
-        const command_buffer = frame.command_buffer;
+        const command_buffer: vk.CommandBuffer = @enumFromInt(@intFromPtr(frame.command_buffer.?));
+        const image_view: vk.ImageView = @enumFromInt(frame.view);
+        const extent = vk.Extent2D{ .width = frame.extent.width, .height = frame.extent.height };
         const color_attachment = vk.RenderingAttachmentInfo{
-            .image_view = frame.view,
+            .image_view = image_view,
             .image_layout = .color_attachment_optimal,
             .resolve_mode = .{},
             .resolve_image_layout = .undefined,
@@ -182,7 +202,7 @@ const AppWindow = struct {
             .clear_value = .{ .color = .{ .float_32 = .{ 0.018, 0.025, 0.06, 1.0 } } },
         };
         renderer.device.cmdBeginRendering(command_buffer, &.{
-            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = frame.extent },
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
             .layer_count = 1,
             .view_mask = 0,
             .color_attachment_count = 1,
@@ -191,12 +211,12 @@ const AppWindow = struct {
         const viewport = vk.Viewport{
             .x = 0,
             .y = 0,
-            .width = @floatFromInt(frame.extent.width),
-            .height = @floatFromInt(frame.extent.height),
+            .width = @floatFromInt(extent.width),
+            .height = @floatFromInt(extent.height),
             .min_depth = 0,
             .max_depth = 1,
         };
-        const scissor = vk.Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = frame.extent };
+        const scissor = vk.Rect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = extent };
         renderer.device.cmdSetViewport(command_buffer, 0, &.{viewport});
         renderer.device.cmdSetScissor(command_buffer, 0, &.{scissor});
         renderer.device.cmdBindPipeline(command_buffer, .graphics, renderer.pipeline);
@@ -216,9 +236,9 @@ pub fn main(init: std.process.Init) !void {
     const backend = try requestedBackend(try init.minimal.args.toSlice(init.arena.allocator()));
     if (backend == .offscreen) return runOffscreen(gpa);
 
-    try VulkanLoader.init();
-    defer VulkanLoader.deinit();
-    const get_instance_proc_addr = try VulkanLoader.getInstanceProcAddr();
+    var loader = try low.vulkan.Loader.init();
+    defer loader.deinit();
+    const get_instance_proc_addr: vk.PfnGetInstanceProcAddr = @ptrCast(loader.get_instance_proc_addr);
     const base = vk.BaseWrapper.load(get_instance_proc_addr);
 
     var context = try low.Context.init(gpa, .{
@@ -255,7 +275,7 @@ pub fn main(init: std.process.Init) !void {
         .size = .{ .width = 520, .height = 400 },
     });
 
-    var renderer = try Renderer.init(gpa, instance);
+    var renderer = try Renderer.init(gpa, &loader, instance);
     defer renderer.deinit();
     var first: ?AppWindow = try AppWindow.init(
         gpa,

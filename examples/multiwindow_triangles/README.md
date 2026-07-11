@@ -2,7 +2,7 @@
 
 This directory is a standalone Zig project: it depends on `low` through the
 local `../..` path and otherwise only fetches `vulkan-zig` and lazy Vulkan
-headers. It uses `low.vulkan.targets(vk).RenderTarget` for target and frame
+headers. It uses `low.vulkan.targets().RenderTarget` for target and frame
 lifecycle while keeping shaders and rendering commands in the example.
 
 It opens two native `low` windows. Each has an independent Vulkan surface and
@@ -46,7 +46,7 @@ zig build -Dvk_registry=/path/to/registry/vk.xml
 
 ## Relevant `low` glue
 
-`low.vulkan.Loader(vk)` dynamically opens the system Vulkan loader, avoiding a
+`low.vulkan.Loader` dynamically opens the system Vulkan loader, avoiding a
 link-time dependency. `low.vulkan.requiredInstanceExtensions(&context)` uses
 the backend chosen by `low`. `RenderTarget` creates the matching Wayland,
 Xlib, or Win32 surface and owns its swapchain, image views, command buffers,

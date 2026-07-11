@@ -2,8 +2,6 @@ const std = @import("std");
 const low = @import("low");
 const vk = @import("vulkan");
 
-const VulkanLoader = low.vulkan.Loader(vk);
-
 const DeviceSelection = struct {
     physical_device: vk.PhysicalDevice,
     queue_family: u32,
@@ -191,9 +189,9 @@ pub fn main(init: std.process.Init) !void {
     defer std.debug.assert(gpa_state.deinit() == .ok);
     const allocator = gpa_state.allocator();
 
-    try VulkanLoader.init();
-    defer VulkanLoader.deinit();
-    const get_instance_proc_addr = try VulkanLoader.getInstanceProcAddr();
+    var loader = try low.vulkan.Loader.init();
+    defer loader.deinit();
+    const get_instance_proc_addr: vk.PfnGetInstanceProcAddr = @ptrCast(loader.get_instance_proc_addr);
     const base = vk.BaseWrapper.load(get_instance_proc_addr);
     var context = try low.Context.init(allocator, .{ .app_name = "low.basic_low_level" });
     defer context.deinit();
@@ -213,9 +211,11 @@ pub fn main(init: std.process.Init) !void {
     var instance_wrapper = vk.InstanceWrapper.load(instance_handle, get_instance_proc_addr);
     const instance = vk.InstanceProxy.init(instance_handle, &instance_wrapper);
     defer instance.destroyInstance(null);
+    const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance_handle)));
 
     const window = try context.createWindow(.{ .title = "low raw Vulkan setup", .size = .{ .width = 800, .height = 600 } });
-    const surface = try low.vulkan.createSurface(vk, &context, window, instance);
+    const low_surface = try low.vulkan.createSurface(&low_instance, &context, window);
+    const surface: vk.SurfaceKHR = @enumFromInt(low_surface);
     defer instance.destroySurfaceKHR(surface, null);
     const selection = try selectDevice(allocator, instance, surface);
     const priority = [_]f32{1.0};

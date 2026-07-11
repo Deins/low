@@ -1,298 +1,245 @@
 const std = @import("std");
-const common = @import("../common.zig");
-const input = @import("../input.zig");
+const types = @import("../internal/types.zig");
+const runtime = @import("../internal/runtime.zig");
+const input = @import("../internal/input.zig");
 const win32 = @import("win32").everything;
+const offscreen_backend = @import("../offscreen_backend.zig").Backend(runtime);
 
-pub const BackendRequest = common.BackendRequest;
-pub const BackendKind = common.BackendKind;
-pub const Size = common.Size;
-pub const Point = common.Point;
-pub const ContentScale = common.ContentScale;
-pub const TextInputRect = common.TextInputRect;
-pub const ColorScheme = common.ColorScheme;
-pub const Action = input.Action;
-pub const MouseButton = input.MouseButton;
-pub const Modifiers = input.Modifiers;
-pub const CursorShape = input.CursorShape;
-pub const Key = input.Key;
-
-pub const DecorationMode = common.DecorationMode;
-pub const WindowState = common.WindowState;
-pub const Error = error{ UnsupportedPlatform, OutOfMemory, WindowClassRegistrationFailed, WindowCreationFailed };
-pub const FrameMode = common.FrameMode;
-pub const OffscreenOptions = common.OffscreenOptions;
-pub const Event = common.Event;
-pub const InitOptions = common.InitOptions;
-pub const WindowOptions = common.WindowOptions;
-
-pub const WindowCallbacks = struct {
-    close: ?*const fn (*Window) void = null,
-    resize: ?*const fn (*Window, Size) void = null,
-    framebuffer_resize: ?*const fn (*Window, Size) void = null,
-    scale: ?*const fn (*Window, ContentScale) void = null,
-    focus: ?*const fn (*Window, bool) void = null,
-    cursor_enter: ?*const fn (*Window, bool) void = null,
-    cursor_motion: ?*const fn (*Window, Point) void = null,
-    mouse_button: ?*const fn (*Window, MouseButton, Action, Modifiers) void = null,
-    scroll: ?*const fn (*Window, f64, f64) void = null,
-    key: ?*const fn (*Window, Key, u32, Action, Modifiers) void = null,
-    text: ?*const fn (*Window, []const u8) void = null,
-};
+pub const BackendKind = types.BackendKind;
+pub const Error = runtime.Error;
+pub const Point = runtime.Point;
+pub const Size = runtime.Size;
+pub const Modifiers = runtime.Modifiers;
+pub const Key = runtime.Key;
+pub const MouseButton = runtime.MouseButton;
+pub const Action = runtime.Action;
+pub const InitOptions = runtime.InitOptions;
+pub const WindowOptions = runtime.WindowOptions;
+pub const Context = runtime.Context(@This());
+pub const Window = runtime.Window;
 
 const class_name = win32.L("low.window");
 var class_registered = false;
 
-pub const Context = struct {
+const Data = struct {
     allocator: std.mem.Allocator,
     windows: std.ArrayListUnmanaged(*Window) = .empty,
-    clipboard: common.Clipboard = .{},
-
-    pub fn init(allocator: std.mem.Allocator, options: InitOptions) Error!Context {
-        if (options.backend == .offscreen) return error.UnsupportedPlatform;
-        if (!class_registered) {
-            const wc: win32.WNDCLASSEXW = .{
-                .cbSize = @sizeOf(win32.WNDCLASSEXW),
-                .style = .{ .HREDRAW = 1, .VREDRAW = 1, .DBLCLKS = 1 },
-                .lpfnWndProc = wndProc,
-                .cbClsExtra = 0,
-                .cbWndExtra = @sizeOf(usize),
-                .hInstance = win32.GetModuleHandleW(null),
-                .hIcon = null,
-                .hCursor = win32.LoadCursorW(null, win32.IDC_ARROW),
-                .hbrBackground = null,
-                .lpszMenuName = null,
-                .lpszClassName = class_name,
-                .hIconSm = null,
-            };
-            if (win32.RegisterClassExW(&wc) == 0) return error.WindowClassRegistrationFailed;
-            class_registered = true;
-        }
-        return .{ .allocator = allocator };
-    }
-
-    pub fn deinit(self: *Context) void {
-        while (self.windows.items.len != 0) self.windows.items[self.windows.items.len - 1].deinit();
-        self.windows.deinit(self.allocator);
-        self.clipboard.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    pub fn backendKind(_: *Context) BackendKind {
-        return .windows;
-    }
-    pub fn nativeDisplay(_: *Context) *anyopaque {
-        return @ptrCast(win32.GetModuleHandleW(null));
-    }
-    pub fn requiredVulkanInstanceExtensions(_: *Context) []const [*:0]const u8 {
-        return &.{ "VK_KHR_surface", "VK_KHR_win32_surface" };
-    }
-
-    pub fn createWindow(self: *Context, options: WindowOptions) Error!*Window {
-        const window = self.allocator.create(Window) catch return error.OutOfMemory;
-        errdefer self.allocator.destroy(window);
-        window.* = .{ .ctx = self, .size = options.size, .framebuffer_size = options.size, .resizable = options.resizable, .decorated = options.decorated };
-        const title = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, options.title) catch return error.OutOfMemory;
-        defer self.allocator.free(title);
-        const style: win32.WINDOW_STYLE = if (options.decorated) win32.WS_OVERLAPPEDWINDOW else .{ .POPUP = 1 };
-        const hwnd = win32.CreateWindowExW(.{}, class_name, title, style, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, @max(1, options.size.width), @max(1, options.size.height), null, null, win32.GetModuleHandleW(null), window) orelse return error.WindowCreationFailed;
-        window.hwnd = hwnd;
-        self.windows.append(self.allocator, window) catch return error.OutOfMemory;
-        if (!options.resizable) window.setResizable(false);
-        if (options.min_size) |size| window.setMinSize(size);
-        if (options.max_size) |size| window.setMaxSize(size);
-        window.setState(options.state);
-        if (options.visible) window.show();
-        return window;
-    }
-
-    pub fn pollEvents(_: *Context) void {
-        _ = dispatchMessages(false, 0);
-    }
-    pub fn waitEvents(_: *Context) Error!void {
-        dispatchMessages(true, std.math.maxInt(u32));
-    }
-    pub fn waitEventsTimeout(_: *Context, timeout_ns: u64) Error!bool {
-        const ms: u32 = @intCast(@min(std.math.maxInt(u32), (timeout_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms));
-        return dispatchMessages(true, ms);
-    }
-    pub fn wake(_: *Context) void {
-        _ = win32.PostMessageW(null, win32.WM_NULL, 0, 0);
-    }
-    pub fn step(_: *Context) Error!void {
-        return error.UnsupportedPlatform;
-    }
-    pub fn nextFrame(_: *Context) Error!void {
-        return error.UnsupportedPlatform;
-    }
-    pub fn clipboardText(self: *Context, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-        return self.clipboard.get(allocator);
-    }
-    pub fn clipboardTextSet(self: *Context, text: []const u8) std.mem.Allocator.Error!void {
-        return self.clipboard.set(self.allocator, text);
-    }
-    pub fn preferredColorScheme(_: *Context) ?ColorScheme {
-        return null;
-    }
-
-    fn removeWindow(self: *Context, window: *Window) void {
-        if (std.mem.indexOfScalar(*Window, self.windows.items, window)) |index| _ = self.windows.swapRemove(index);
-    }
 };
 
-pub const Window = struct {
-    ctx: *Context,
-    hwnd: ?win32.HWND = null,
-    callbacks: WindowCallbacks = .{},
-    user_data: ?*anyopaque = null,
-    should_close: bool = false,
-    visible: bool = false,
-    focused: bool = false,
-    maximized: bool = false,
-    fullscreen: bool = false,
-    minimized: bool = false,
-    hovered: bool = false,
-    resizable: bool,
-    decorated: bool,
-    cursor_visible: bool = true,
-    cursor_shape: CursorShape = .arrow,
-    size: Size,
-    framebuffer_size: Size,
-    content_scale: ContentScale = .{},
-    cursor_pos: Point = .{ .x = 0, .y = 0 },
-    text_input_rect: ?TextInputRect = null,
-    pressed_keys: std.EnumSet(Key) = .empty,
-    pressed_buttons: std.EnumSet(MouseButton) = .empty,
-    min_size: ?Size = null,
-    max_size: ?Size = null,
+pub fn initState(allocator: std.mem.Allocator, options: InitOptions) Error!*runtime.State {
+    if (options.backend == .offscreen) return offscreen_backend.init(allocator, options);
 
-    pub fn deinit(self: *Window) void {
-        self.ctx.removeWindow(self);
-        if (self.hwnd) |hwnd| {
-            _ = win32.DestroyWindow(hwnd);
-        }
-        self.ctx.allocator.destroy(self);
+    if (!class_registered) {
+        const wc: win32.WNDCLASSEXW = .{
+            .cbSize = @sizeOf(win32.WNDCLASSEXW),
+            .style = .{ .HREDRAW = 1, .VREDRAW = 1, .DBLCLKS = 1 },
+            .lpfnWndProc = wndProc,
+            .cbClsExtra = 0,
+            .cbWndExtra = @sizeOf(usize),
+            .hInstance = win32.GetModuleHandleW(null),
+            .hIcon = null,
+            .hCursor = win32.LoadCursorW(null, win32.IDC_ARROW),
+            .hbrBackground = null,
+            .lpszMenuName = null,
+            .lpszClassName = class_name,
+            .hIconSm = null,
+        };
+        if (win32.RegisterClassExW(&wc) == 0) return error.WindowClassRegistrationFailed;
+        class_registered = true;
     }
-    pub fn nativeSurface(self: *Window) usize {
-        return @intFromPtr(self.hwnd.?);
-    }
-    pub fn nativeDisplay(_: *Window) *anyopaque {
-        return @ptrCast(win32.GetModuleHandleW(null));
-    }
-    pub fn setUserData(self: *Window, ptr: ?*anyopaque) void {
-        self.user_data = ptr;
-    }
-    pub fn getUserData(self: *Window) ?*anyopaque {
-        return self.user_data;
-    }
-    /// Replaces all window event callbacks. Callbacks execute during
-    /// `Context.pollEvents` or `Context.waitEvents` on the calling thread.
-    pub fn setCallbacks(self: *Window, callbacks: WindowCallbacks) void {
-        self.callbacks = callbacks;
-    }
-    pub fn injectEvent(_: *Window, _: Event) Error!void {
-        return error.UnsupportedPlatform;
-    }
-    pub fn setTitle(self: *Window, title: [:0]const u8) void {
-        const wide = std.unicode.utf8ToUtf16LeAllocZ(self.ctx.allocator, title) catch return;
-        defer self.ctx.allocator.free(wide);
-        _ = win32.SetWindowTextW(self.hwnd, wide);
-    }
-    pub fn setState(self: *Window, state: WindowState) void {
-        switch (state) {
-            .normal => self.restore(),
-            .maximize => self.maximize(),
-            .fullscreen => self.setFullscreen(),
-        }
-    }
-    pub fn setShouldClose(self: *Window, value: bool) void {
-        self.should_close = value;
-    }
-    pub fn shouldClose(self: *const Window) bool {
-        return self.should_close;
-    }
-    pub fn getSize(self: *const Window) Size {
-        return self.size;
-    }
-    pub fn getFramebufferSize(self: *const Window) Size {
-        return self.framebuffer_size;
-    }
-    pub fn getContentScale(self: *const Window) ContentScale {
-        return self.content_scale;
-    }
-    pub fn getCursorPos(self: *const Window) Point {
-        return self.cursor_pos;
-    }
-    pub fn isFocused(self: *const Window) bool {
-        return self.focused;
-    }
-    pub fn isVisible(self: *const Window) bool {
-        return self.visible;
-    }
-    pub fn isMaximized(self: *const Window) bool {
-        return self.maximized;
-    }
-    pub fn isFullscreen(self: *const Window) bool {
-        return self.fullscreen;
-    }
-    pub fn isIconified(self: *const Window) bool {
-        return self.minimized;
-    }
-    pub fn isHovered(self: *const Window) bool {
-        return self.hovered;
-    }
-    pub fn getKey(self: *const Window, key: Key) bool {
-        return self.pressed_keys.contains(key);
-    }
-    pub fn getMouseButton(self: *const Window, button: MouseButton) bool {
-        return self.pressed_buttons.contains(button);
-    }
-    pub fn show(self: *Window) void {
-        _ = win32.ShowWindow(self.hwnd, .{ .SHOWNORMAL = 1 });
-        self.visible = true;
-    }
-    pub fn hide(self: *Window) void {
-        _ = win32.ShowWindow(self.hwnd, .{ .HIDE = 1 });
-        self.visible = false;
-    }
-    pub fn maximize(self: *Window) void {
-        _ = win32.ShowWindow(self.hwnd, @bitCast(@as(u32, 3)));
-        self.maximized = true;
-        self.fullscreen = false;
-    }
-    pub fn setFullscreen(self: *Window) void {
-        self.fullscreen = true;
-        self.maximized = false;
-    }
-    pub fn restore(self: *Window) void {
-        _ = win32.ShowWindow(self.hwnd, @bitCast(@as(u32, 9)));
-        self.maximized = false;
-        self.fullscreen = false;
-        self.minimized = false;
-    }
-    pub fn iconify(self: *Window) void {
-        _ = win32.ShowWindow(self.hwnd, @bitCast(@as(u32, 6)));
-        self.minimized = true;
-    }
-    pub fn setMinSize(self: *Window, size: ?Size) void {
-        self.min_size = size;
-    }
-    pub fn setMaxSize(self: *Window, size: ?Size) void {
-        self.max_size = size;
-    }
-    pub fn setResizable(self: *Window, resizable: bool) void {
-        self.resizable = resizable;
-    }
-    pub fn setCursorVisible(self: *Window, visible: bool) void {
-        self.cursor_visible = visible;
-        _ = win32.ShowCursor(if (visible) win32.TRUE else win32.FALSE);
-    }
-    pub fn setCursor(self: *Window, shape: CursorShape) void {
-        self.cursor_shape = shape;
-        self.setCursorVisible(shape != .hidden);
-    }
-    pub fn setTextInputRect(self: *Window, rect: ?TextInputRect) void {
-        self.text_input_rect = rect;
-    }
+
+    const data = allocator.create(Data) catch return error.OutOfMemory;
+    errdefer allocator.destroy(data);
+    data.* = .{ .allocator = allocator };
+
+    const state = allocator.create(runtime.State) catch return error.OutOfMemory;
+    state.* = .{
+        .allocator = allocator,
+        .backend_kind = .windows,
+        .backend_data = data,
+        .vtable = &vtable,
+    };
+    return state;
+}
+
+fn stateData(state: *runtime.State) *Data {
+    return @ptrCast(@alignCast(state.backend_data));
+}
+
+fn windowHandle(window: *Window) win32.HWND {
+    return @ptrCast(window.backend_data);
+}
+
+fn deinit(state: *runtime.State) void {
+    const data = stateData(state);
+    while (data.windows.items.len != 0) data.windows.items[data.windows.items.len - 1].deinit();
+    data.windows.deinit(data.allocator);
+    const allocator = data.allocator;
+    state.clipboard.deinit(allocator);
+    allocator.destroy(data);
+    allocator.destroy(state);
+}
+
+fn nativeDisplay(_: *runtime.State) *anyopaque {
+    return @ptrCast(win32.GetModuleHandleW(null));
+}
+
+fn requiredVulkanExtensions(_: *runtime.State) []const [*:0]const u8 {
+    return &.{ "VK_KHR_surface", "VK_KHR_win32_surface" };
+}
+
+fn createWindow(state: *runtime.State, options: WindowOptions) Error!*Window {
+    const data = stateData(state);
+    const window = data.allocator.create(Window) catch return error.OutOfMemory;
+    errdefer data.allocator.destroy(window);
+
+    const title = std.unicode.utf8ToUtf16LeAllocZ(data.allocator, options.title) catch return error.OutOfMemory;
+    defer data.allocator.free(title);
+    const titlebar_mode: types.DecorationMode = switch (options.titlebar) {
+        .auto => if (options.decorated) .server_side else .client_side,
+        else => options.titlebar,
+    };
+    // Win32 sends WM_NCCREATE synchronously from CreateWindowExW, so the
+    // shared object must already be initialized when the procedure stores
+    // its HWND association.
+    window.* = .{
+        .ctx = state,
+        .backend_data = @ptrFromInt(1),
+        .size = options.size,
+        .framebuffer_size = options.size,
+        .visible = options.visible,
+        .resizable = options.resizable,
+        .min_size = options.min_size,
+        .max_size = options.max_size,
+        .decorated = options.decorated,
+        .decoration_mode = titlebar_mode,
+    };
+    const style: win32.WINDOW_STYLE = if (options.decorated) win32.WS_OVERLAPPEDWINDOW else .{ .POPUP = 1 };
+    const hwnd = win32.CreateWindowExW(
+        .{},
+        class_name,
+        title,
+        style,
+        win32.CW_USEDEFAULT,
+        win32.CW_USEDEFAULT,
+        @max(1, options.size.width),
+        @max(1, options.size.height),
+        null,
+        null,
+        win32.GetModuleHandleW(null),
+        window,
+    ) orelse return error.WindowCreationFailed;
+    window.backend_data = @ptrCast(hwnd);
+    data.windows.append(data.allocator, window) catch {
+        _ = win32.DestroyWindow(hwnd);
+        return error.OutOfMemory;
+    };
+
+    if (options.state != .normal) window.setState(options.state);
+    if (options.visible) window.show();
+    return window;
+}
+
+fn destroyWindow(window: *Window) void {
+    const data = stateData(window.ctx);
+    if (std.mem.indexOfScalar(*Window, data.windows.items, window)) |index| _ = data.windows.swapRemove(index);
+    _ = win32.DestroyWindow(windowHandle(window));
+    data.allocator.destroy(window);
+}
+
+fn nativeSurface(window: *Window) usize {
+    return @intFromPtr(windowHandle(window));
+}
+
+fn pumpEvents(_: *runtime.State, timeout_ms: i32) Error!bool {
+    const timeout: u32 = if (timeout_ms < 0) std.math.maxInt(u32) else @intCast(timeout_ms);
+    return dispatchMessages(timeout_ms != 0, timeout);
+}
+
+fn wake(_: *runtime.State) void {
+    _ = win32.PostMessageW(null, win32.WM_NULL, 0, 0);
+}
+
+fn step(_: *runtime.State) Error!void {
+    return error.NotOffscreen;
+}
+
+fn nextFrame(_: *runtime.State) Error!void {
+    return error.NotOffscreen;
+}
+
+fn injectEvent(_: *Window, _: runtime.Event) Error!void {
+    return error.NotOffscreen;
+}
+
+fn setTitle(window: *Window, title: [:0]const u8) void {
+    const allocator = window.ctx.allocator;
+    const wide = std.unicode.utf8ToUtf16LeAllocZ(allocator, title) catch return;
+    defer allocator.free(wide);
+    _ = win32.SetWindowTextW(windowHandle(window), wide);
+}
+
+fn show(window: *Window) void {
+    _ = win32.ShowWindow(windowHandle(window), .{ .SHOWNORMAL = 1 });
+}
+
+fn hide(window: *Window) void {
+    _ = win32.ShowWindow(windowHandle(window), .{ .HIDE = 1 });
+}
+
+fn maximize(window: *Window) void {
+    _ = win32.ShowWindow(windowHandle(window), @bitCast(@as(u32, 3)));
+}
+
+fn setFullscreen(_: *Window) void {}
+
+fn restore(window: *Window) void {
+    _ = win32.ShowWindow(windowHandle(window), @bitCast(@as(u32, 9)));
+}
+
+fn iconify(window: *Window) void {
+    _ = win32.ShowWindow(windowHandle(window), @bitCast(@as(u32, 6)));
+}
+
+fn setMinSize(_: *Window, _: ?runtime.Size) void {}
+fn setMaxSize(_: *Window, _: ?runtime.Size) void {}
+fn setResizable(_: *Window, _: bool) void {}
+
+fn setCursorVisible(_: *Window, visible: bool) void {
+    _ = win32.ShowCursor(if (visible) win32.TRUE else win32.FALSE);
+}
+
+fn setCursor(_: *Window, shape: runtime.CursorShape) void {
+    _ = win32.ShowCursor(if (shape != .hidden) win32.TRUE else win32.FALSE);
+}
+
+fn applyScale(_: *Window, _: f32) void {}
+
+const vtable: runtime.VTable = .{
+    .deinit = deinit,
+    .native_display = nativeDisplay,
+    .required_vulkan_extensions = requiredVulkanExtensions,
+    .create_window = createWindow,
+    .pump_events = pumpEvents,
+    .wake = wake,
+    .step = step,
+    .next_frame = nextFrame,
+    .inject_event = injectEvent,
+    .destroy_window = destroyWindow,
+    .native_surface = nativeSurface,
+    .set_title = setTitle,
+    .show = show,
+    .hide = hide,
+    .maximize = maximize,
+    .set_fullscreen = setFullscreen,
+    .restore = restore,
+    .iconify = iconify,
+    .set_min_size = setMinSize,
+    .set_max_size = setMaxSize,
+    .set_resizable = setResizable,
+    .set_cursor_visible = setCursorVisible,
+    .set_cursor = setCursor,
+    .apply_scale = applyScale,
 };
 
 fn dispatchMessages(wait: bool, timeout_ms: u32) bool {
@@ -317,28 +264,24 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
         const cs: *win32.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lparam)));
         const window: *Window = @ptrCast(@alignCast(cs.lpCreateParams));
         _ = win32.SetWindowLongPtrW(hwnd, win32.WINDOW_LONG_PTR_INDEX._USERDATA, @bitCast(@intFromPtr(window)));
-        window.hwnd = hwnd;
+        window.backend_data = @ptrCast(hwnd);
         return win32.DefWindowProcW(hwnd, message, wparam, lparam);
     }
     const window = windowFromHwnd(hwnd) orelse return win32.DefWindowProcW(hwnd, message, wparam, lparam);
     switch (message) {
         win32.WM_CLOSE => {
-            window.should_close = true;
-            if (window.callbacks.close) |cb| cb(window);
+            window.updateClose();
             return 0;
         },
         win32.WM_SETFOCUS => {
-            window.focused = true;
-            if (window.callbacks.focus) |cb| cb(window, true);
+            window.updateFocus(true);
         },
         win32.WM_KILLFOCUS => {
-            window.focused = false;
-            if (window.callbacks.focus) |cb| cb(window, false);
+            window.updateFocus(false);
         },
         win32.WM_MOUSEMOVE => {
             const p = Point{ .x = @floatFromInt(win32.xFromLparam(lparam)), .y = @floatFromInt(win32.yFromLparam(lparam)) };
-            window.cursor_pos = p;
-            if (window.callbacks.cursor_motion) |cb| cb(window, p);
+            window.updateCursorMotion(p.x, p.y);
         },
         win32.WM_LBUTTONDOWN, win32.WM_LBUTTONUP, win32.WM_RBUTTONDOWN, win32.WM_RBUTTONUP, win32.WM_MBUTTONDOWN, win32.WM_MBUTTONUP, win32.WM_XBUTTONDOWN, win32.WM_XBUTTONUP => {
             const button: MouseButton = switch (message) {
@@ -352,33 +295,25 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
                 win32.WM_LBUTTONDOWN, win32.WM_RBUTTONDOWN, win32.WM_MBUTTONDOWN, win32.WM_XBUTTONDOWN => .press,
                 else => .release,
             };
-            switch (action) {
-                .press => _ = window.pressed_buttons.insert(button),
-                .release => _ = window.pressed_buttons.remove(button),
-                .repeat => {},
-            }
-            if (window.callbacks.mouse_button) |cb| cb(window, button, action, modifiers());
+            window.updateMouseButton(button, action, modifiers());
             return 0;
         },
         win32.WM_MOUSEWHEEL, win32.WM_MOUSEHWHEEL => {
             const delta: i16 = @bitCast(win32.hiword(wparam));
-            if (window.callbacks.scroll) |cb| cb(window, if (message == win32.WM_MOUSEHWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0, if (message == win32.WM_MOUSEWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0);
+            window.updateScroll(if (message == win32.WM_MOUSEHWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0, if (message == win32.WM_MOUSEWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0);
             return 0;
         },
         win32.WM_SIZE => {
             var rect: win32.RECT = undefined;
             _ = win32.GetClientRect(hwnd, &rect);
             const size = Size{ .width = rect.right, .height = rect.bottom };
-            window.size = size;
-            window.framebuffer_size = size;
-            if (window.callbacks.resize) |cb| cb(window, size);
-            if (window.callbacks.framebuffer_resize) |cb| cb(window, size);
+            window.updateSize(size);
         },
         win32.WM_CHAR => {
             var utf8: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(@intCast(wparam), &utf8) catch 0;
             if (len != 0 and input.isPrintableText(utf8[0..len])) {
-                if (window.callbacks.text) |cb| cb(window, utf8[0..len]);
+                window.updateText(utf8[0..len]);
             }
             return 0;
         },
@@ -387,12 +322,7 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             const released = message == win32.WM_KEYUP or message == win32.WM_SYSKEYUP;
             const repeated = !released and (@as(usize, @bitCast(lparam)) & 0x4000_0000) != 0;
             const action: Action = if (released) .release else if (repeated) .repeat else .press;
-            switch (action) {
-                .press => _ = window.pressed_keys.insert(key),
-                .release => _ = window.pressed_keys.remove(key),
-                .repeat => {},
-            }
-            if (window.callbacks.key) |cb| cb(window, key, @intCast(wparam), action, modifiers());
+            window.updateKey(key, @intCast(wparam), action, modifiers());
             if (message == win32.WM_KEYDOWN or message == win32.WM_KEYUP) return 0;
         },
         else => {},

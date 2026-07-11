@@ -4,11 +4,11 @@
 
 Add an optional, binding-agnostic Vulkan convenience layer to low for quick
 windowed and offscreen rendering experiments. The base module remains
-windowing/event-only. Enable helpers with -Dvulkan_helpers=true.
+windowing/event-only. Enable helpers with -Dvk_extras=true.
 
-The helper must not import or pin a Vulkan binding. Callers supply their
-generated binding module through low.vulkan.targets(vk). Binding-specific
-proxy types, casts, and Vulkan calls stay in src/vulkan/.
+The helper must not import or pin a Vulkan binding. Low owns a small Vulkan 1.2
+ABI and runtime dispatch table in src/vulkan.zig and src/vulkan/. Applications
+can keep their own binding for device creation and rendering commands.
 
 ## Public API
 
@@ -18,7 +18,8 @@ with one low.Window.
 Required initialization inputs:
 
 - context and window
-- instance, physical device, device, graphics queue, and queue-family index
+- low.vulkan.Instance and low.vulkan.Device dispatch views, plus physical
+  device, graphics queue, and queue-family index
 - command pool and color format
 - frames-in-flight count
 - offscreen memory allocator callback
@@ -57,8 +58,8 @@ Applications own:
 
 ## Milestones
 
-1. Keep src/vulkan/targets.zig as the only binding-facing helper area and keep
-   helpers disabled by default.
+1. Keep the Vulkan ABI and runtime dispatch explicit and keep helpers disabled
+   by default.
 2. Implement RenderTarget desktop state: surface, swapchain, views, resize,
    acquire/present, and recreation.
 3. Put the existing OffscreenImageRing behind the same RenderTarget and Frame
@@ -66,8 +67,8 @@ Applications own:
 4. Add synchronization and status/error handling for skipped, out-of-date,
    and suboptimal frames.
 5. Create examples/basic_low_level by copying and simplifying the current
-   explicit triangle demo. It must not use vulkan_helpers.
-6. Refactor examples/multiwindow_triangles to require vulkan_helpers and use
+   explicit triangle demo. It must not use vk_extras.
+6. Refactor examples/multiwindow_triangles to require vk_extras and use
    RenderTarget. Remove its local AppWindow lifecycle boilerplate.
 7. Add documentation and test/build coverage for default and helper-enabled
    configurations.
@@ -75,7 +76,7 @@ Applications own:
 ## Acceptance criteria
 
 - zig build test succeeds with helpers disabled.
-- zig build test -Dvulkan_helpers=true succeeds.
+- zig build test -Dvk_extras=true succeeds.
 - basic_low_level demonstrates raw low plus Vulkan surface/swapchain setup.
 - multiwindow_triangles contains no local surface/swapchain/image-view/frame
   synchronization lifecycle equivalent to the current AppWindow.

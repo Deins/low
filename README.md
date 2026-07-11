@@ -14,8 +14,13 @@ With goal to be as **portable** and **cross-compilable** as possible.
 
 ## Features
 
+`low` is the complete supported public API: applications should import only
+the root module (with `low.vulkan` as its intentional submodule). Platform
+backends and shared runtime modules under `src/internal` are implementation
+details.
+
 - Runtime backend selection from `WAYLAND_DISPLAY`, `DISPLAY`, and `XDG_SESSION_TYPE`
-- A Linux offscreen backend for deterministic, display-server-free testing and rendering
+- A cross-platform offscreen backend for deterministic, display-server-free testing and rendering
 - Multi-window support
 - Window state queries and callbacks for resize, focus, pointer, keyboard, text, and close events
 - Wayland titlebar/decorations preference via `xdg-decoration` when available
@@ -71,19 +76,25 @@ while (!window.shouldClose()) {
 ### Optional Vulkan render-target helpers
 
 The base module remains windowing and event only. Enable the optional
-binding-agnostic render-target layer with `-Dvulkan_helpers=true`, then pass
-the generated Vulkan binding to `low.vulkan.targets(vk)`. `RenderTarget` owns
-the desktop surface/swapchain or an offscreen image ring, frame command
-buffers, synchronization, resize recreation, and layout transitions:
+binding-agnostic render-target layer with `-Dvk_extras=true`.
+`low.vulkan` owns a small Vulkan 1.2 ABI and resolves its required instance and
+device commands at runtime; applications may use any Vulkan binding for the
+rest of their renderer. `RenderTarget` owns the desktop surface/swapchain or
+an offscreen image ring, frame command buffers, synchronization, resize
+recreation, and layout transitions:
 
 ```zig
-const RenderTarget = low.vulkan.targets(vk).RenderTarget;
+const RenderTarget = low.vulkan.targets().RenderTarget;
+var loader = try low.vulkan.Loader.init();
+defer loader.deinit();
+const low_instance = try loader.loadInstanceApi(instance_handle);
+const low_device = try low.vulkan.Device.init(&low_instance, device_handle);
 var target = try RenderTarget.init(allocator, .{
     .context = &context,
     .window = window,
-    .instance = instance,
+    .instance = &low_instance,
     .physical_device = physical_device,
-    .device = device,
+    .device = &low_device,
     .graphics_queue = graphics_queue,
     .graphics_queue_family = graphics_queue_family,
     .command_pool = command_pool,
@@ -101,10 +112,10 @@ defer frame.abort();
 try frame.submitAndPresent();
 ```
 
-The helper assumes Vulkan 1.3 synchronization-2 commands are available on
-the supplied device. On desktop, `submitAndPresent` presents the acquired
-swapchain image; offscreen targets never create a surface or swapchain and
-leave the rendered image in `transfer_src_optimal`.
+The helper uses Vulkan 1.2 core submission and barrier commands. On desktop,
+`submitAndPresent` presents the acquired swapchain image; offscreen targets
+never create a surface or swapchain and leave the rendered image in
+`transfer_src_optimal`.
 
 The selected backend loads only its own system libraries at runtime:
 

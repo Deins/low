@@ -1,23 +1,23 @@
 const std = @import("std");
-const common = @import("common.zig");
+const types = @import("types.zig");
 const input = @import("input.zig");
 
 const log = std.log.scoped(.low);
 
-pub const BackendKind = common.BackendKind;
-pub const Size = common.Size;
-pub const Point = common.Point;
-pub const ContentScale = common.ContentScale;
-pub const TextInputRect = common.TextInputRect;
-pub const ColorScheme = common.ColorScheme;
+pub const BackendKind = types.BackendKind;
+pub const Size = types.Size;
+pub const Point = types.Point;
+pub const ContentScale = types.ContentScale;
+pub const TextInputRect = types.TextInputRect;
+pub const ColorScheme = types.ColorScheme;
 pub const Action = input.Action;
 pub const MouseButton = input.MouseButton;
 pub const Modifiers = input.Modifiers;
 pub const CursorShape = input.CursorShape;
 pub const Key = input.Key;
 
-pub const DecorationMode = common.DecorationMode;
-pub const WindowState = common.WindowState;
+pub const DecorationMode = types.DecorationMode;
+pub const WindowState = types.WindowState;
 
 pub const Error = error{
     UnsupportedPlatform,
@@ -30,19 +30,21 @@ pub const Error = error{
     SystemResources,
     NotOffscreen,
     ManualFrameStepping,
+    WindowClassRegistrationFailed,
+    WindowCreationFailed,
 };
 
 /// How an offscreen context advances rendering boundaries. Rendering remains
 /// application-owned: call `nextFrame` before each rendered frame, or call
 /// `step` explicitly in manual mode.
-pub const FrameMode = common.FrameMode;
-pub const OffscreenOptions = common.OffscreenOptions;
-pub const InitOptions = common.InitOptions;
+pub const FrameMode = types.FrameMode;
+pub const OffscreenOptions = types.OffscreenOptions;
+pub const InitOptions = types.InitOptions;
 
 /// An event injected into an offscreen window. Text is copied when queued, so
 /// its bytes need only remain valid for the duration of `injectEvent`.
-pub const Event = common.Event;
-pub const WindowOptions = common.WindowOptions;
+pub const Event = types.Event;
+pub const WindowOptions = types.WindowOptions;
 
 pub const WindowCallbacks = struct {
     close: ?*const fn (*Window) void = null,
@@ -92,7 +94,7 @@ pub const State = struct {
     backend_data: *anyopaque,
     vtable: *const VTable,
     event_error_reported: bool = false,
-    clipboard: common.Clipboard = .{},
+    clipboard: types.Clipboard = .{},
 
     pub fn deinit(self: *State) void {
         self.vtable.deinit(self);
@@ -370,7 +372,7 @@ pub const Window = struct {
         self.content_scale = new_scale;
         self.ctx.vtable.apply_scale(self, scale);
         const old_fb = self.framebuffer_size;
-        self.framebuffer_size = common.scaledSize(self.size, self.content_scale);
+        self.framebuffer_size = types.scaledSize(self.size, self.content_scale);
         if (self.callbacks.scale) |cb| cb(self, self.content_scale);
         if (old_fb.width != self.framebuffer_size.width or old_fb.height != self.framebuffer_size.height) {
             if (self.callbacks.framebuffer_resize) |cb| cb(self, self.framebuffer_size);
@@ -381,7 +383,7 @@ pub const Window = struct {
         const old_size = self.size;
         const old_fb = self.framebuffer_size;
         self.size = size;
-        self.framebuffer_size = common.scaledSize(size, self.content_scale);
+        self.framebuffer_size = types.scaledSize(size, self.content_scale);
         if (old_size.width != size.width or old_size.height != size.height) {
             if (self.callbacks.resize) |cb| cb(self, size);
         }
@@ -436,3 +438,73 @@ pub const Window = struct {
         if (self.callbacks.text) |cb| cb(self, bytes);
     }
 };
+
+/// The platform-independent public context. `backend` supplies only state
+/// construction; all user-facing forwarding and lifecycle behavior stays in
+/// this type.
+pub fn Context(comptime backend: type) type {
+    return struct {
+        state: *State,
+
+        pub fn init(allocator: std.mem.Allocator, options: InitOptions) Error!@This() {
+            return .{ .state = try backend.initState(allocator, options) };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.state.deinit();
+            self.* = undefined;
+        }
+
+        pub fn nativeDisplay(self: *@This()) *anyopaque {
+            return self.state.nativeDisplay();
+        }
+
+        pub fn requiredVulkanInstanceExtensions(self: *@This()) []const [*:0]const u8 {
+            return self.state.requiredVulkanInstanceExtensions();
+        }
+
+        pub fn backendKind(self: *@This()) BackendKind {
+            return self.state.backendKind();
+        }
+
+        pub fn createWindow(self: *@This(), options: WindowOptions) Error!*Window {
+            return self.state.createWindow(options);
+        }
+
+        pub fn pollEvents(self: *@This()) void {
+            self.state.pollEvents();
+        }
+
+        pub fn waitEvents(self: *@This()) Error!void {
+            return self.state.waitEvents();
+        }
+
+        pub fn waitEventsTimeout(self: *@This(), timeout_ns: u64) Error!bool {
+            return self.state.waitEventsTimeout(timeout_ns);
+        }
+
+        pub fn wake(self: *@This()) void {
+            self.state.wake();
+        }
+
+        pub fn step(self: *@This()) Error!void {
+            return self.state.step();
+        }
+
+        pub fn nextFrame(self: *@This()) Error!void {
+            return self.state.nextFrame();
+        }
+
+        pub fn clipboardText(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+            return self.state.clipboardText(allocator);
+        }
+
+        pub fn clipboardTextSet(self: *@This(), text: []const u8) std.mem.Allocator.Error!void {
+            return self.state.clipboardTextSet(text);
+        }
+
+        pub fn preferredColorScheme(self: *@This()) ?ColorScheme {
+            return self.state.preferredColorScheme();
+        }
+    };
+}

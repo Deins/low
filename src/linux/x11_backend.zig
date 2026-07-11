@@ -1,6 +1,6 @@
 const std = @import("std");
-const api = @import("../api.zig");
-const input = @import("../input.zig");
+const api = @import("../internal/runtime.zig");
+const input = @import("../internal/input.zig");
 const x11 = @import("x11.zig");
 
 const Data = struct {

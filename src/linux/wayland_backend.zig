@@ -1,5 +1,5 @@
 const std = @import("std");
-const api = @import("../api.zig");
+const api = @import("../internal/runtime.zig");
 const native = @import("wayland_native.zig");
 
 const Data = struct {
