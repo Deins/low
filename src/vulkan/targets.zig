@@ -25,7 +25,6 @@ pub const RenderTarget = struct {
         FrameAlreadyFinished,
         FrameSkipped,
         FrameOutOfDate,
-        OffscreenAllocatorRequired,
     };
 
     pub const Frame = struct {
@@ -82,6 +81,7 @@ pub const RenderTarget = struct {
             command_pool: vk.CommandPool,
             color_format: vk.Format,
             memory_allocator: ?MemoryAllocator,
+            memory_properties: vk.PhysicalDeviceMemoryProperties = undefined,
             frames_in_flight: u32,
             slots: []Slot = &.{},
             surface: vk.SurfaceKHR = 0,
@@ -122,6 +122,36 @@ pub const RenderTarget = struct {
             fn abortOpaque(ptr: ?*anyopaque) void {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
                 self.abortFrame();
+            }
+
+            fn allocateDefaultMemory(context: ?*anyopaque, _: vk.Image, requirements: vk.MemoryRequirements) anyerror!vk.DeviceMemory {
+                const self: *StateSelf = @ptrCast(@alignCast(context orelse return error.MissingMemoryAllocator));
+                var fallback: ?u32 = null;
+                for (0..self.memory_properties.memory_type_count) |index| {
+                    const memory_type: u32 = @intCast(index);
+                    if (requirements.memory_type_bits & (@as(u32, 1) << @intCast(index)) == 0) continue;
+                    fallback = memory_type;
+                    if (self.memory_properties.memory_types[index].property_flags & vk.memory_property.device_local_bit != 0) {
+                        return self.device.allocateMemory(&.{
+                            .s_type = .memory_allocate_info,
+                            .p_next = null,
+                            .allocation_size = requirements.size,
+                            .memory_type_index = memory_type,
+                        });
+                    }
+                }
+                const memory_type = fallback orelse return error.NoCompatibleMemoryType;
+                return self.device.allocateMemory(&.{
+                    .s_type = .memory_allocate_info,
+                    .p_next = null,
+                    .allocation_size = requirements.size,
+                    .memory_type_index = memory_type,
+                });
+            }
+
+            fn freeDefaultMemory(context: ?*anyopaque, memory: vk.DeviceMemory) void {
+                const self: *StateSelf = @ptrCast(@alignCast(context orelse return));
+                self.device.freeMemory(memory);
             }
 
             fn acquireFrame(self: *StateSelf, ptr: *anyopaque) anyerror!Frame {
@@ -261,7 +291,7 @@ pub const RenderTarget = struct {
                 };
                 if (self.surface == 0) {
                     if (self.ring == null) {
-                        const memory = self.memory_allocator orelse return error.OffscreenAllocatorRequired;
+                        const memory = self.memory_allocator.?;
                         self.ring = try OffscreenImageRing.init(.{
                             .allocator = self.allocator,
                             .device = self.device,
@@ -440,8 +470,20 @@ pub const RenderTarget = struct {
         errdefer State.deinitOpaque(@ptrCast(state));
 
         if (options.context.backendKind() != .offscreen) {
-            state.surface = try Vulkan.createSurface(state.instance, options.context, options.window);
+            state.surface = try Vulkan.createSurface(
+                state.instance,
+                options.context.backendKind(),
+                options.window.nativeDisplay(),
+                options.window.nativeSurface(),
+            );
             if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, options.graphics_queue_family, state.surface) != vk.TRUE) return error.QueueFamilyCannotPresent;
+        } else {
+            state.memory_properties = state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
+            if (state.memory_allocator == null) state.memory_allocator = .{
+                .context = state,
+                .allocate_and_bind = State.allocateDefaultMemory,
+                .free = State.freeDefaultMemory,
+            };
         }
         try state.createSync();
         if (options.context.backendKind() == .offscreen) try state.ensureTarget();

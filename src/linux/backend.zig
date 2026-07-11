@@ -4,7 +4,7 @@ const types = @import("../internal/types.zig");
 const runtime = @import("../internal/runtime.zig");
 const wayland_backend = if (build_options.wayland) @import("wayland_backend.zig") else struct {};
 const x11_backend = @import("x11_backend.zig");
-const offscreen_backend = @import("../offscreen_backend.zig").Backend(runtime);
+const offscreen_backend = @import("../offscreen_backend.zig").Backend;
 
 pub const BackendRequest = types.BackendRequest;
 pub const BackendKind = types.BackendKind;
@@ -29,7 +29,6 @@ pub const Event = runtime.Event;
 pub const InitOptions = runtime.InitOptions;
 pub const WindowOptions = runtime.WindowOptions;
 pub const Window = runtime.Window;
-pub const Context = runtime.Context(@This());
 
 pub fn initState(allocator: std.mem.Allocator, options: InitOptions) Error!*runtime.State {
     const env: Environment = .{

@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const types = @import("internal/types.zig");
 pub const api = @import("vulkan/api.zig");
 
 pub const Loader = struct {
@@ -82,6 +83,7 @@ pub const Instance = struct {
     pub const Dispatch = struct {
         get_device_proc_addr: api.PfnGetDeviceProcAddr,
         destroy_instance: api.PfnDestroyInstance,
+        get_physical_device_memory_properties: api.PfnGetPhysicalDeviceMemoryProperties,
         destroy_surface_khr: ?api.PfnDestroySurfaceKHR,
         get_physical_device_surface_support_khr: ?api.PfnGetPhysicalDeviceSurfaceSupportKHR,
         get_physical_device_surface_capabilities_khr: ?api.PfnGetPhysicalDeviceSurfaceCapabilitiesKHR,
@@ -100,6 +102,7 @@ pub const Instance = struct {
             .dispatch = .{
                 .get_device_proc_addr = try loader.loadInstance(handle, api.PfnGetDeviceProcAddr, "vkGetDeviceProcAddr"),
                 .destroy_instance = try loader.loadInstance(handle, api.PfnDestroyInstance, "vkDestroyInstance"),
+                .get_physical_device_memory_properties = try loader.loadInstance(handle, api.PfnGetPhysicalDeviceMemoryProperties, "vkGetPhysicalDeviceMemoryProperties"),
                 .destroy_surface_khr = loadOptionalInstance(loader, handle, api.PfnDestroySurfaceKHR, "vkDestroySurfaceKHR"),
                 .get_physical_device_surface_support_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceSupportKHR, "vkGetPhysicalDeviceSurfaceSupportKHR"),
                 .get_physical_device_surface_capabilities_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceCapabilitiesKHR, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"),
@@ -109,6 +112,12 @@ pub const Instance = struct {
                 .create_xlib_surface_khr = loadOptionalInstance(loader, handle, api.PfnCreateXlibSurfaceKHR, "vkCreateXlibSurfaceKHR"),
             },
         };
+    }
+
+    pub fn getPhysicalDeviceMemoryProperties(self: *const Self, physical_device: api.PhysicalDevice) api.PhysicalDeviceMemoryProperties {
+        var properties: api.PhysicalDeviceMemoryProperties = undefined;
+        self.dispatch.get_physical_device_memory_properties(physical_device, &properties);
+        return properties;
     }
 
     pub fn getPhysicalDeviceSurfaceSupportKHR(self: *const Self, physical_device: api.PhysicalDevice, queue_family: u32, surface: api.SurfaceKHR) !api.Bool32 {
@@ -200,6 +209,8 @@ pub const Device = struct {
         destroy_image: api.PfnDestroyImage,
         get_image_memory_requirements: api.PfnGetImageMemoryRequirements,
         bind_image_memory: api.PfnBindImageMemory,
+        allocate_memory: api.PfnAllocateMemory,
+        free_memory: api.PfnFreeMemory,
         cmd_pipeline_barrier: api.PfnCmdPipelineBarrier,
     };
 
@@ -234,6 +245,8 @@ pub const Device = struct {
                 .destroy_image = try loadDevice(gpa, handle, api.PfnDestroyImage, "vkDestroyImage"),
                 .get_image_memory_requirements = try loadDevice(gpa, handle, api.PfnGetImageMemoryRequirements, "vkGetImageMemoryRequirements"),
                 .bind_image_memory = try loadDevice(gpa, handle, api.PfnBindImageMemory, "vkBindImageMemory"),
+                .allocate_memory = try loadDevice(gpa, handle, api.PfnAllocateMemory, "vkAllocateMemory"),
+                .free_memory = try loadDevice(gpa, handle, api.PfnFreeMemory, "vkFreeMemory"),
                 .cmd_pipeline_barrier = try loadDevice(gpa, handle, api.PfnCmdPipelineBarrier, "vkCmdPipelineBarrier"),
             },
         };
@@ -383,6 +396,16 @@ pub const Device = struct {
         try check(self.dispatch.bind_image_memory(self.handle, image, memory, offset));
     }
 
+    pub fn allocateMemory(self: *const Self, info: *const api.MemoryAllocateInfo) !api.DeviceMemory {
+        var memory: api.DeviceMemory = 0;
+        try check(self.dispatch.allocate_memory(self.handle, info, null, &memory));
+        return memory;
+    }
+
+    pub fn freeMemory(self: *const Self, memory: api.DeviceMemory) void {
+        self.dispatch.free_memory(self.handle, memory, null);
+    }
+
     pub fn cmdPipelineBarrier(
         self: *const Self,
         command_buffer: api.CommandBuffer,
@@ -399,37 +422,36 @@ pub fn targets() type {
     return @import("vulkan/targets.zig");
 }
 
-pub fn requiredInstanceExtensions(context: anytype) []const [*:0]const u8 {
-    return context.requiredVulkanInstanceExtensions();
-}
-
-pub fn createSurface(instance: *const Instance, context: anytype, window: anytype) !api.SurfaceKHR {
+/// Creates a presentation surface for an explicit native backend handle.
+/// Prefer `Context.requiredVulkanInstanceExtensions` when creating the Vulkan
+/// instance; this helper only creates the surface itself.
+pub fn createSurface(instance: *const Instance, backend_kind: types.BackendKind, native_display: *anyopaque, native_surface: usize) !api.SurfaceKHR {
     if (builtin.target.os.tag == .windows) {
         const info = api.Win32SurfaceCreateInfoKHR{
             .s_type = .win32_surface_create_info_khr,
             .p_next = null,
             .flags = 0,
-            .hinstance = @ptrCast(window.nativeDisplay()),
-            .hwnd = @ptrFromInt(window.nativeSurface()),
+            .hinstance = @ptrCast(native_display),
+            .hwnd = @ptrFromInt(native_surface),
         };
         return instance.createWin32SurfaceKHR(&info);
     }
 
     if (builtin.target.os.tag == .linux) {
-        return switch (context.backendKind()) {
+        return switch (backend_kind) {
             .wayland => instance.createWaylandSurfaceKHR(&.{
                 .s_type = .wayland_surface_create_info_khr,
                 .p_next = null,
                 .flags = 0,
-                .display = @ptrCast(@alignCast(window.nativeDisplay())),
-                .surface = @ptrFromInt(window.nativeSurface()),
+                .display = @ptrCast(@alignCast(native_display)),
+                .surface = @ptrFromInt(native_surface),
             }),
             .x11 => instance.createXlibSurfaceKHR(&.{
                 .s_type = .xlib_surface_create_info_khr,
                 .p_next = null,
                 .flags = 0,
-                .dpy = @ptrCast(@alignCast(window.nativeDisplay())),
-                .window = @intCast(window.nativeSurface()),
+                .dpy = @ptrCast(@alignCast(native_display)),
+                .window = @intCast(native_surface),
             }),
             .offscreen => error.OffscreenSurfaceUnavailable,
             .windows => error.UnsupportedPlatform,

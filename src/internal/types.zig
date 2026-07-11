@@ -36,16 +36,49 @@ pub fn detectBackend(env: Environment) BackendKind {
     return .wayland;
 }
 
+/// A two-dimensional extent. Prefer a unit-specific alias such as
+/// `ContentSize` or `PixelSize` in public-facing declarations.
 pub const Size = struct {
     width: i32,
     height: i32,
 };
 
+/// An offset in two dimensions. Prefer `ContentOffset` for positions in a
+/// window's content coordinate space.
 pub const Point = struct {
     x: f64,
     y: f64,
 };
 
+/// Size of a window's drawable content area in logical content units.
+///
+/// Logical content units are used for window layout and pointer positions.
+/// Their relationship to framebuffer pixels is given by `ContentScale`.
+pub const ContentSize = Size;
+
+/// Size of a window's framebuffer in physical pixels.
+///
+/// Use this size for pixel-addressed rendering operations, such as a graphics
+/// viewport or swapchain extent.
+pub const PixelSize = Size;
+
+/// Position or offset in a window's logical content coordinate space.
+pub const ContentOffset = Point;
+
+/// Position or offset in physical-pixel space. Fractional values are retained
+/// so coordinate conversions do not lose precision.
+pub const PixelOffset = Point;
+
+/// A rectangle in a window's logical content coordinate space.
+pub const ContentRect = struct {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+};
+
+/// Per-axis multiplier that converts logical content units to physical pixels.
+/// A 2× display, for example, has a scale of approximately `{ 2, 2 }`.
 pub const ContentScale = struct {
     x: f32 = 1,
     y: f32 = 1,
@@ -55,12 +88,7 @@ pub const ContentScale = struct {
 ///
 /// This is used to place platform text-input UI (for example an IME candidate
 /// window) next to the active text field.
-pub const TextInputRect = struct {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-};
+pub const TextInputRect = ContentRect;
 
 /// The desktop colour preference when the platform can determine one.
 pub const ColorScheme = enum { light, dark };
@@ -90,28 +118,36 @@ pub const InitOptions = struct {
 
 pub const WindowOptions = struct {
     title: [:0]const u8,
-    size: Size = .{ .width = 1280, .height = 720 },
+    /// Initial drawable content size, in logical content units.
+    size: ContentSize = .{ .width = 1280, .height = 720 },
     app_id: ?[:0]const u8 = null,
     resizable: bool = true,
     decorated: bool = true,
     titlebar: DecorationMode = .auto,
     state: WindowState = .normal,
     visible: bool = true,
-    min_size: ?Size = null,
-    max_size: ?Size = null,
+    /// Optional minimum drawable content size, in logical content units.
+    min_size: ?ContentSize = null,
+    /// Optional maximum drawable content size, in logical content units.
+    max_size: ?ContentSize = null,
 };
 
 /// A synthetic event for an offscreen window. Text is copied by the offscreen
 /// backend when queued.
 pub const Event = union(enum) {
     close: void,
-    resize: Size,
-    framebuffer_resize: Size,
+    /// Drawable content size changed, in logical content units.
+    resize: ContentSize,
+    /// Framebuffer size changed, in physical pixels.
+    framebuffer_resize: PixelSize,
     scale: ContentScale,
     focus: bool,
     cursor_enter: bool,
-    cursor_motion: Point,
+    /// Pointer location in logical content units.
+    cursor_motion: ContentOffset,
     mouse_button: struct { button: input.MouseButton, action: input.Action, mods: input.Modifiers = .{} },
+    /// Scroll delta in platform-defined scroll units; it is neither content
+    /// units nor physical pixels.
     scroll: struct { x: f64, y: f64 },
     key: struct { key: input.Key, raw_keycode: u32 = 0, action: input.Action, mods: input.Modifiers = .{} },
     text: []const u8,

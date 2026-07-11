@@ -3,7 +3,7 @@ const types = @import("../internal/types.zig");
 const runtime = @import("../internal/runtime.zig");
 const input = @import("../internal/input.zig");
 const win32 = @import("win32").everything;
-const offscreen_backend = @import("../offscreen_backend.zig").Backend(runtime);
+const offscreen_backend = @import("../offscreen_backend.zig").Backend;
 
 pub const BackendKind = types.BackendKind;
 pub const Error = runtime.Error;
@@ -15,7 +15,6 @@ pub const MouseButton = runtime.MouseButton;
 pub const Action = runtime.Action;
 pub const InitOptions = runtime.InitOptions;
 pub const WindowOptions = runtime.WindowOptions;
-pub const Context = runtime.Context(@This());
 pub const Window = runtime.Window;
 
 const class_name = win32.L("low.window");

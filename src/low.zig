@@ -12,7 +12,70 @@ else
 
 // This module is the complete supported public surface of low. Platform
 // modules and the shared runtime are implementation details.
-pub const Context = platform.Context;
+pub const Context = struct {
+    state: runtime.BackendState,
+
+    pub fn init(allocator: @import("std").mem.Allocator, options: InitOptions) Error!@This() {
+        return .{ .state = runtime.BackendState.init(try platform.initState(allocator, options)) };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.state.get().deinit();
+        self.* = undefined;
+    }
+
+    pub fn nativeDisplay(self: *const @This()) *anyopaque {
+        return self.state.get().nativeDisplay();
+    }
+
+    pub fn requiredVulkanInstanceExtensions(self: *const @This()) []const [*:0]const u8 {
+        return self.state.get().requiredVulkanInstanceExtensions();
+    }
+
+    pub fn backendKind(self: *const @This()) BackendKind {
+        return self.state.get().backendKind();
+    }
+
+    pub fn createWindow(self: *const @This(), options: WindowOptions) Error!*Window {
+        return self.state.get().createWindow(options);
+    }
+
+    pub fn pollEvents(self: *const @This()) void {
+        self.state.get().pollEvents();
+    }
+
+    pub fn waitEvents(self: *const @This()) Error!void {
+        return self.state.get().waitEvents();
+    }
+
+    pub fn waitEventsTimeout(self: *const @This(), timeout_ns: u64) Error!bool {
+        return self.state.get().waitEventsTimeout(timeout_ns);
+    }
+
+    pub fn wake(self: *const @This()) void {
+        self.state.get().wake();
+    }
+
+    pub fn step(self: *const @This()) Error!void {
+        return self.state.get().step();
+    }
+
+    pub fn nextFrame(self: *const @This()) Error!void {
+        return self.state.get().nextFrame();
+    }
+
+    pub fn clipboardText(self: *const @This(), allocator: @import("std").mem.Allocator) @import("std").mem.Allocator.Error![]u8 {
+        return self.state.get().clipboardText(allocator);
+    }
+
+    pub fn clipboardTextSet(self: *const @This(), text: []const u8) @import("std").mem.Allocator.Error!void {
+        return self.state.get().clipboardTextSet(text);
+    }
+
+    pub fn preferredColorScheme(self: *const @This()) ?ColorScheme {
+        return self.state.get().preferredColorScheme();
+    }
+};
 pub const Window = platform.Window;
 pub const Error = runtime.Error;
 pub const WindowCallbacks = runtime.WindowCallbacks;
@@ -25,6 +88,16 @@ pub const Environment = types.Environment;
 pub const detectBackend = types.detectBackend;
 pub const Size = types.Size;
 pub const Point = types.Point;
+/// Size of a window's drawable content area, in logical content units.
+pub const ContentSize = types.ContentSize;
+/// Size of a window's framebuffer, in physical pixels.
+pub const PixelSize = types.PixelSize;
+/// Position or offset in a window's logical content coordinate space.
+pub const ContentOffset = types.ContentOffset;
+/// Position or offset in physical-pixel space.
+pub const PixelOffset = types.PixelOffset;
+/// Rectangle in a window's logical content coordinate space.
+pub const ContentRect = types.ContentRect;
 pub const ContentScale = types.ContentScale;
 pub const TextInputRect = types.TextInputRect;
 pub const ColorScheme = types.ColorScheme;
@@ -58,6 +131,11 @@ test "root API exposes the supported contract" {
     _ = detectBackend;
     _ = Size;
     _ = Point;
+    _ = ContentSize;
+    _ = PixelSize;
+    _ = ContentOffset;
+    _ = PixelOffset;
+    _ = ContentRect;
     _ = ContentScale;
     _ = TextInputRect;
     _ = ColorScheme;

@@ -7,6 +7,11 @@ const log = std.log.scoped(.low);
 pub const BackendKind = types.BackendKind;
 pub const Size = types.Size;
 pub const Point = types.Point;
+pub const ContentSize = types.ContentSize;
+pub const PixelSize = types.PixelSize;
+pub const ContentOffset = types.ContentOffset;
+pub const PixelOffset = types.PixelOffset;
+pub const ContentRect = types.ContentRect;
 pub const ContentScale = types.ContentScale;
 pub const TextInputRect = types.TextInputRect;
 pub const ColorScheme = types.ColorScheme;
@@ -48,13 +53,21 @@ pub const WindowOptions = types.WindowOptions;
 
 pub const WindowCallbacks = struct {
     close: ?*const fn (*Window) void = null,
-    resize: ?*const fn (*Window, Size) void = null,
-    framebuffer_resize: ?*const fn (*Window, Size) void = null,
+    /// Drawable content size changed, in logical content units. Use this for
+    /// layout; it may differ from the framebuffer size on high-DPI displays.
+    resize: ?*const fn (*Window, ContentSize) void = null,
+    /// Framebuffer size changed, in physical pixels. Use this for
+    /// pixel-addressed rendering resources and viewport dimensions.
+    framebuffer_resize: ?*const fn (*Window, PixelSize) void = null,
     scale: ?*const fn (*Window, ContentScale) void = null,
     focus: ?*const fn (*Window, bool) void = null,
     cursor_enter: ?*const fn (*Window, bool) void = null,
-    cursor_motion: ?*const fn (*Window, Point) void = null,
+    /// Pointer location in logical content units, relative to the content
+    /// area's top-left corner.
+    cursor_motion: ?*const fn (*Window, ContentOffset) void = null,
     mouse_button: ?*const fn (*Window, MouseButton, Action, Modifiers) void = null,
+    /// Scroll delta in platform-defined scroll units; it is neither content
+    /// units nor physical pixels.
     scroll: ?*const fn (*Window, f64, f64) void = null,
     key: ?*const fn (*Window, Key, u32, Action, Modifiers) void = null,
     text: ?*const fn (*Window, []const u8) void = null,
@@ -193,10 +206,10 @@ pub const Window = struct {
     decoration_mode: DecorationMode = .auto,
     cursor_visible: bool = true,
     cursor_shape: CursorShape = .arrow,
-    size: Size,
-    framebuffer_size: Size,
+    size: ContentSize,
+    framebuffer_size: PixelSize,
     content_scale: ContentScale = .{},
-    cursor_pos: Point = .{ .x = 0, .y = 0 },
+    cursor_pos: ContentOffset = .{ .x = 0, .y = 0 },
     text_input_rect: ?TextInputRect = null,
     pressed_keys: std.EnumSet(Key) = .empty,
     pressed_buttons: std.EnumSet(MouseButton) = .empty,
@@ -253,11 +266,13 @@ pub const Window = struct {
         return self.should_close;
     }
 
-    pub fn getSize(self: *const Window) Size {
+    /// Returns the drawable content size in logical content units.
+    pub fn getSize(self: *const Window) ContentSize {
         return self.size;
     }
 
-    pub fn getFramebufferSize(self: *const Window) Size {
+    /// Returns the framebuffer size in physical pixels.
+    pub fn getFramebufferSize(self: *const Window) PixelSize {
         return self.framebuffer_size;
     }
 
@@ -265,7 +280,42 @@ pub const Window = struct {
         return self.content_scale;
     }
 
-    pub fn getCursorPos(self: *const Window) Point {
+    /// Converts a logical content extent to a physical-pixel extent using the
+    /// current content scale. This matches framebuffer-size calculation.
+    pub fn contentToPixelSize(self: *const Window, size: ContentSize) PixelSize {
+        return types.scaledSize(size, self.content_scale);
+    }
+
+    /// Converts a physical-pixel extent to the nearest logical content extent
+    /// using the current content scale. Fractional scaling can make this a
+    /// lossy conversion.
+    pub fn pixelToContentSize(self: *const Window, size: PixelSize) ContentSize {
+        return .{
+            .width = @intFromFloat(@round(@as(f64, @floatFromInt(size.width)) / @as(f64, self.content_scale.x))),
+            .height = @intFromFloat(@round(@as(f64, @floatFromInt(size.height)) / @as(f64, self.content_scale.y))),
+        };
+    }
+
+    /// Converts an offset from logical content units to physical-pixel space.
+    /// Fractional pixel offsets are preserved.
+    pub fn contentToPixelOffset(self: *const Window, offset: ContentOffset) PixelOffset {
+        return .{
+            .x = offset.x * @as(f64, self.content_scale.x),
+            .y = offset.y * @as(f64, self.content_scale.y),
+        };
+    }
+
+    /// Converts an offset from physical-pixel space to logical content units.
+    pub fn pixelToContentOffset(self: *const Window, offset: PixelOffset) ContentOffset {
+        return .{
+            .x = offset.x / @as(f64, self.content_scale.x),
+            .y = offset.y / @as(f64, self.content_scale.y),
+        };
+    }
+
+    /// Returns the pointer location in logical content units, relative to the
+    /// content area's top-left corner.
+    pub fn getCursorPos(self: *const Window) ContentOffset {
         return self.cursor_pos;
     }
 
@@ -337,12 +387,14 @@ pub const Window = struct {
         self.minimized = true;
     }
 
-    pub fn setMinSize(self: *Window, size: ?Size) void {
+    /// Sets the minimum drawable content size in logical content units.
+    pub fn setMinSize(self: *Window, size: ?ContentSize) void {
         self.min_size = size;
         self.ctx.vtable.set_min_size(self, size);
     }
 
-    pub fn setMaxSize(self: *Window, size: ?Size) void {
+    /// Sets the maximum drawable content size in logical content units.
+    pub fn setMaxSize(self: *Window, size: ?ContentSize) void {
         self.max_size = size;
         self.ctx.vtable.set_max_size(self, size);
     }
@@ -362,6 +414,8 @@ pub const Window = struct {
         self.ctx.vtable.set_cursor(self, shape);
     }
 
+    /// Sets the active text field rectangle in logical content units. Platform
+    /// text-input UI, such as an IME candidate window, is positioned from it.
     pub fn setTextInputRect(self: *Window, rect: ?TextInputRect) void {
         self.text_input_rect = rect;
     }
@@ -379,7 +433,7 @@ pub const Window = struct {
         }
     }
 
-    pub fn updateSize(self: *Window, size: Size) void {
+    pub fn updateSize(self: *Window, size: ContentSize) void {
         const old_size = self.size;
         const old_fb = self.framebuffer_size;
         self.size = size;
@@ -439,72 +493,54 @@ pub const Window = struct {
     }
 };
 
-/// The platform-independent public context. `backend` supplies only state
-/// construction; all user-facing forwarding and lifecycle behavior stays in
-/// this type.
-pub fn Context(comptime backend: type) type {
-    return struct {
-        state: *State,
+/// The active backend behind a public context. Every variant uses the shared
+/// runtime state, but the tag makes the selected backend explicit without a
+/// compile-time context wrapper.
+pub const BackendState = union(BackendKind) {
+    wayland: *State,
+    x11: *State,
+    offscreen: *State,
+    windows: *State,
 
-        pub fn init(allocator: std.mem.Allocator, options: InitOptions) Error!@This() {
-            return .{ .state = try backend.initState(allocator, options) };
-        }
+    pub fn init(state: *State) BackendState {
+        return switch (state.backend_kind) {
+            .wayland => .{ .wayland = state },
+            .x11 => .{ .x11 = state },
+            .offscreen => .{ .offscreen = state },
+            .windows => .{ .windows = state },
+        };
+    }
 
-        pub fn deinit(self: *@This()) void {
-            self.state.deinit();
-            self.* = undefined;
-        }
+    pub fn get(self: *const BackendState) *State {
+        return switch (self.*) {
+            inline else => |state| state,
+        };
+    }
+};
 
-        pub fn nativeDisplay(self: *@This()) *anyopaque {
-            return self.state.nativeDisplay();
-        }
-
-        pub fn requiredVulkanInstanceExtensions(self: *@This()) []const [*:0]const u8 {
-            return self.state.requiredVulkanInstanceExtensions();
-        }
-
-        pub fn backendKind(self: *@This()) BackendKind {
-            return self.state.backendKind();
-        }
-
-        pub fn createWindow(self: *@This(), options: WindowOptions) Error!*Window {
-            return self.state.createWindow(options);
-        }
-
-        pub fn pollEvents(self: *@This()) void {
-            self.state.pollEvents();
-        }
-
-        pub fn waitEvents(self: *@This()) Error!void {
-            return self.state.waitEvents();
-        }
-
-        pub fn waitEventsTimeout(self: *@This(), timeout_ns: u64) Error!bool {
-            return self.state.waitEventsTimeout(timeout_ns);
-        }
-
-        pub fn wake(self: *@This()) void {
-            self.state.wake();
-        }
-
-        pub fn step(self: *@This()) Error!void {
-            return self.state.step();
-        }
-
-        pub fn nextFrame(self: *@This()) Error!void {
-            return self.state.nextFrame();
-        }
-
-        pub fn clipboardText(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-            return self.state.clipboardText(allocator);
-        }
-
-        pub fn clipboardTextSet(self: *@This(), text: []const u8) std.mem.Allocator.Error!void {
-            return self.state.clipboardTextSet(text);
-        }
-
-        pub fn preferredColorScheme(self: *@This()) ?ColorScheme {
-            return self.state.preferredColorScheme();
-        }
+test "window converts between content and pixel spaces" {
+    const window: Window = .{
+        .ctx = undefined,
+        .backend_data = undefined,
+        .size = .{ .width = 100, .height = 50 },
+        .framebuffer_size = .{ .width = 150, .height = 100 },
+        .content_scale = .{ .x = 1.5, .y = 2.0 },
     };
+
+    try std.testing.expectEqualDeep(
+        PixelSize{ .width = 150, .height = 100 },
+        window.contentToPixelSize(.{ .width = 100, .height = 50 }),
+    );
+    try std.testing.expectEqualDeep(
+        ContentSize{ .width = 100, .height = 50 },
+        window.pixelToContentSize(.{ .width = 150, .height = 100 }),
+    );
+    try std.testing.expectEqualDeep(
+        PixelOffset{ .x = 15, .y = 10 },
+        window.contentToPixelOffset(.{ .x = 10, .y = 5 }),
+    );
+    try std.testing.expectEqualDeep(
+        ContentOffset{ .x = 10, .y = 5 },
+        window.pixelToContentOffset(.{ .x = 15, .y = 10 }),
+    );
 }

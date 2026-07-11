@@ -195,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
     const base = vk.BaseWrapper.load(get_instance_proc_addr);
     var context = try low.Context.init(allocator, .{ .app_name = "low.basic_low_level" });
     defer context.deinit();
-    const extensions = low.vulkan.requiredInstanceExtensions(&context);
+    const extensions = context.requiredVulkanInstanceExtensions();
     const app_info = vk.ApplicationInfo{
         .p_application_name = "basic low level",
         .application_version = 1,
@@ -214,7 +214,12 @@ pub fn main(init: std.process.Init) !void {
     const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance_handle)));
 
     const window = try context.createWindow(.{ .title = "low raw Vulkan setup", .size = .{ .width = 800, .height = 600 } });
-    const low_surface = try low.vulkan.createSurface(&low_instance, &context, window);
+    const low_surface = try low.vulkan.createSurface(
+        &low_instance,
+        context.backendKind(),
+        window.nativeDisplay(),
+        window.nativeSurface(),
+    );
     const surface: vk.SurfaceKHR = @enumFromInt(low_surface);
     defer instance.destroySurfaceKHR(surface, null);
     const selection = try selectDevice(allocator, instance, surface);

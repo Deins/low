@@ -62,6 +62,7 @@ pub const StructureType = enum(i32) {
     device_queue_create_info = 2,
     device_create_info = 3,
     submit_info = 4,
+    memory_allocate_info = 5,
     fence_create_info = 8,
     semaphore_create_info = 9,
     image_create_info = 14,
@@ -151,6 +152,8 @@ pub const SwapchainCreateFlagsKHR = u32;
 pub const SurfaceTransformFlagsKHR = u32;
 pub const CompositeAlphaFlagsKHR = u32;
 pub const QueueFlags = u32;
+pub const MemoryPropertyFlags = u32;
+pub const MemoryHeapFlags = u32;
 
 pub const image_usage = struct {
     pub const transfer_src_bit: ImageUsageFlags = 1 << 0;
@@ -200,6 +203,10 @@ pub const composite_alpha = struct {
 
 pub const queue = struct {
     pub const graphics_bit: QueueFlags = 1 << 0;
+};
+
+pub const memory_property = struct {
+    pub const device_local_bit: MemoryPropertyFlags = 1 << 0;
 };
 
 pub const sample_count = struct {
@@ -269,10 +276,34 @@ pub const QueueFamilyProperties = extern struct {
     min_image_transfer_granularity: Extent3D,
 };
 
+pub const MemoryType = extern struct {
+    property_flags: MemoryPropertyFlags,
+    heap_index: u32,
+};
+
+pub const MemoryHeap = extern struct {
+    size: u64,
+    flags: MemoryHeapFlags,
+};
+
+pub const PhysicalDeviceMemoryProperties = extern struct {
+    memory_type_count: u32,
+    memory_types: [32]MemoryType,
+    memory_heap_count: u32,
+    memory_heaps: [16]MemoryHeap,
+};
+
 pub const MemoryRequirements = extern struct {
     size: u64,
     alignment: u64,
     memory_type_bits: u32,
+};
+
+pub const MemoryAllocateInfo = extern struct {
+    s_type: StructureType,
+    p_next: ?*const anyopaque,
+    allocation_size: u64,
+    memory_type_index: u32,
 };
 
 pub const MemoryBarrier = extern struct {
@@ -440,6 +471,7 @@ pub const PfnDestroySurfaceKHR = *const fn (InstanceHandle, SurfaceKHR, ?*const 
 pub const PfnGetPhysicalDeviceSurfaceSupportKHR = *const fn (PhysicalDevice, u32, SurfaceKHR, *Bool32) callconv(call_conv) Result;
 pub const PfnGetPhysicalDeviceSurfaceCapabilitiesKHR = *const fn (PhysicalDevice, SurfaceKHR, *SurfaceCapabilitiesKHR) callconv(call_conv) Result;
 pub const PfnGetPhysicalDeviceSurfaceFormatsKHR = *const fn (PhysicalDevice, SurfaceKHR, *u32, ?[*]SurfaceFormatKHR) callconv(call_conv) Result;
+pub const PfnGetPhysicalDeviceMemoryProperties = *const fn (PhysicalDevice, *PhysicalDeviceMemoryProperties) callconv(call_conv) void;
 pub const PfnCreateWin32SurfaceKHR = *const fn (InstanceHandle, *const Win32SurfaceCreateInfoKHR, ?*const anyopaque, *SurfaceKHR) callconv(call_conv) Result;
 pub const PfnCreateWaylandSurfaceKHR = *const fn (InstanceHandle, *const WaylandSurfaceCreateInfoKHR, ?*const anyopaque, *SurfaceKHR) callconv(call_conv) Result;
 pub const PfnCreateXlibSurfaceKHR = *const fn (InstanceHandle, *const XlibSurfaceCreateInfoKHR, ?*const anyopaque, *SurfaceKHR) callconv(call_conv) Result;
@@ -459,6 +491,8 @@ pub const PfnCreateImageView = *const fn (DeviceHandle, *const ImageViewCreateIn
 pub const PfnDestroyImageView = *const fn (DeviceHandle, ImageView, ?*const anyopaque) callconv(call_conv) void;
 pub const PfnAllocateCommandBuffers = *const fn (DeviceHandle, *const CommandBufferAllocateInfo, [*]CommandBuffer) callconv(call_conv) Result;
 pub const PfnFreeCommandBuffers = *const fn (DeviceHandle, CommandPool, u32, [*]const CommandBuffer) callconv(call_conv) void;
+pub const PfnAllocateMemory = *const fn (DeviceHandle, *const MemoryAllocateInfo, ?*const anyopaque, *DeviceMemory) callconv(call_conv) Result;
+pub const PfnFreeMemory = *const fn (DeviceHandle, DeviceMemory, ?*const anyopaque) callconv(call_conv) void;
 pub const PfnCreateSemaphore = *const fn (DeviceHandle, *const SemaphoreCreateInfo, ?*const anyopaque, *Semaphore) callconv(call_conv) Result;
 pub const PfnDestroySemaphore = *const fn (DeviceHandle, Semaphore, ?*const anyopaque) callconv(call_conv) void;
 pub const PfnCreateFence = *const fn (DeviceHandle, *const FenceCreateInfo, ?*const anyopaque, *Fence) callconv(call_conv) Result;

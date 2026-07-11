@@ -30,10 +30,10 @@ zig build run -- --x11
 zig build run -- --offscreen
 ```
 
-`--offscreen` runs a small surface-free path: it creates an offscreen window,
-delivers a synthetic close event on one continuous frame, and exits. The
-triangle renderer itself uses presentation swapchains; an offscreen renderer
-should instead create Vulkan images directly.
+`--offscreen` renders both triangles once into direct Vulkan images (no
+surface or swapchain), then queues synthetic close events and exits on the
+next frame boundary. `RenderTarget` manages the offscreen image ring and its
+default device-local memory allocation.
 
 Without `VULKAN_SDK`, binding generation falls back to the lazy
 `vulkan_headers` dependency. You can also point the build at a registry:

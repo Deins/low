@@ -49,6 +49,7 @@ const Renderer = struct {
         gpa: std.mem.Allocator,
         loader: *const low.vulkan.Loader,
         instance: vk.InstanceProxy,
+        presentation: bool,
     ) !Renderer {
         const selection = try findDevice(gpa, instance);
 
@@ -62,13 +63,16 @@ const Renderer = struct {
             .queue_count = 1,
             .p_queue_priorities = &queue_priority,
         };
-        const device_extensions = [_][*:0]const u8{"VK_KHR_swapchain"};
+        // Surface extensions come from Context.requiredVulkanInstanceExtensions
+        // when creating the instance. VK_KHR_swapchain is separately a device
+        // extension, and is unnecessary for RenderTarget's offscreen images.
+        const device_extensions: []const [*:0]const u8 = if (presentation) &.{"VK_KHR_swapchain"} else &.{};
         const device_info = vk.DeviceCreateInfo{
             .p_next = @ptrCast(&features_13),
             .queue_create_info_count = 1,
             .p_queue_create_infos = @ptrCast(&queue_info),
-            .enabled_extension_count = device_extensions.len,
-            .pp_enabled_extension_names = &device_extensions,
+            .enabled_extension_count = @intCast(device_extensions.len),
+            .pp_enabled_extension_names = device_extensions.ptr,
         };
         const device_handle = try instance.createDevice(selection.physical_device, &device_info, null);
         const device_wrapper = try gpa.create(vk.DeviceWrapper);
@@ -77,7 +81,7 @@ const Renderer = struct {
             device_handle,
             instance.wrapper.dispatch.vkGetDeviceProcAddr.?,
         );
-        if (device_wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
+        if (presentation and device_wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
         const device = vk.DeviceProxy.init(device_handle, device_wrapper);
         errdefer device.destroyDevice(null);
         const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance.handle)));
@@ -243,10 +247,9 @@ pub fn main(init: std.process.Init) !void {
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa_state.deinit() == .ok);
     const gpa = gpa_state.allocator();
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const backend = try requestedBackend(try init.minimal.args.toSlice(init.arena.allocator()));
-    if (backend == .offscreen) return runOffscreen(gpa);
-
+    const backend = try requestedBackend(args);
     var loader = try low.vulkan.Loader.init();
     defer loader.deinit();
     const get_instance_proc_addr: vk.PfnGetInstanceProcAddr = @ptrCast(loader.get_instance_proc_addr);
@@ -255,10 +258,11 @@ pub fn main(init: std.process.Init) !void {
     var context = try low.Context.init(gpa, .{
         .app_name = "low.multiwindow_triangles",
         .backend = backend,
+        .offscreen = .{ .frame_mode = .{ .continuous = .{} } },
     });
     defer context.deinit();
     std.log.info("using {s} backend", .{@tagName(context.backendKind())});
-    const extensions = low.vulkan.requiredInstanceExtensions(&context);
+    const extensions = context.requiredVulkanInstanceExtensions();
 
     const app_info = vk.ApplicationInfo{
         .p_application_name = "low multiwindow triangles",
@@ -286,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
         .size = .{ .width = 520, .height = 400 },
     });
 
-    var renderer = try Renderer.init(gpa, &loader, instance);
+    var renderer = try Renderer.init(gpa, &loader, instance, context.backendKind() != .offscreen);
     defer renderer.deinit();
     var first: ?AppWindow = try AppWindow.init(
         gpa,
@@ -312,7 +316,9 @@ pub fn main(init: std.process.Init) !void {
     second.?.installCallbacks();
 
     var previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
+    var offscreen_frames: u32 = 0;
     while (first != null or second != null) {
+        if (context.backendKind() == .offscreen) try context.nextFrame();
         context.pollEvents();
 
         const close_first = if (first) |app_window| app_window.window.shouldClose() else false;
@@ -344,26 +350,15 @@ pub fn main(init: std.process.Init) !void {
             app_window.update(dt);
             try app_window.draw(&renderer);
         }
+        if (context.backendKind() == .offscreen) {
+            offscreen_frames += 1;
+            if (offscreen_frames == 10) {
+                if (first) |app_window| try app_window.window.injectEvent(.close);
+                if (second) |app_window| try app_window.window.injectEvent(.close);
+            }
+        }
     }
     try renderer.device.deviceWaitIdle();
-}
-
-/// The triangle demo renders to presentation swapchains, so it cannot render
-/// through `low`'s surface-free backend. Keep the command useful by exercising
-/// offscreen window creation, queued input, and a continuous frame boundary.
-fn runOffscreen(allocator: std.mem.Allocator) !void {
-    var context = try low.Context.init(allocator, .{
-        .app_name = "low.multiwindow_triangles",
-        .backend = .offscreen,
-        .offscreen = .{ .frame_mode = .{ .continuous = .{} } },
-    });
-    defer context.deinit();
-
-    const window = try context.createWindow(.{ .title = "offscreen triangle demo" });
-    try window.injectEvent(.close);
-    try context.nextFrame();
-    std.debug.assert(window.shouldClose());
-    std.log.info("using offscreen backend (one unpresented frame)", .{});
 }
 
 fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy) !DeviceSelection {
