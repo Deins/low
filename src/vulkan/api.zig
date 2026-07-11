@@ -73,6 +73,7 @@ pub const StructureType = enum(i32) {
     command_buffer_begin_info = 42,
     buffer_memory_barrier = 44,
     image_memory_barrier = 45,
+    memory_barrier = 46,
     win32_surface_create_info_khr = 1000009000,
     xlib_surface_create_info_khr = 1000004000,
     wayland_surface_create_info_khr = 1000006000,
@@ -146,17 +147,27 @@ pub const DependencyFlags = u32;
 pub const CommandBufferUsageFlags = u32;
 pub const CommandBufferResetFlags = u32;
 pub const CommandPoolCreateFlags = u32;
+pub const BufferCreateFlags = u32;
 pub const SampleCountFlags = u32;
+pub const MemoryMapFlags = u32;
 pub const SemaphoreCreateFlags = u32;
 pub const FenceCreateFlags = u32;
 pub const ImageCreateFlags = u32;
 pub const ImageViewCreateFlags = u32;
 pub const SwapchainCreateFlagsKHR = u32;
+pub const Win32SurfaceCreateFlagsKHR = u32;
+pub const WaylandSurfaceCreateFlagsKHR = u32;
+pub const XlibSurfaceCreateFlagsKHR = u32;
 pub const SurfaceTransformFlagsKHR = u32;
 pub const CompositeAlphaFlagsKHR = u32;
 pub const QueueFlags = u32;
 pub const MemoryPropertyFlags = u32;
 pub const MemoryHeapFlags = u32;
+
+// The plain structs used for constants in this section are namespaces only;
+// they are never passed to Vulkan. The declarations below mirror C records and
+// must remain extern structs so Zig uses the target C ABI's field alignment and
+// padding.
 
 pub const image_usage = struct {
     pub const transfer_src_bit: ImageUsageFlags = 1 << 0;
@@ -221,7 +232,7 @@ pub const buffer_usage = struct {
 };
 
 pub const sample_count = struct {
-    pub const @"1_bit": u32 = 1;
+    pub const @"1_bit": SampleCountFlags = 1;
 };
 
 pub const QUEUE_FAMILY_IGNORED: u32 = 0xffffffff;
@@ -320,7 +331,7 @@ pub const MemoryAllocateInfo = extern struct {
 pub const BufferCreateInfo = extern struct {
     s_type: StructureType,
     p_next: ?*const anyopaque,
-    flags: u32,
+    flags: BufferCreateFlags,
     size: u64,
     usage: BufferUsageFlags,
     sharing_mode: SharingMode,
@@ -470,7 +481,7 @@ pub const ImageMemoryBarrier = extern struct {
 pub const Win32SurfaceCreateInfoKHR = extern struct {
     s_type: StructureType,
     p_next: ?*const anyopaque,
-    flags: u32,
+    flags: Win32SurfaceCreateFlagsKHR,
     hinstance: ?*anyopaque,
     hwnd: ?*anyopaque,
 };
@@ -478,7 +489,7 @@ pub const Win32SurfaceCreateInfoKHR = extern struct {
 pub const WaylandSurfaceCreateInfoKHR = extern struct {
     s_type: StructureType,
     p_next: ?*const anyopaque,
-    flags: u32,
+    flags: WaylandSurfaceCreateFlagsKHR,
     display: ?*anyopaque,
     surface: ?*anyopaque,
 };
@@ -486,7 +497,7 @@ pub const WaylandSurfaceCreateInfoKHR = extern struct {
 pub const XlibSurfaceCreateInfoKHR = extern struct {
     s_type: StructureType,
     p_next: ?*const anyopaque,
-    flags: u32,
+    flags: XlibSurfaceCreateFlagsKHR,
     dpy: ?*anyopaque,
     window: usize,
 };
@@ -546,7 +557,7 @@ pub const PfnCreateBuffer = *const fn (DeviceHandle, *const BufferCreateInfo, ?*
 pub const PfnDestroyBuffer = *const fn (DeviceHandle, Buffer, ?*const anyopaque) callconv(call_conv) void;
 pub const PfnGetBufferMemoryRequirements = *const fn (DeviceHandle, Buffer, *MemoryRequirements) callconv(call_conv) void;
 pub const PfnBindBufferMemory = *const fn (DeviceHandle, Buffer, DeviceMemory, u64) callconv(call_conv) Result;
-pub const PfnMapMemory = *const fn (DeviceHandle, DeviceMemory, u64, u64, u32, *?*anyopaque) callconv(call_conv) Result;
+pub const PfnMapMemory = *const fn (DeviceHandle, DeviceMemory, u64, u64, MemoryMapFlags, *?*anyopaque) callconv(call_conv) Result;
 pub const PfnUnmapMemory = *const fn (DeviceHandle, DeviceMemory) callconv(call_conv) void;
 pub const PfnCmdCopyImageToBuffer = *const fn (CommandBuffer, Image, ImageLayout, Buffer, u32, [*]const BufferImageCopy) callconv(call_conv) void;
 pub const PfnCmdPipelineBarrier = *const fn (CommandBuffer, PipelineStageFlags, PipelineStageFlags, DependencyFlags, u32, ?[*]const MemoryBarrier, u32, ?[*]const BufferMemoryBarrier, u32, ?[*]const ImageMemoryBarrier) callconv(call_conv) void;
