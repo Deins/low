@@ -1,14 +1,13 @@
 //! Runtime implementation of the libwayland-client FFI expected by
 //! zig-wayland's scanner `ffi_import` option.
 const std = @import("std");
-const runtime = @import("runtime_loader");
 const wayland = @import("wayland");
 
 const wl = wayland.client.wl;
 const Argument = wl.Argument;
 const Interface = wl.Interface;
 
-pub const Error = runtime.Error;
+pub const Error = error{ LibraryNotFound, MissingSymbol };
 
 const WlDisplayCancelReadFn = *const fn (*wl.Display) callconv(.c) void;
 const WlDisplayConnectToFdFn = *const fn (c_int) callconv(.c) ?*wl.Display;
@@ -75,36 +74,41 @@ pub fn ensureLoaded() Error!void {
     defer load_mutex.unlock();
     if (api != null) return;
 
-    var loaded_library = try runtime.openAny(&.{ "libwayland-client.so.0", "libwayland-client.so" });
+    var loaded_library = blk: {
+        inline for (&.{ "libwayland-client.so.0", "libwayland-client.so" }) |name| {
+            if (std.DynLib.open(name)) |opened| break :blk opened else |_| {}
+        }
+        return error.LibraryNotFound;
+    };
     errdefer loaded_library.close();
 
     api = .{
-        .display_cancel_read = try runtime.lookup(&loaded_library, WlDisplayCancelReadFn, "wl_display_cancel_read"),
-        .display_connect_to_fd = try runtime.lookup(&loaded_library, WlDisplayConnectToFdFn, "wl_display_connect_to_fd"),
-        .display_connect = try runtime.lookup(&loaded_library, WlDisplayConnectFn, "wl_display_connect"),
-        .display_create_queue = try runtime.lookup(&loaded_library, WlDisplayCreateQueueFn, "wl_display_create_queue"),
-        .display_disconnect = try runtime.lookup(&loaded_library, WlDisplayDisconnectFn, "wl_display_disconnect"),
-        .display_dispatch_pending = try runtime.lookup(&loaded_library, WlDisplayDispatchPendingFn, "wl_display_dispatch_pending"),
-        .display_dispatch_queue_pending = try runtime.lookup(&loaded_library, WlDisplayDispatchQueuePendingFn, "wl_display_dispatch_queue_pending"),
-        .display_dispatch_queue = try runtime.lookup(&loaded_library, WlDisplayDispatchQueueFn, "wl_display_dispatch_queue"),
-        .display_dispatch = try runtime.lookup(&loaded_library, WlDisplayDispatchFn, "wl_display_dispatch"),
-        .display_flush = try runtime.lookup(&loaded_library, WlDisplayFlushFn, "wl_display_flush"),
-        .display_get_error = try runtime.lookup(&loaded_library, WlDisplayGetErrorFn, "wl_display_get_error"),
-        .display_get_fd = try runtime.lookup(&loaded_library, WlDisplayGetFdFn, "wl_display_get_fd"),
-        .display_prepare_read_queue = try runtime.lookup(&loaded_library, WlDisplayPrepareReadQueueFn, "wl_display_prepare_read_queue"),
-        .display_prepare_read = try runtime.lookup(&loaded_library, WlDisplayPrepareReadFn, "wl_display_prepare_read"),
-        .display_read_events = try runtime.lookup(&loaded_library, WlDisplayReadEventsFn, "wl_display_read_events"),
-        .display_roundtrip_queue = try runtime.lookup(&loaded_library, WlDisplayRoundtripQueueFn, "wl_display_roundtrip_queue"),
-        .display_roundtrip = try runtime.lookup(&loaded_library, WlDisplayRoundtripFn, "wl_display_roundtrip"),
-        .event_queue_destroy = try runtime.lookup(&loaded_library, WlEventQueueDestroyFn, "wl_event_queue_destroy"),
-        .proxy_add_dispatcher = try runtime.lookup(&loaded_library, WlProxyAddDispatcherFn, "wl_proxy_add_dispatcher"),
-        .proxy_create = try runtime.lookup(&loaded_library, WlProxyCreateFn, "wl_proxy_create"),
-        .proxy_destroy = try runtime.lookup(&loaded_library, WlProxyDestroyFn, "wl_proxy_destroy"),
-        .proxy_get_id = try runtime.lookup(&loaded_library, WlProxyGetIdFn, "wl_proxy_get_id"),
-        .proxy_get_user_data = try runtime.lookup(&loaded_library, WlProxyGetUserDataFn, "wl_proxy_get_user_data"),
-        .proxy_get_version = try runtime.lookup(&loaded_library, WlProxyGetVersionFn, "wl_proxy_get_version"),
-        .proxy_marshal_array_flags = try runtime.lookup(&loaded_library, WlProxyMarshalArrayFlagsFn, "wl_proxy_marshal_array_flags"),
-        .proxy_set_queue = try runtime.lookup(&loaded_library, WlProxySetQueueFn, "wl_proxy_set_queue"),
+        .display_cancel_read = loaded_library.lookup(WlDisplayCancelReadFn, "wl_display_cancel_read") orelse return error.MissingSymbol,
+        .display_connect_to_fd = loaded_library.lookup(WlDisplayConnectToFdFn, "wl_display_connect_to_fd") orelse return error.MissingSymbol,
+        .display_connect = loaded_library.lookup(WlDisplayConnectFn, "wl_display_connect") orelse return error.MissingSymbol,
+        .display_create_queue = loaded_library.lookup(WlDisplayCreateQueueFn, "wl_display_create_queue") orelse return error.MissingSymbol,
+        .display_disconnect = loaded_library.lookup(WlDisplayDisconnectFn, "wl_display_disconnect") orelse return error.MissingSymbol,
+        .display_dispatch_pending = loaded_library.lookup(WlDisplayDispatchPendingFn, "wl_display_dispatch_pending") orelse return error.MissingSymbol,
+        .display_dispatch_queue_pending = loaded_library.lookup(WlDisplayDispatchQueuePendingFn, "wl_display_dispatch_queue_pending") orelse return error.MissingSymbol,
+        .display_dispatch_queue = loaded_library.lookup(WlDisplayDispatchQueueFn, "wl_display_dispatch_queue") orelse return error.MissingSymbol,
+        .display_dispatch = loaded_library.lookup(WlDisplayDispatchFn, "wl_display_dispatch") orelse return error.MissingSymbol,
+        .display_flush = loaded_library.lookup(WlDisplayFlushFn, "wl_display_flush") orelse return error.MissingSymbol,
+        .display_get_error = loaded_library.lookup(WlDisplayGetErrorFn, "wl_display_get_error") orelse return error.MissingSymbol,
+        .display_get_fd = loaded_library.lookup(WlDisplayGetFdFn, "wl_display_get_fd") orelse return error.MissingSymbol,
+        .display_prepare_read_queue = loaded_library.lookup(WlDisplayPrepareReadQueueFn, "wl_display_prepare_read_queue") orelse return error.MissingSymbol,
+        .display_prepare_read = loaded_library.lookup(WlDisplayPrepareReadFn, "wl_display_prepare_read") orelse return error.MissingSymbol,
+        .display_read_events = loaded_library.lookup(WlDisplayReadEventsFn, "wl_display_read_events") orelse return error.MissingSymbol,
+        .display_roundtrip_queue = loaded_library.lookup(WlDisplayRoundtripQueueFn, "wl_display_roundtrip_queue") orelse return error.MissingSymbol,
+        .display_roundtrip = loaded_library.lookup(WlDisplayRoundtripFn, "wl_display_roundtrip") orelse return error.MissingSymbol,
+        .event_queue_destroy = loaded_library.lookup(WlEventQueueDestroyFn, "wl_event_queue_destroy") orelse return error.MissingSymbol,
+        .proxy_add_dispatcher = loaded_library.lookup(WlProxyAddDispatcherFn, "wl_proxy_add_dispatcher") orelse return error.MissingSymbol,
+        .proxy_create = loaded_library.lookup(WlProxyCreateFn, "wl_proxy_create") orelse return error.MissingSymbol,
+        .proxy_destroy = loaded_library.lookup(WlProxyDestroyFn, "wl_proxy_destroy") orelse return error.MissingSymbol,
+        .proxy_get_id = loaded_library.lookup(WlProxyGetIdFn, "wl_proxy_get_id") orelse return error.MissingSymbol,
+        .proxy_get_user_data = loaded_library.lookup(WlProxyGetUserDataFn, "wl_proxy_get_user_data") orelse return error.MissingSymbol,
+        .proxy_get_version = loaded_library.lookup(WlProxyGetVersionFn, "wl_proxy_get_version") orelse return error.MissingSymbol,
+        .proxy_marshal_array_flags = loaded_library.lookup(WlProxyMarshalArrayFlagsFn, "wl_proxy_marshal_array_flags") orelse return error.MissingSymbol,
+        .proxy_set_queue = loaded_library.lookup(WlProxySetQueueFn, "wl_proxy_set_queue") orelse return error.MissingSymbol,
     };
     library = loaded_library;
 }

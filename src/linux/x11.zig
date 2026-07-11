@@ -4,9 +4,8 @@
 //! Linux build independent of libX11 development headers while the actual
 //! client library remains an optional runtime dependency.
 const std = @import("std");
-const runtime = @import("runtime_loader");
 
-pub const Error = runtime.Error;
+pub const Error = error{ LibraryNotFound, MissingSymbol };
 
 pub const Display = opaque {};
 pub const XID = c_ulong;
@@ -333,39 +332,44 @@ pub fn ensureLoaded() Error!void {
     defer load_mutex.unlock();
     if (api != null) return;
 
-    var loaded_library = try runtime.openAny(&.{ "libX11.so.6", "libX11.so" });
+    var loaded_library = blk: {
+        inline for (&.{ "libX11.so.6", "libX11.so" }) |name| {
+            if (std.DynLib.open(name)) |opened| break :blk opened else |_| {}
+        }
+        return error.LibraryNotFound;
+    };
     errdefer loaded_library.close();
 
     api = .{
-        .open_display = try runtime.lookup(&loaded_library, XOpenDisplayFn, "XOpenDisplay"),
-        .close_display = try runtime.lookup(&loaded_library, XCloseDisplayFn, "XCloseDisplay"),
-        .default_screen = try runtime.lookup(&loaded_library, XDefaultScreenFn, "XDefaultScreen"),
-        .root_window = try runtime.lookup(&loaded_library, XRootWindowFn, "XRootWindow"),
-        .connection_number = try runtime.lookup(&loaded_library, XConnectionNumberFn, "XConnectionNumber"),
-        .intern_atom = try runtime.lookup(&loaded_library, XInternAtomFn, "XInternAtom"),
-        .create_simple_window = try runtime.lookup(&loaded_library, XCreateSimpleWindowFn, "XCreateSimpleWindow"),
-        .destroy_window = try runtime.lookup(&loaded_library, XDestroyWindowFn, "XDestroyWindow"),
-        .select_input = try runtime.lookup(&loaded_library, XSelectInputFn, "XSelectInput"),
-        .set_wm_protocols = try runtime.lookup(&loaded_library, XSetWMProtocolsFn, "XSetWMProtocols"),
-        .map_window = try runtime.lookup(&loaded_library, XMapWindowFn, "XMapWindow"),
-        .unmap_window = try runtime.lookup(&loaded_library, XUnmapWindowFn, "XUnmapWindow"),
-        .flush = try runtime.lookup(&loaded_library, XFlushFn, "XFlush"),
-        .pending = try runtime.lookup(&loaded_library, XPendingFn, "XPending"),
-        .next_event = try runtime.lookup(&loaded_library, XNextEventFn, "XNextEvent"),
-        .lookup_string = try runtime.lookup(&loaded_library, XLookupStringFn, "XLookupString"),
-        .create_bitmap_from_data = try runtime.lookup(&loaded_library, XCreateBitmapFromDataFn, "XCreateBitmapFromData"),
-        .free_pixmap = try runtime.lookup(&loaded_library, XFreePixmapFn, "XFreePixmap"),
-        .create_pixmap_cursor = try runtime.lookup(&loaded_library, XCreatePixmapCursorFn, "XCreatePixmapCursor"),
-        .create_font_cursor = try runtime.lookup(&loaded_library, XCreateFontCursorFn, "XCreateFontCursor"),
-        .define_cursor = try runtime.lookup(&loaded_library, XDefineCursorFn, "XDefineCursor"),
-        .undefine_cursor = try runtime.lookup(&loaded_library, XUndefineCursorFn, "XUndefineCursor"),
-        .set_wm_normal_hints = try runtime.lookup(&loaded_library, XSetWMNormalHintsFn, "XSetWMNormalHints"),
-        .change_property = try runtime.lookup(&loaded_library, XChangePropertyFn, "XChangeProperty"),
-        .store_name = try runtime.lookup(&loaded_library, XStoreNameFn, "XStoreName"),
-        .send_event = try runtime.lookup(&loaded_library, XSendEventFn, "XSendEvent"),
-        .iconify_window = try runtime.lookup(&loaded_library, XIconifyWindowFn, "XIconifyWindow"),
-        .free_cursor = try runtime.lookup(&loaded_library, XFreeCursorFn, "XFreeCursor"),
-        .set_detectable_auto_repeat = try runtime.lookup(&loaded_library, XkbSetDetectableAutoRepeatFn, "XkbSetDetectableAutoRepeat"),
+        .open_display = loaded_library.lookup(XOpenDisplayFn, "XOpenDisplay") orelse return error.MissingSymbol,
+        .close_display = loaded_library.lookup(XCloseDisplayFn, "XCloseDisplay") orelse return error.MissingSymbol,
+        .default_screen = loaded_library.lookup(XDefaultScreenFn, "XDefaultScreen") orelse return error.MissingSymbol,
+        .root_window = loaded_library.lookup(XRootWindowFn, "XRootWindow") orelse return error.MissingSymbol,
+        .connection_number = loaded_library.lookup(XConnectionNumberFn, "XConnectionNumber") orelse return error.MissingSymbol,
+        .intern_atom = loaded_library.lookup(XInternAtomFn, "XInternAtom") orelse return error.MissingSymbol,
+        .create_simple_window = loaded_library.lookup(XCreateSimpleWindowFn, "XCreateSimpleWindow") orelse return error.MissingSymbol,
+        .destroy_window = loaded_library.lookup(XDestroyWindowFn, "XDestroyWindow") orelse return error.MissingSymbol,
+        .select_input = loaded_library.lookup(XSelectInputFn, "XSelectInput") orelse return error.MissingSymbol,
+        .set_wm_protocols = loaded_library.lookup(XSetWMProtocolsFn, "XSetWMProtocols") orelse return error.MissingSymbol,
+        .map_window = loaded_library.lookup(XMapWindowFn, "XMapWindow") orelse return error.MissingSymbol,
+        .unmap_window = loaded_library.lookup(XUnmapWindowFn, "XUnmapWindow") orelse return error.MissingSymbol,
+        .flush = loaded_library.lookup(XFlushFn, "XFlush") orelse return error.MissingSymbol,
+        .pending = loaded_library.lookup(XPendingFn, "XPending") orelse return error.MissingSymbol,
+        .next_event = loaded_library.lookup(XNextEventFn, "XNextEvent") orelse return error.MissingSymbol,
+        .lookup_string = loaded_library.lookup(XLookupStringFn, "XLookupString") orelse return error.MissingSymbol,
+        .create_bitmap_from_data = loaded_library.lookup(XCreateBitmapFromDataFn, "XCreateBitmapFromData") orelse return error.MissingSymbol,
+        .free_pixmap = loaded_library.lookup(XFreePixmapFn, "XFreePixmap") orelse return error.MissingSymbol,
+        .create_pixmap_cursor = loaded_library.lookup(XCreatePixmapCursorFn, "XCreatePixmapCursor") orelse return error.MissingSymbol,
+        .create_font_cursor = loaded_library.lookup(XCreateFontCursorFn, "XCreateFontCursor") orelse return error.MissingSymbol,
+        .define_cursor = loaded_library.lookup(XDefineCursorFn, "XDefineCursor") orelse return error.MissingSymbol,
+        .undefine_cursor = loaded_library.lookup(XUndefineCursorFn, "XUndefineCursor") orelse return error.MissingSymbol,
+        .set_wm_normal_hints = loaded_library.lookup(XSetWMNormalHintsFn, "XSetWMNormalHints") orelse return error.MissingSymbol,
+        .change_property = loaded_library.lookup(XChangePropertyFn, "XChangeProperty") orelse return error.MissingSymbol,
+        .store_name = loaded_library.lookup(XStoreNameFn, "XStoreName") orelse return error.MissingSymbol,
+        .send_event = loaded_library.lookup(XSendEventFn, "XSendEvent") orelse return error.MissingSymbol,
+        .iconify_window = loaded_library.lookup(XIconifyWindowFn, "XIconifyWindow") orelse return error.MissingSymbol,
+        .free_cursor = loaded_library.lookup(XFreeCursorFn, "XFreeCursor") orelse return error.MissingSymbol,
+        .set_detectable_auto_repeat = loaded_library.lookup(XkbSetDetectableAutoRepeatFn, "XkbSetDetectableAutoRepeat") orelse return error.MissingSymbol,
     };
     library = loaded_library;
 }

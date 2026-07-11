@@ -25,13 +25,7 @@ pub fn build(b: *Build) !void {
     });
     low.addOptions("build_options", options);
 
-    if (target.result.os.tag == .linux) {
-        addLinuxWaylandSupport(b, low, target, optimize, enable_wayland);
-    } else if (target.result.os.tag == .windows) {
-        addWindowsSupport(b, low);
-    } else {
-        low.link_libc = true;
-    }
+    if (!addPlatformSupport(b, low, target, optimize, enable_wayland)) return;
 
     const test_module = b.addModule("low_tests", .{
         .root_source_file = b.path("src/low.zig"),
@@ -39,13 +33,7 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     });
     test_module.addOptions("build_options", options);
-    if (target.result.os.tag == .linux) {
-        addLinuxWaylandSupport(b, test_module, target, optimize, enable_wayland);
-    } else if (target.result.os.tag == .windows) {
-        addWindowsSupport(b, test_module);
-    } else {
-        test_module.link_libc = true;
-    }
+    if (!addPlatformSupport(b, test_module, target, optimize, enable_wayland)) return;
 
     const tests = b.addTest(.{
         .root_module = test_module,
@@ -59,33 +47,39 @@ pub fn build(b: *Build) !void {
     test_step.dependOn(&run_tests.step);
 }
 
-fn addWindowsSupport(b: *Build, module: *Build.Module) void {
-    const win32 = b.lazyDependency("win32", .{}) orelse
-        @panic("low: win32 dependency unavailable");
-    module.addImport("win32", win32.module("win32"));
-    module.link_libc = true;
-}
-
-fn addLinuxWaylandSupport(
+fn addPlatformSupport(
     b: *Build,
     module: *Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     enable_wayland: bool,
-) void {
-    const runtime_loader = b.createModule(.{
-        .root_source_file = b.path("src/linux/runtime_loader.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    module.addImport("runtime_loader", runtime_loader);
+) bool {
+    switch (target.result.os.tag) {
+        .linux => return addLinuxSupport(b, module, target, optimize, enable_wayland),
+        .windows => return addWindowsSupport(b, module),
+        else => module.link_libc = true,
+    }
+    return true;
+}
+
+fn addWindowsSupport(b: *Build, module: *Build.Module) bool {
+    const win32 = b.lazyDependency("win32", .{}) orelse return false;
+    module.addImport("win32", win32.module("win32"));
+    module.link_libc = true;
+    return true;
+}
+
+fn addLinuxSupport(
+    b: *Build,
+    module: *Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    enable_wayland: bool,
+) bool {
+    if (!enable_wayland) return true;
     module.link_libc = true;
 
-    if (!enable_wayland) return;
-
-    const wayland = b.lazyImport(@This(), "wayland") orelse
-        @panic("low: wayland dependency unavailable");
+    const wayland = b.lazyImport(@This(), "wayland") orelse return false;
     const scanner = wayland.Scanner.create(b, .{
         .wayland_xml = b.path("src/wayland/protocols/wayland.xml"),
         .wayland_protocols = b.path("src/wayland/protocols"),
@@ -122,8 +116,8 @@ fn addLinuxWaylandSupport(
     // pointers using those types.
     wayland_mod.addImport("wayland_ffi", wayland_ffi);
     wayland_ffi.addImport("wayland", wayland_mod);
-    wayland_ffi.addImport("runtime_loader", runtime_loader);
     module.addImport("wayland", wayland_mod);
     module.addImport("wayland_ffi", wayland_ffi);
     module.link_libc = true;
+    return true;
 }

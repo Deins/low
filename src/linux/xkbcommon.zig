@@ -1,9 +1,8 @@
 //! Header-free, runtime-loaded subset of libxkbcommon used by the Wayland
 //! backend.  The public xkbcommon ABI declares these structures opaque.
 const std = @import("std");
-const runtime = @import("runtime_loader");
 
-pub const Error = runtime.Error;
+pub const Error = error{ LibraryNotFound, MissingSymbol };
 
 pub const xkb_context = opaque {};
 pub const xkb_keymap = opaque {};
@@ -140,20 +139,25 @@ pub fn ensureLoaded() Error!void {
     defer load_mutex.unlock();
     if (api != null) return;
 
-    var loaded_library = try runtime.openAny(&.{ "libxkbcommon.so.0", "libxkbcommon.so" });
+    var loaded_library = blk: {
+        inline for (&.{ "libxkbcommon.so.0", "libxkbcommon.so" }) |name| {
+            if (std.DynLib.open(name)) |opened| break :blk opened else |_| {}
+        }
+        return error.LibraryNotFound;
+    };
     errdefer loaded_library.close();
 
     api = .{
-        .context_new = try runtime.lookup(&loaded_library, ContextNewFn, "xkb_context_new"),
-        .context_unref = try runtime.lookup(&loaded_library, ContextUnrefFn, "xkb_context_unref"),
-        .keymap_unref = try runtime.lookup(&loaded_library, KeymapUnrefFn, "xkb_keymap_unref"),
-        .keymap_new_from_buffer = try runtime.lookup(&loaded_library, KeymapNewFromBufferFn, "xkb_keymap_new_from_buffer"),
-        .state_new = try runtime.lookup(&loaded_library, StateNewFn, "xkb_state_new"),
-        .state_unref = try runtime.lookup(&loaded_library, StateUnrefFn, "xkb_state_unref"),
-        .state_mod_name_is_active = try runtime.lookup(&loaded_library, StateModNameIsActiveFn, "xkb_state_mod_name_is_active"),
-        .state_key_get_one_sym = try runtime.lookup(&loaded_library, StateKeyGetOneSymFn, "xkb_state_key_get_one_sym"),
-        .state_key_get_utf8 = try runtime.lookup(&loaded_library, StateKeyGetUtf8Fn, "xkb_state_key_get_utf8"),
-        .state_update_mask = try runtime.lookup(&loaded_library, StateUpdateMaskFn, "xkb_state_update_mask"),
+        .context_new = loaded_library.lookup(ContextNewFn, "xkb_context_new") orelse return error.MissingSymbol,
+        .context_unref = loaded_library.lookup(ContextUnrefFn, "xkb_context_unref") orelse return error.MissingSymbol,
+        .keymap_unref = loaded_library.lookup(KeymapUnrefFn, "xkb_keymap_unref") orelse return error.MissingSymbol,
+        .keymap_new_from_buffer = loaded_library.lookup(KeymapNewFromBufferFn, "xkb_keymap_new_from_buffer") orelse return error.MissingSymbol,
+        .state_new = loaded_library.lookup(StateNewFn, "xkb_state_new") orelse return error.MissingSymbol,
+        .state_unref = loaded_library.lookup(StateUnrefFn, "xkb_state_unref") orelse return error.MissingSymbol,
+        .state_mod_name_is_active = loaded_library.lookup(StateModNameIsActiveFn, "xkb_state_mod_name_is_active") orelse return error.MissingSymbol,
+        .state_key_get_one_sym = loaded_library.lookup(StateKeyGetOneSymFn, "xkb_state_key_get_one_sym") orelse return error.MissingSymbol,
+        .state_key_get_utf8 = loaded_library.lookup(StateKeyGetUtf8Fn, "xkb_state_key_get_utf8") orelse return error.MissingSymbol,
+        .state_update_mask = loaded_library.lookup(StateUpdateMaskFn, "xkb_state_update_mask") orelse return error.MissingSymbol,
     };
     library = loaded_library;
 }

@@ -18,16 +18,15 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
       - name: Install Linux build dependencies
         run: sudo apt-get update && sudo apt-get install -y glslc libx11-dev
-      - name: Fetch dependencies
-        run: |
-          zig build --fetch=all
-          zig build --build-file examples/basic_low_level/build.zig --fetch=all
-          zig build --build-file examples/multiwindow_triangles/build.zig --fetch=all
       - name: Build
-        run: zig build compile -Dvk_extras=true --summary all
+        run: |
+          zig build compile -Dvk_extras=true --summary all
+          zig build compile -Dvk_extras=true --summary all
       - name: Build examples
         run: |
           zig build --build-file examples/basic_low_level/build.zig --summary all
+          zig build --build-file examples/basic_low_level/build.zig --summary all
+          zig build --build-file examples/multiwindow_triangles/build.zig --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig --summary all
       - name: Test
         run: zig build test -Dvk_extras=true --summary all
@@ -42,16 +41,15 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
       - name: Install shader compiler
         run: sudo apt-get update && sudo apt-get install -y glslc
-      - name: Fetch dependencies
-        run: |
-          zig build --fetch=all
-          zig build --build-file examples/basic_low_level/build.zig --fetch=all
-          zig build --build-file examples/multiwindow_triangles/build.zig --fetch=all
       - name: Cross-compile Windows executable
-        run: zig build compile -Dtarget=x86_64-windows-gnu -Dvk_extras=true --summary all
+        run: |
+          zig build compile -Dtarget=x86_64-windows-gnu -Dvk_extras=true --summary all
+          zig build compile -Dtarget=x86_64-windows-gnu -Dvk_extras=true --summary all
       - name: Cross-compile examples for Windows
         run: |
           zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-windows-gnu --summary all
+          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-windows-gnu --summary all
+          zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-windows-gnu --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-windows-gnu --summary all
 
   windows-build:
@@ -68,19 +66,17 @@ jobs:
           choco install vulkan-sdk --yes --no-progress
           $glslc = Get-ChildItem -Path C:\VulkanSDK -Filter glslc.exe -Recurse | Select-Object -First 1
           Add-Content $env:GITHUB_PATH $glslc.DirectoryName
-      - name: Fetch dependencies
-        shell: bash
-        run: |
-          zig build --fetch=all
-          zig build --build-file examples/basic_low_level/build.zig --fetch=all
-          zig build --build-file examples/multiwindow_triangles/build.zig --fetch=all
       - name: Build
         shell: bash
-        run: zig build compile -Dvk_extras=true --summary all
+        run: |
+          zig build compile -Dvk_extras=true --summary all
+          zig build compile -Dvk_extras=true --summary all
       - name: Build examples
         shell: bash
         run: |
           zig build --build-file examples/basic_low_level/build.zig --summary all
+          zig build --build-file examples/basic_low_level/build.zig --summary all
+          zig build --build-file examples/multiwindow_triangles/build.zig --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig --summary all
 
   windows-cross-linux:
@@ -97,17 +93,15 @@ jobs:
           choco install vulkan-sdk --yes --no-progress
           $glslc = Get-ChildItem -Path C:\VulkanSDK -Filter glslc.exe -Recurse | Select-Object -First 1
           Add-Content $env:GITHUB_PATH $glslc.DirectoryName
-      - name: Fetch dependencies
-        shell: bash
-        run: |
-          zig build --fetch=all
-          zig build --build-file examples/basic_low_level/build.zig --fetch=all
-          zig build --build-file examples/multiwindow_triangles/build.zig --fetch=all
       - name: Cross-compile Linux binary
         shell: bash
-        run: zig build compile -Dtarget=x86_64-linux-gnu -Dvk_extras=true --summary all
+        run: |
+          zig build compile -Dtarget=x86_64-linux-gnu -Dvk_extras=true --summary all
+          zig build compile -Dtarget=x86_64-linux-gnu -Dvk_extras=true --summary all
       - name: Cross-compile examples for Linux
         shell: bash
         run: |
           zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-linux-gnu --summary all
+          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-linux-gnu --summary all
+          zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-linux-gnu --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-linux-gnu --summary all
