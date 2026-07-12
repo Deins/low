@@ -111,7 +111,7 @@ fn createWindow(state: *api.State, options: api.WindowOptions) api.Error!*api.Wi
 
     const mask = x11.KeyPressMask | x11.KeyReleaseMask | x11.ButtonPressMask | x11.ButtonReleaseMask |
         x11.PointerMotionMask | x11.EnterWindowMask | x11.LeaveWindowMask | x11.FocusChangeMask |
-        x11.StructureNotifyMask | x11.PropertyChangeMask;
+        x11.StructureNotifyMask | x11.PropertyChangeMask | x11.VisibilityChangeMask;
     _ = x11.XSelectInput(data.display, win, mask);
     var protocols = [_]x11.Atom{data.atoms.wm_delete_window};
     _ = x11.XSetWMProtocols(data.display, win, &protocols, protocols.len);
@@ -224,6 +224,10 @@ fn setCursor(window: *api.Window, shape: api.CursorShape) void {
     applyCursor(window);
 }
 fn applyScale(_: *api.Window, _: f32) void {}
+fn requestFrame(_: *api.Window) bool {
+    return true;
+}
+fn cancelFrameRequest(_: *api.Window) void {}
 
 fn pumpEvents(state: *api.State, timeout_ms: i32) api.Error!bool {
     const data = stateData(state);
@@ -281,10 +285,15 @@ fn handleEvent(data: *Data, event: *x11.XEvent) void {
         x11.MapNotify => if (findWindow(data, event.xmap.window)) |w| {
             w.visible = true;
             w.minimized = false;
+            w.updateRenderSuspended(false);
         },
         x11.UnmapNotify => if (findWindow(data, event.xunmap.window)) |w| {
             w.visible = false;
             w.minimized = true;
+            w.updateRenderSuspended(true);
+        },
+        x11.VisibilityNotify => if (findWindow(data, event.xvisibility.window)) |w| {
+            w.updateRenderSuspended(event.xvisibility.state == x11.VisibilityFullyObscured);
         },
         else => {},
     }
@@ -535,6 +544,8 @@ const vtable: api.VTable = .{
     .set_cursor_visible = setCursorVisible,
     .set_cursor = setCursor,
     .apply_scale = applyScale,
+    .request_frame = requestFrame,
+    .cancel_frame_request = cancelFrameRequest,
 };
 
 test {

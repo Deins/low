@@ -213,6 +213,10 @@ fn setCursor(_: *Window, shape: runtime.CursorShape) void {
 }
 
 fn applyScale(_: *Window, _: f32) void {}
+fn requestFrame(_: *Window) bool {
+    return true;
+}
+fn cancelFrameRequest(_: *Window) void {}
 
 const vtable: runtime.VTable = .{
     .deinit = deinit,
@@ -239,6 +243,8 @@ const vtable: runtime.VTable = .{
     .set_cursor_visible = setCursorVisible,
     .set_cursor = setCursor,
     .apply_scale = applyScale,
+    .request_frame = requestFrame,
+    .cancel_frame_request = cancelFrameRequest,
 };
 
 fn dispatchMessages(wait: bool, timeout_ms: u32) bool {
@@ -303,10 +309,16 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             return 0;
         },
         win32.WM_SIZE => {
+            const minimized = wparam == @intFromEnum(win32.SIZE_MINIMIZED);
+            window.minimized = minimized;
+            updateRenderSuspension(window, minimized);
             var rect: win32.RECT = undefined;
             _ = win32.GetClientRect(hwnd, &rect);
             const size = Size{ .width = rect.right, .height = rect.bottom };
             window.updateSize(size);
+        },
+        win32.WM_SHOWWINDOW => {
+            updateRenderSuspension(window, wparam == 0);
         },
         win32.WM_CHAR => {
             var utf8: [4]u8 = undefined;
@@ -327,6 +339,19 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
         else => {},
     }
     return win32.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+fn updateRenderSuspension(window: *Window, fallback_suspended: bool) void {
+    var cloaked: u32 = 0;
+    const result = win32.DwmGetWindowAttribute(
+        windowHandle(window),
+        win32.DWMWA_CLOAKED,
+        @ptrCast(&cloaked),
+        @sizeOf(@TypeOf(cloaked)),
+    );
+    // DWM also reports windows cloaked by the shell. If it is unavailable or
+    // declines the query, retain the state inferred from the window message.
+    window.updateRenderSuspended(fallback_suspended or result == 0 and cloaked != 0);
 }
 
 fn modifiers() Modifiers {

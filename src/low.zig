@@ -48,6 +48,11 @@ pub const Context = struct {
         return self.state.get().waitEvents();
     }
 
+    /// Dispatches events until the given window may render again or closes.
+    pub fn waitForRender(self: *const @This(), window: *Window) Error!void {
+        return self.state.get().waitForRender(window);
+    }
+
     pub fn waitEventsTimeout(self: *const @This(), timeout_ns: u64) Error!bool {
         return self.state.get().waitEventsTimeout(timeout_ns);
     }
@@ -121,6 +126,9 @@ test "root API exposes the supported contract" {
     const callbacks: WindowCallbacks = .{};
     _ = callbacks;
     _ = Context.init;
+    _ = Context.waitForRender;
+    _ = Window.requestFrame;
+    _ = Window.cancelFrameRequest;
     _ = Window.deinit;
     _ = Error;
     _ = InitOptions{};

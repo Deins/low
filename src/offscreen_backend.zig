@@ -130,6 +130,10 @@ pub const Backend = struct {
     fn setCursorVisible(_: *api.Window, _: bool) void {}
     fn setCursor(_: *api.Window, _: api.CursorShape) void {}
     fn applyScale(_: *api.Window, _: f32) void {}
+    fn requestFrame(_: *api.Window) bool {
+        return true;
+    }
+    fn cancelFrameRequest(_: *api.Window) void {}
 
     fn pumpEvents(state: *api.State, _: i32) api.Error!bool {
         try step(state);
@@ -252,6 +256,8 @@ pub const Backend = struct {
         .set_cursor_visible = setCursorVisible,
         .set_cursor = setCursor,
         .apply_scale = applyScale,
+        .request_frame = requestFrame,
+        .cancel_frame_request = cancelFrameRequest,
     };
 
     test "offscreen queues events until a step" {

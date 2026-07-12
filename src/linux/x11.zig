@@ -145,6 +145,15 @@ pub const XUnmapEvent = extern struct {
     from_configure: c_int,
 };
 
+pub const XVisibilityEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: ?*Display,
+    window: Window,
+    state: c_int,
+};
+
 pub const XClientMessageData = extern union {
     b: [20]u8,
     s: [10]c_short,
@@ -174,6 +183,7 @@ pub const XEvent = extern union {
     xconfigure: XConfigureEvent,
     xmap: XMapEvent,
     xunmap: XUnmapEvent,
+    xvisibility: XVisibilityEvent,
     xclient: XClientMessageEvent,
     pad: [24]c_long,
 };
@@ -218,6 +228,7 @@ pub const ButtonReleaseMask: c_long = 1 << 3;
 pub const EnterWindowMask: c_long = 1 << 4;
 pub const LeaveWindowMask: c_long = 1 << 5;
 pub const PointerMotionMask: c_long = 1 << 6;
+pub const VisibilityChangeMask: c_long = 1 << 16;
 pub const StructureNotifyMask: c_long = 1 << 17;
 pub const SubstructureNotifyMask: c_long = 1 << 19;
 pub const SubstructureRedirectMask: c_long = 1 << 20;
@@ -244,6 +255,11 @@ pub const UnmapNotify: c_int = 18;
 pub const MapNotify: c_int = 19;
 pub const ConfigureNotify: c_int = 22;
 pub const ClientMessage: c_int = 33;
+pub const VisibilityNotify: c_int = 15;
+
+pub const VisibilityUnobscured: c_int = 0;
+pub const VisibilityPartiallyObscured: c_int = 1;
+pub const VisibilityFullyObscured: c_int = 2;
 
 pub const PropModeReplace: c_int = 0;
 pub const XA_ATOM: Atom = 4;

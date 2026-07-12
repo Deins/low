@@ -161,7 +161,7 @@ const RawTarget = struct {
         );
     }
 
-    fn draw(self: *RawTarget) !void {
+    fn draw(self: *RawTarget, window: *low.Window) !void {
         _ = try self.device.waitForFences(&.{self.in_flight}, .true, std.math.maxInt(u64));
         const acquired = try self.device.acquireNextImageKHR(
             self.swapchain,
@@ -225,13 +225,19 @@ const RawTarget = struct {
         }}, self.in_flight);
         const swapchains = [_]vk.SwapchainKHR{self.swapchain};
         const indices = [_]u32{acquired.image_index};
-        const present = try self.device.queuePresentKHR(self.graphics_queue, &.{
+        // This must precede the Wayland surface commit performed by WSI
+        // presentation, otherwise the callback applies to a later frame.
+        window.requestFrame();
+        const present = self.device.queuePresentKHR(self.graphics_queue, &.{
             .wait_semaphore_count = signal_semaphores.len,
             .p_wait_semaphores = &signal_semaphores,
             .swapchain_count = swapchains.len,
             .p_swapchains = &swapchains,
             .p_image_indices = &indices,
-        });
+        }) catch |err| {
+            window.cancelFrameRequest();
+            return err;
+        };
         if (acquired.result == .suboptimal_khr or present == .suboptimal_khr) return error.SwapchainSuboptimal;
     }
 };
@@ -309,16 +315,26 @@ pub fn main(init: std.process.Init) !void {
     defer target.deinit();
     std.log.info("created raw Vulkan surface, swapchain, {d} image views", .{target.views.len});
 
-    _ = init;
     while (!window.shouldClose()) {
         context.pollEvents();
+        if (!window.shouldRender()) { // checks if window is minimized etc. optional
+            const wait_started = std.Io.Timestamp.now(init.io, .awake);
+            try context.waitForRender(window);
+            { // for debug
+                const elapsed_ns = std.Io.Timestamp.now(init.io, .awake).nanoseconds - wait_started.nanoseconds;
+                if (elapsed_ns > std.time.ns_per_s / 10) {
+                    std.log.debug("waited {d} ms for render permit", .{@divTrunc(elapsed_ns, std.time.ns_per_ms)});
+                }
+            }
+            continue;
+        }
         const framebuffer_size = window.getFramebufferSize();
         if (framebuffer_size.width == 0 or framebuffer_size.height == 0) continue;
         if (target.extent.width != framebuffer_size.width or target.extent.height != framebuffer_size.height) {
             try target.recreate(instance, selection.physical_device, selection.queue_family, surface, window);
             continue;
         }
-        target.draw() catch |err| switch (err) {
+        target.draw(window) catch |err| switch (err) {
             error.OutOfDateKHR, error.SwapchainSuboptimal => try target.recreate(instance, selection.physical_device, selection.queue_family, surface, window),
             error.SurfaceLostKHR => break,
             else => return err,
