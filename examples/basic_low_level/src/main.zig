@@ -12,12 +12,16 @@ const RawTarget = struct {
     device: vk.DeviceProxy,
     graphics_queue: vk.Queue,
     swapchain: vk.SwapchainKHR,
+    extent: vk.Extent2D,
     images: []vk.Image,
     views: []vk.ImageView,
     command_pool: vk.CommandPool = .null_handle,
     command_buffer: vk.CommandBuffer = .null_handle,
     image_available: vk.Semaphore = .null_handle,
-    render_finished: vk.Semaphore = .null_handle,
+    /// Presentation may continue after the graphics submission's fence signals.
+    /// Keep a semaphore per swapchain image and only reuse it after that image
+    /// has been acquired again.
+    render_finished: []vk.Semaphore,
     in_flight: vk.Fence = .null_handle,
 
     fn init(
@@ -35,8 +39,10 @@ const RawTarget = struct {
             .device = device,
             .graphics_queue = graphics_queue,
             .swapchain = .null_handle,
+            .extent = .{ .width = 0, .height = 0 },
             .images = &.{},
             .views = &.{},
+            .render_finished = &.{},
         };
         errdefer result.deinit();
 
@@ -64,9 +70,12 @@ const RawTarget = struct {
             .present_mode = .fifo_khr,
             .clipped = .true,
         }, null);
+        result.extent = extent;
         result.images = try device.getSwapchainImagesAllocKHR(result.swapchain, allocator);
         result.views = try allocator.alloc(vk.ImageView, result.images.len);
+        result.render_finished = try allocator.alloc(vk.Semaphore, result.images.len);
         @memset(result.views, .null_handle);
+        @memset(result.render_finished, .null_handle);
         for (result.images, result.views) |image, *view| {
             view.* = try device.createImageView(&.{
                 .image = image,
@@ -94,7 +103,7 @@ const RawTarget = struct {
         }, &command_buffers);
         result.command_buffer = command_buffers[0];
         result.image_available = try device.createSemaphore(&.{}, null);
-        result.render_finished = try device.createSemaphore(&.{}, null);
+        for (result.render_finished) |*semaphore| semaphore.* = try device.createSemaphore(&.{}, null);
         result.in_flight = try device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
         return result;
     }
@@ -102,15 +111,54 @@ const RawTarget = struct {
     fn deinit(self: *RawTarget) void {
         self.device.deviceWaitIdle() catch {};
         if (self.in_flight != .null_handle) self.device.destroyFence(self.in_flight, null);
-        if (self.render_finished != .null_handle) self.device.destroySemaphore(self.render_finished, null);
+        for (self.render_finished) |semaphore| if (semaphore != .null_handle) self.device.destroySemaphore(semaphore, null);
         if (self.image_available != .null_handle) self.device.destroySemaphore(self.image_available, null);
         if (self.command_buffer != .null_handle) self.device.freeCommandBuffers(self.command_pool, &.{self.command_buffer});
         if (self.command_pool != .null_handle) self.device.destroyCommandPool(self.command_pool, null);
         for (self.views) |view| if (view != .null_handle) self.device.destroyImageView(view, null);
         if (self.views.len != 0) self.allocator.free(self.views);
+        if (self.render_finished.len != 0) self.allocator.free(self.render_finished);
         if (self.images.len != 0) self.allocator.free(self.images);
         if (self.swapchain != .null_handle) self.device.destroySwapchainKHR(self.swapchain, null);
         self.* = undefined;
+    }
+
+    fn recreate(
+        self: *RawTarget,
+        instance: vk.InstanceProxy,
+        physical_device: vk.PhysicalDevice,
+        queue_family: u32,
+        surface: vk.SurfaceKHR,
+        window: *low.Window,
+    ) !void {
+        // Some surface implementations require the old swapchain to be
+        // destroyed before another one can be created for the same window.
+        // Leave an empty, safely deinitializable target in place if creation
+        // of the replacement fails.
+        const allocator = self.allocator;
+        const device = self.device;
+        const graphics_queue = self.graphics_queue;
+        self.deinit();
+        self.* = .{
+            .allocator = allocator,
+            .device = device,
+            .graphics_queue = graphics_queue,
+            .swapchain = .null_handle,
+            .extent = .{ .width = 0, .height = 0 },
+            .images = &.{},
+            .views = &.{},
+            .render_finished = &.{},
+        };
+        self.* = try RawTarget.init(
+            allocator,
+            instance,
+            physical_device,
+            device,
+            graphics_queue,
+            queue_family,
+            surface,
+            window,
+        );
     }
 
     fn draw(self: *RawTarget) !void {
@@ -162,7 +210,10 @@ const RawTarget = struct {
         const wait_semaphores = [_]vk.Semaphore{self.image_available};
         const wait_stages = [_]vk.PipelineStageFlags{.{ .transfer_bit = true }};
         const command_buffers = [_]vk.CommandBuffer{self.command_buffer};
-        const signal_semaphores = [_]vk.Semaphore{self.render_finished};
+        const signal_semaphores = [_]vk.Semaphore{self.render_finished[acquired.image_index]};
+        // A waited fence remains signaled. Reset it immediately before giving
+        // it to the next submission.
+        try self.device.resetFences(&.{self.in_flight});
         try self.device.queueSubmit(self.graphics_queue, &.{.{
             .wait_semaphore_count = wait_semaphores.len,
             .p_wait_semaphores = &wait_semaphores,
@@ -174,13 +225,14 @@ const RawTarget = struct {
         }}, self.in_flight);
         const swapchains = [_]vk.SwapchainKHR{self.swapchain};
         const indices = [_]u32{acquired.image_index};
-        _ = try self.device.queuePresentKHR(self.graphics_queue, &.{
+        const present = try self.device.queuePresentKHR(self.graphics_queue, &.{
             .wait_semaphore_count = signal_semaphores.len,
             .p_wait_semaphores = &signal_semaphores,
             .swapchain_count = swapchains.len,
             .p_swapchains = &swapchains,
             .p_image_indices = &indices,
         });
+        if (acquired.result == .suboptimal_khr or present == .suboptimal_khr) return error.SwapchainSuboptimal;
     }
 };
 
@@ -214,6 +266,18 @@ pub fn main(init: std.process.Init) !void {
     const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance_handle)));
 
     const window = try context.createWindow(.{ .title = "low raw Vulkan setup", .size = .{ .width = 800, .height = 600 } });
+    window.setCallbacks(.{
+        .close = onClose,
+        .resize = onResize,
+        .framebuffer_resize = onFramebufferResize,
+        .scale = onScale,
+        .focus = onFocus,
+        .cursor_enter = onCursorEnter,
+        .mouse_button = onMouseButton,
+        .scroll = onScroll,
+        .key = onKey,
+        .text = onText,
+    });
     const low_surface = try low.vulkan.createSurface(
         &low_instance,
         context.backendKind(),
@@ -248,11 +312,58 @@ pub fn main(init: std.process.Init) !void {
     _ = init;
     while (!window.shouldClose()) {
         context.pollEvents();
+        const framebuffer_size = window.getFramebufferSize();
+        if (framebuffer_size.width == 0 or framebuffer_size.height == 0) continue;
+        if (target.extent.width != framebuffer_size.width or target.extent.height != framebuffer_size.height) {
+            try target.recreate(instance, selection.physical_device, selection.queue_family, surface, window);
+            continue;
+        }
         target.draw() catch |err| switch (err) {
-            error.OutOfDateKHR, error.SurfaceLostKHR => break,
+            error.OutOfDateKHR, error.SwapchainSuboptimal => try target.recreate(instance, selection.physical_device, selection.queue_family, surface, window),
+            error.SurfaceLostKHR => break,
             else => return err,
         };
     }
+}
+
+fn onClose(_: *low.Window) void {
+    std.log.info("window close requested", .{});
+}
+
+fn onResize(_: *low.Window, size: low.ContentSize) void {
+    std.log.info("window resized to {d}x{d}", .{ size.width, size.height });
+}
+
+fn onFramebufferResize(_: *low.Window, size: low.PixelSize) void {
+    std.log.info("framebuffer resized to {d}x{d}", .{ size.width, size.height });
+}
+
+fn onScale(_: *low.Window, scale: low.ContentScale) void {
+    std.log.info("content scale changed to {d:.2}x{d:.2}", .{ scale.x, scale.y });
+}
+
+fn onFocus(_: *low.Window, focused: bool) void {
+    std.log.info("window focus: {s}", .{if (focused) "gained" else "lost"});
+}
+
+fn onCursorEnter(_: *low.Window, entered: bool) void {
+    std.log.info("cursor {s} window", .{if (entered) "entered" else "left"});
+}
+
+fn onMouseButton(_: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {
+    std.log.info("mouse {s}: {s}", .{ @tagName(button), @tagName(action) });
+}
+
+fn onScroll(_: *low.Window, x: f64, y: f64) void {
+    std.log.info("scroll: x={d:.2}, y={d:.2}", .{ x, y });
+}
+
+fn onKey(_: *low.Window, key: low.Key, raw_keycode: u32, action: low.Action, _: low.Modifiers) void {
+    std.log.info("key {s} (code {d}): {s}", .{ @tagName(key), raw_keycode, @tagName(action) });
+}
+
+fn onText(_: *low.Window, text: []const u8) void {
+    std.log.info("text input: {s}", .{text});
 }
 
 fn selectDevice(allocator: std.mem.Allocator, instance: vk.InstanceProxy, surface: vk.SurfaceKHR) !DeviceSelection {
