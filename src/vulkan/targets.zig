@@ -224,6 +224,7 @@ pub const RenderTarget = struct {
                 if (self.recorder == null) self.recorder = Video.VideoRecorder.init(
                     self.allocator,
                     video_device,
+                    self.graphics_queue_family,
                     self.frames_in_flight,
                     self.color_format,
                 );
