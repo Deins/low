@@ -9,12 +9,11 @@ const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
 const triangle_half_size_px: f32 = 70.0;
 
 // Recording
-const recording_frame_rate: u32 = 60;
 const recording_bitrate: u32 = 12_000_000;
 const recording_gop_size: u32 = 60;
 const recording_format: video.RecordingFormat = .mkv;
 const recording_resize: video.ResizePolicy = if (recording_format == .mkv) .change_resolution else .scale_and_letterbox;
-const recording_timestamp_mode: video.TimestampMode = .fixed_rate;
+const recording_timing: video.RecordingTiming = .{ .fixed_rate = .fps(60) };
 const recording_first_path = "tmp/first." ++ @tagName(recording_format);
 const recording_second_path = "tmp/second." ++ @tagName(recording_format);
 
@@ -249,12 +248,11 @@ const AppWindow = struct {
             .allocator = self.target.allocator,
             .io = io,
             .writer = writer,
-            .frame_rate = .{ .numerator = recording_frame_rate, .denominator = 1 },
+            .timing = recording_timing,
             .bitrate = recording_bitrate,
             .gop_size = recording_gop_size,
             .format = recording_format,
             .resize = recording_resize,
-            .timestamp_mode = recording_timestamp_mode,
         });
     }
 
@@ -405,12 +403,12 @@ pub fn main(init: std.process.Init) !void {
     if (recording_requested) try renderer.initVideo();
     defer renderer.deinit();
     const first_window = try context.createWindow(.{
-        .title = "low Vulkan — coral triangle",
+        .title = "low Vulkan — first window",
         .size = .{ .width = 640, .height = 480 },
     });
     const second_window = try context.createWindow(.{
-        .title = "low Vulkan — cyan triangle",
-        .size = .{ .width = 520, .height = 400 },
+        .title = "low Vulkan — second window",
+        .size = .{ .width = 320, .height = 240 },
     });
     var first: ?AppWindow = try AppWindow.init(
         gpa,

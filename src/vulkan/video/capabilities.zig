@@ -19,29 +19,69 @@ pub const UnsupportedReason = enum {
     no_usable_rate_control_mode,
 };
 
-pub const Quality = enum { low_latency, balanced, high_quality };
-pub const ResizePolicy = enum { scale_and_letterbox, change_resolution, stop_recording };
-pub const ParameterSetPolicy = enum { stream_start, every_idr };
-pub const TimestampMode = enum {
-    fixed_rate,
-    monotonic,
-    explicit,
+pub const Quality = enum {
+    /// Prefer low end-to-end delay. Requires device support for the Vulkan
+    /// low-latency tuning mode and CBR rate control.
+    low_latency,
+    /// A practical default that selects the best generally available rate
+    /// control mode and a middle quality level.
+    balanced,
+    /// Prefer compression efficiency. Requires the device's high-quality
+    /// tuning mode and VBR rate control.
+    high_quality,
 };
 
-pub const Rational = struct {
+pub const ResizePolicy = enum {
+    /// Keep the original encoded dimensions and fit the new source into them,
+    /// adding letterboxing where necessary. This keeps a single video track.
+    scale_and_letterbox,
+    /// Reconfigure the encoder and emit a new Matroska track description.
+    /// Best when preserving the new source dimensions matters.
+    change_resolution,
+    /// Stop accepting frames when the source size changes. Inspect
+    /// `recordingStatus` for `.stopped_resize` and start a new recording.
+    stop_recording,
+};
+
+pub const ParameterSetPolicy = enum {
+    /// Write H.264 SPS/PPS headers only at the beginning of the stream.
+    stream_start,
+    /// Repeat H.264 SPS/PPS headers at every IDR keyframe. This costs a small
+    /// amount of space but improves resilience for streamed or cut segments.
+    every_idr,
+};
+/// A video frame rate: `frames / seconds`.
+///
+/// Use `.fps(60)` for ordinary rates. Fractional rates are exact: for example,
+/// NTSC 29.97 fps is `.init(30_000, 1001)`. The recorder reduces the fraction
+/// before passing it to H.264.
+pub const FrameRate = struct {
     numerator: u32,
     denominator: u32,
 
-    pub fn validate(self: Rational) !void {
+    /// Creates an exact frame rate of `frames / seconds`.
+    pub fn init(frames: u32, seconds: u32) FrameRate {
+        return .{ .numerator = frames, .denominator = seconds };
+    }
+
+    /// Creates a whole-number frame rate, such as `.fps(60)`.
+    pub fn fps(frames_per_second: u32) FrameRate {
+        return .init(frames_per_second, 1);
+    }
+
+    pub fn validate(self: FrameRate) !void {
         if (self.numerator == 0 or self.denominator == 0) return error.InvalidFrameRate;
     }
 
-    pub fn reduced(self: Rational) !Rational {
+    pub fn reduced(self: FrameRate) !FrameRate {
         try self.validate();
         const divisor = std.math.gcd(self.numerator, self.denominator);
         return .{ .numerator = self.numerator / divisor, .denominator = self.denominator / divisor };
     }
 };
+
+/// Backward-compatible name for `FrameRate`.
+pub const Rational = FrameRate;
 
 pub const TuningModeSupport = packed struct(u8) {
     default: bool = false,
@@ -452,8 +492,8 @@ test "device requirements merge duplicate queue families" {
 }
 
 test "frame rate rejects zero and reduces exactly" {
-    try std.testing.expectError(error.InvalidFrameRate, (Rational{ .numerator = 0, .denominator = 1 }).validate());
-    try std.testing.expectEqual(Rational{ .numerator = 30000, .denominator = 1001 }, try (Rational{ .numerator = 60000, .denominator = 2002 }).reduced());
+    try std.testing.expectError(error.InvalidFrameRate, FrameRate.fps(0).validate());
+    try std.testing.expectEqual(FrameRate.init(30_000, 1001), try FrameRate.init(60_000, 2002).reduced());
 }
 
 test "required extension intersection reports omissions" {

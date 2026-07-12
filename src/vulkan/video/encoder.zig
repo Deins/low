@@ -8,29 +8,87 @@ const matroska = @import("matroska.zig");
 const VideoDevice = @import("device.zig").VideoDevice;
 
 pub const RecordingFormat = enum {
-    /// Raw H.264 byte stream with Annex-B start codes.
+    /// Raw H.264 byte stream with Annex-B start codes. Use only for consumers
+    /// that specifically expect elementary H.264; it cannot carry timestamps.
     h264,
-    /// Streaming Matroska container containing the H.264 video track.
+    /// Streaming Matroska container containing the H.264 video track. This is
+    /// the recommended default: it supports variable timestamps and resizing.
     mkv,
 };
 
+/// Selects how recorded frames are timestamped and supplies the nominal rate
+/// required to configure the H.264 encoder.
+///
+/// Variable-rate timing (`.monotonic` and `.explicit`) requires `.mkv` output;
+/// raw H.264 has no container timestamps.
+pub const RecordingTiming = union(enum) {
+    /// Space frames evenly at this rate. `submitAndPresentAt` is rejected.
+    fixed_rate: capabilities.FrameRate,
+    /// Timestamp `submitAndPresent` calls from the monotonic clock. Frames can
+    /// have variable spacing; the carried rate is the encoder's nominal rate.
+    monotonic: capabilities.FrameRate,
+    /// Require `submitAndPresentAt` for every frame. Timestamps must be
+    /// strictly increasing; the carried rate is the encoder's nominal rate.
+    explicit: capabilities.FrameRate,
+
+    pub fn frameRate(self: RecordingTiming) capabilities.FrameRate {
+        return switch (self) {
+            inline else => |frame_rate| frame_rate,
+        };
+    }
+
+    pub fn isFixedRate(self: RecordingTiming) bool {
+        return self == .fixed_rate;
+    }
+};
+
+/// Configuration for `RenderTarget.beginRecording` or `Recorder.begin`.
+///
+/// Typical window recording needs only `allocator`, `io`, and `writer`; the
+/// defaults produce a 60 fps, 12 Mbps Matroska file. Call `endRecording` (or
+/// `Recorder.end`) before closing the writer so pending GPU work is drained
+/// and the container is finalized.
+///
+/// The recorder encodes BGRA8 render-target frames. It does not capture audio.
 pub const RecordingOptions = struct {
+    /// Used for temporary encoder state and capability queries. It must remain
+    /// valid until recording has ended and resources have been released.
     allocator: std.mem.Allocator,
+    /// Clock used by `.timing.monotonic`.
     io: std.Io,
+    /// Destination for the encoded stream. The caller owns and closes it after
+    /// `endRecording` completes.
     writer: *std.Io.Writer,
-    frame_rate: capabilities.Rational = .{ .numerator = 60, .denominator = 1 },
+    /// Select timestamp behavior and the nominal encoder rate. Use `.fps(60)`
+    /// for whole-number rates or `.init(30_000, 1001)` for exact fractions.
+    timing: RecordingTiming = .{ .fixed_rate = .fps(60) },
+    /// Target video bitrate in bits per second. Higher values preserve detail
+    /// but increase file size; 12 Mbps is a reasonable 1080p starting point.
     bitrate: u32 = 12_000_000,
+    /// Maximum frames between IDR keyframes. Smaller values improve seeking
+    /// and recovery but increase bitrate; 60 is about one second at 60 fps.
     gop_size: u32 = 60,
+    /// Encoder tuning preference. `.balanced` is the portable default;
+    /// `.low_latency` and `.high_quality` need matching device support.
     quality: capabilities.Quality = .balanced,
+    /// Behavior when the render target changes size. For window capture,
+    /// `.change_resolution` preserves pixels; `.scale_and_letterbox` keeps one
+    /// encoded size; `.stop_recording` gives the caller a clean boundary.
     resize: capabilities.ResizePolicy = .scale_and_letterbox,
+    /// Whether to repeat H.264 parameter sets at IDR keyframes. Keep the
+    /// default for streaming or independently decodable segments.
     parameter_sets: capabilities.ParameterSetPolicy = .every_idr,
+    /// `.mkv` is recommended. `.h264` only supports fixed-rate output.
     format: RecordingFormat = .mkv,
-    timestamp_mode: capabilities.TimestampMode = .fixed_rate,
 };
 
 pub const RecordingStatus = union(enum) {
+    /// Frames are being accepted and encoded.
     recording,
+    /// A recording error occurred; the payload is the first error retained by
+    /// the recorder. End the recording before reusing the target.
     failed: anyerror,
+    /// The source resized while using `.resize = .stop_recording`.
     stopped_resize,
 };
 
@@ -53,7 +111,7 @@ pub const Recorder = struct {
     const Run = struct {
         io: std.Io,
         writer: *std.Io.Writer,
-        frame_rate: capabilities.Rational,
+        timing: RecordingTiming,
         bitrate: u32,
         gop_size: u32,
         quality: capabilities.Quality,
@@ -62,7 +120,6 @@ pub const Recorder = struct {
         format: RecordingFormat,
         mkv: ?matroska.Muxer = null,
         allocator: std.mem.Allocator,
-        timestamp_mode: capabilities.TimestampMode,
         start_time_ns: i128,
         output_frames: u64 = 0,
         last_timestamp_ns: ?u64 = null,
@@ -96,17 +153,17 @@ pub const Recorder = struct {
         if (self.cache_poisoned) self.releaseResources();
         if (self.frames_in_flight == 0) return error.InvalidFramesInFlight;
         if (self.color_format != low_vk.format.b8g8r8a8_unorm) return error.UnsupportedSourceFormat;
-        try options.frame_rate.validate();
+        try options.timing.frameRate().validate();
         if (options.bitrate == 0) return error.InvalidBitrate;
         if (options.gop_size == 0) return error.InvalidGopSize;
-        if (options.format != .mkv and options.timestamp_mode != .fixed_rate) return error.TimestampedOutputRequiresMkv;
+        if (options.format != .mkv and !options.timing.isFixedRate()) return error.TimestampedOutputRequiresMkv;
 
         _ = try self.configureCache(extent, options, true);
 
         var run = Run{
             .io = options.io,
             .writer = options.writer,
-            .frame_rate = options.frame_rate,
+            .timing = options.timing,
             .bitrate = options.bitrate,
             .gop_size = options.gop_size,
             .quality = options.quality,
@@ -114,7 +171,6 @@ pub const Recorder = struct {
             .parameter_sets = options.parameter_sets,
             .format = options.format,
             .allocator = options.allocator,
-            .timestamp_mode = options.timestamp_mode,
             .start_time_ns = 0,
             .source_extent = extent,
         };
@@ -124,10 +180,10 @@ pub const Recorder = struct {
             .h264 => try run.writer.writeAll(self.cache.?.header),
             .mkv => run.mkv = try matroska.Muxer.init(
                 run.writer,
-                .{ .numerator = run.frame_rate.numerator, .denominator = run.frame_rate.denominator },
+                .{ .numerator = run.timing.frameRate().numerator, .denominator = run.timing.frameRate().denominator },
                 .{ .width = self.cache.?.key.extent.width, .height = self.cache.?.key.extent.height },
                 self.cache.?.header,
-                run.timestamp_mode != .fixed_rate,
+                !run.timing.isFixedRate(),
             ),
         }
         run.start_time_ns = std.Io.Timestamp.now(run.io, .awake).nanoseconds;
@@ -163,7 +219,7 @@ pub const Recorder = struct {
             .dpb_format = support.dpb_format.?,
             .profile = support.profile,
             .max_level = support.max_level,
-            .frame_rate = try options.frame_rate.reduced(),
+            .frame_rate = try options.timing.frameRate().reduced(),
             .bitrate = options.bitrate,
             .gop_size = options.gop_size,
             .quality = options.quality,
@@ -277,14 +333,13 @@ pub const Recorder = struct {
             .allocator = run.allocator,
             .io = run.io,
             .writer = run.writer,
-            .frame_rate = run.frame_rate,
+            .timing = run.timing,
             .bitrate = run.bitrate,
             .gop_size = run.gop_size,
             .quality = run.quality,
             .resize = run.resize,
             .parameter_sets = run.parameter_sets,
             .format = run.format,
-            .timestamp_mode = run.timestamp_mode,
         };
         const changed = try self.configureCache(extent, options, false);
         self.run.?.source_extent = extent;
@@ -475,11 +530,11 @@ pub const Recorder = struct {
 
     fn resolveTimestamp(self: *Recorder, explicit_timestamp_ns: ?u64) !u64 {
         const run = &self.run.?;
-        const timestamp_ns = switch (run.timestamp_mode) {
-            .fixed_rate => if (explicit_timestamp_ns != null)
+        const timestamp_ns = switch (run.timing) {
+            .fixed_rate => |frame_rate| if (explicit_timestamp_ns != null)
                 return error.UnexpectedFrameTimestamp
             else
-                try fixedFrameTimestamp(run.output_frames, run.frame_rate),
+                try fixedFrameTimestamp(run.output_frames, frame_rate),
             .monotonic => explicit_timestamp_ns orelse blk: {
                 const now = std.Io.Timestamp.now(run.io, .awake).nanoseconds;
                 break :blk @as(u64, @intCast(@max(now - run.start_time_ns, 0)));
@@ -1315,7 +1370,7 @@ test "recorder status transitions are non-consuming" {
     recorder.run = .{
         .io = std.Options.debug_io,
         .writer = &writer,
-        .frame_rate = .{ .numerator = 60, .denominator = 1 },
+        .timing = .{ .fixed_rate = .fps(60) },
         .bitrate = 1,
         .gop_size = 1,
         .quality = .balanced,
@@ -1323,7 +1378,6 @@ test "recorder status transitions are non-consuming" {
         .parameter_sets = .stream_start,
         .format = .h264,
         .allocator = std.testing.allocator,
-        .timestamp_mode = .fixed_rate,
         .start_time_ns = 0,
         .source_extent = .{ .width = 64, .height = 64 },
     };

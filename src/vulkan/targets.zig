@@ -105,8 +105,8 @@ pub const RenderTarget = struct {
         }
 
         /// Submits with an explicit recording timestamp, in nanoseconds on
-        /// the recording timeline. Recording must use `.timestamp_mode = .explicit`
-        /// or `.monotonic`.
+        /// the recording timeline. Recording must use `.timing = .{ .explicit = ... }`
+        /// or `.timing = .{ .monotonic = ... }`.
         pub fn submitAndPresentAt(self: *Frame, timestamp_ns: u64) !void {
             const state = self.state orelse return error.FrameAlreadyFinished;
             try self.submit_fn(state, timestamp_ns);
@@ -796,16 +796,25 @@ pub const RenderTarget = struct {
         return self.acquire_fn(self.state);
     }
 
+    /// Starts encoding subsequent submitted frames.
+    ///
+    /// The simplest form is `try target.beginRecording(.{ .allocator = gpa,
+    /// .io = io, .writer = writer });`. Use `.format = .mkv` for variable-rate
+    /// timing or resize handling. Finish with `endRecording` before closing
+    /// the writer; use `recordingStatus` to observe asynchronous failures.
     pub fn beginRecording(self: *Self, options: Video.RecordingOptions) !void {
         if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
         return self.begin_recording_fn(self.state, @ptrCast(&options));
     }
 
+    /// Stops recording, waits for submitted frames to be encoded, and writes
+    /// the remaining Matroska data. The writer remains owned by the caller.
     pub fn endRecording(self: *Self) !void {
         if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
         return self.end_recording_fn(self.state);
     }
 
+    /// Returns null when inactive, otherwise the current recorder state.
     pub fn recordingStatus(self: *Self) ?Video.RecordingStatus {
         if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
         var result: ?Video.RecordingStatus = null;
@@ -818,6 +827,8 @@ pub const RenderTarget = struct {
         return self.is_recording_fn(self.state);
     }
 
+    /// Releases cached encoder resources after recording has stopped. This is
+    /// optional; resources are also released when the target is deinitialized.
     pub fn releaseRecordingResources(self: *Self) void {
         if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
         self.release_recording_fn(self.state);
