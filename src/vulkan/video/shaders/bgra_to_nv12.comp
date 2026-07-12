@@ -1,0 +1,39 @@
+#version 450
+
+layout(binding = 0, rgba8) uniform readonly image2D source_bgra;
+layout(binding = 1, r8) uniform writeonly image2D destination_y;
+layout(binding = 2, rg8) uniform writeonly image2D destination_cbcr;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// BT.709 non-constant-luminance conversion with limited-range digital levels.
+vec3 rgb_to_ycbcr(vec3 rgb) {
+    float y = 16.0 / 255.0 + (219.0 / 255.0) * dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    float cb = 128.0 / 255.0 + (224.0 / 255.0) * dot(rgb, vec3(-0.114572, -0.385428, 0.5));
+    float cr = 128.0 / 255.0 + (224.0 / 255.0) * dot(rgb, vec3(0.5, -0.454153, -0.045847));
+    return clamp(vec3(y, cb, cr), 0.0, 1.0);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = imageSize(destination_y);
+    if (any(greaterThanEqual(pixel, extent))) {
+        return;
+    }
+
+    vec3 rgb = imageLoad(source_bgra, pixel).rgb;
+    imageStore(destination_y, pixel, vec4(rgb_to_ycbcr(rgb).x, 0.0, 0.0, 1.0));
+
+    // A single invocation writes each 4:2:0 chroma sample, avoiding races and
+    // averaging the same 2x2 luma footprint represented by that sample.
+    if ((pixel.x & 1) == 0 && (pixel.y & 1) == 0) {
+        vec2 chroma = vec2(0.0);
+        for (int y = 0; y < 2; ++y) {
+            for (int x = 0; x < 2; ++x) {
+                ivec2 sample_pixel = min(pixel + ivec2(x, y), extent - ivec2(1));
+                chroma += rgb_to_ycbcr(imageLoad(source_bgra, sample_pixel).rgb).yz;
+            }
+        }
+        imageStore(destination_cbcr, pixel / 2, vec4(chroma * 0.25, 0.0, 1.0));
+    }
+}

@@ -26,5 +26,19 @@ cd ./examples/$EXAMPLE && zig build run
 The examples are standalone Zig packages. See their READMEs for Vulkan SDK,
 shader compiler, and run instructions.
 
+Optional Vulkan render-target helpers are enabled with `-Dvk_extras=true`.
+Vulkan Video H.264 recording is a separate, lazy feature and implies those
+helpers:
+
+```sh
+zig build -Dvk_video=true
+zig build run --build-file ./examples/multiwindow_triangles/build.zig \
+  -Dvk_video=true -- --offscreen --record tmp/first.h264
+```
+
+The recorder keeps rendered pixels on the GPU, converts BGRA to BT.709 NV12,
+and writes a raw Annex-B H.264 stream through a caller-owned `std.Io.Writer`.
+Vulkan Video dependencies are not resolved by normal builds.
+
 ### Deployment & cross-compilation
 Zig builds & optimizes for specific hostmachine. For portable deployments or cross-compilation specify target such as `-Dtarget=x86_64-windows-gnu` or `-Dtarget=x86_64-linux-gnu`.
