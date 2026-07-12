@@ -76,10 +76,9 @@ and leave the rendered image in `transfer_src_optimal` after submission.
 
 - Wayland `show()` and `hide()` record requested visibility. The renderer owns
   the surface buffer and therefore controls when the surface is actually mapped.
-- Desktop windows expose `Window.isRenderSuspended()` and the
-  `WindowCallbacks.render_suspended` transition callback. Applications can use
-  these to pause rendering while a window is not being presented, but must
-  treat them as a best-effort hint rather than an exact visibility query.
+- Desktop windows expose `Window.isRenderSuspended()`. Applications can use it
+  to pause rendering while a window is not being presented, but must
+  treat it as a best-effort hint rather than an exact visibility query.
   Wayland reports the optional `xdg_toplevel.state.suspended` state when a
   compositor supports xdg-shell v6 or newer; it may still omit the hint.
   X11 uses map/unmap plus `VisibilityNotify`; a window moved to another virtual desktop is
@@ -87,11 +86,10 @@ and leave the rendered image in `transfer_src_optimal` after submission.
   position messages plus DWM's `DWMWA_CLOAKED` state for shell- or
   application-cloaked windows. Other compositor/window-manager decisions may
   not generate a signal, so an application must remain correct if it continues
-  to render. Offscreen windows never emit this callback.
+  to render. Offscreen windows never report suspension.
 - `Window.shouldRender()` is the portable rendering gate. On Wayland it is
   initially true and becomes false after `Window.requestFrame()`; the next
-  `wl_surface.frame` callback makes it true again and invokes
-  `WindowCallbacks.frame` (with its Wayland millisecond timestamp). Call
+  `wl_surface.frame` callback makes it true again. Call
   `requestFrame()` immediately before the WSI presentation which commits the
   surface, then wait for events while
   `shouldRender()` is false; `Context.waitForRender(window)` filters unrelated

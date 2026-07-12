@@ -52,30 +52,8 @@ pub const Event = types.Event;
 pub const WindowOptions = types.WindowOptions;
 
 pub const WindowCallbacks = struct {
-    close: ?*const fn (*Window) void = null,
-    /// Drawable content size changed, in logical content units. Use this for
-    /// layout; it may differ from the framebuffer size on high-DPI displays.
-    resize: ?*const fn (*Window, ContentSize) void = null,
-    /// Framebuffer size changed, in physical pixels. Use this for
-    /// pixel-addressed rendering resources and viewport dimensions.
-    framebuffer_resize: ?*const fn (*Window, PixelSize) void = null,
-    scale: ?*const fn (*Window, ContentScale) void = null,
-    /// The platform has determined that rendering this window is currently
-    /// unnecessary.  `false` means rendering may resume.  This is a hint: a
-    /// compositor may omit it, and it does not mean the window was destroyed.
-    /// The offscreen backend never emits this callback.
-    render_suspended: ?*const fn (*Window, bool) void = null,
-    /// The compositor has permitted one more frame. On Wayland this is backed
-    /// by `wl_surface.frame`; other desktop backends are always frame-ready
-    /// unless their render-suspension hint is active.
-    /// `time_ms` has an unspecified epoch and is suitable only for measuring
-    /// elapsed time between successive frame callbacks.
-    frame: ?*const fn (*Window, u32) void = null,
-    focus: ?*const fn (*Window, bool) void = null,
-    cursor_enter: ?*const fn (*Window, bool) void = null,
-    /// Pointer location in logical content units, relative to the content
-    /// area's top-left corner.
-    cursor_motion: ?*const fn (*Window, ContentOffset) void = null,
+    /// Input callbacks carry transient event data. Query window state directly
+    /// after polling for close, size, scale, focus, cursor, and render status.
     mouse_button: ?*const fn (*Window, MouseButton, Action, Modifiers) void = null,
     /// Scroll delta in platform-defined scroll units; it is neither content
     /// units nor physical pixels.
@@ -483,56 +461,38 @@ pub const Window = struct {
         if (new_scale.x == self.content_scale.x and new_scale.y == self.content_scale.y) return;
         self.content_scale = new_scale;
         self.ctx.vtable.apply_scale(self, scale);
-        const old_fb = self.framebuffer_size;
         self.framebuffer_size = types.scaledSize(self.size, self.content_scale);
-        if (self.callbacks.scale) |cb| cb(self, self.content_scale);
-        if (old_fb.width != self.framebuffer_size.width or old_fb.height != self.framebuffer_size.height) {
-            if (self.callbacks.framebuffer_resize) |cb| cb(self, self.framebuffer_size);
-        }
     }
 
     pub fn updateSize(self: *Window, size: ContentSize) void {
-        const old_size = self.size;
-        const old_fb = self.framebuffer_size;
         self.size = size;
         self.framebuffer_size = types.scaledSize(size, self.content_scale);
-        if (old_size.width != size.width or old_size.height != size.height) {
-            if (self.callbacks.resize) |cb| cb(self, size);
-        }
-        if (old_fb.width != self.framebuffer_size.width or old_fb.height != self.framebuffer_size.height) {
-            if (self.callbacks.framebuffer_resize) |cb| cb(self, self.framebuffer_size);
-        }
     }
 
     pub fn updateCursorEnter(self: *Window, entered: bool) void {
         self.hovered = entered;
-        if (self.callbacks.cursor_enter) |cb| cb(self, entered);
     }
 
     pub fn updateFocus(self: *Window, focused: bool) void {
         self.focused = focused;
-        if (self.callbacks.focus) |cb| cb(self, focused);
     }
 
     pub fn updateRenderSuspended(self: *Window, suspended: bool) void {
         if (self.render_suspended == suspended) return;
         self.render_suspended = suspended;
-        if (self.callbacks.render_suspended) |cb| cb(self, suspended);
     }
 
     pub fn updateFrameReady(self: *Window, time_ms: u32) void {
+        _ = time_ms;
         self.frame_ready = true;
-        if (self.callbacks.frame) |cb| cb(self, time_ms);
     }
 
     pub fn updateClose(self: *Window) void {
         self.should_close = true;
-        if (self.callbacks.close) |cb| cb(self);
     }
 
     pub fn updateCursorMotion(self: *Window, x: f64, y: f64) void {
         self.cursor_pos = .{ .x = x, .y = y };
-        if (self.callbacks.cursor_motion) |cb| cb(self, self.cursor_pos);
     }
 
     pub fn updateMouseButton(self: *Window, button: MouseButton, action: Action, mods: Modifiers) void {

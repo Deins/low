@@ -211,12 +211,10 @@ fn resize(inner: *native.Window, size: native.Size) void {
 fn framebufferResize(inner: *native.Window, _: native.Size) void {
     const window = publicWindow(inner);
     window.framebuffer_size = inner.getFramebufferSize();
-    if (window.callbacks.framebuffer_resize) |cb| cb(window, window.framebuffer_size);
 }
 fn scale(inner: *native.Window, value: native.ContentScale) void {
     const window = publicWindow(inner);
     window.content_scale = value;
-    if (window.callbacks.scale) |cb| cb(window, value);
 }
 fn focus(inner: *native.Window, focused: bool) void {
     publicWindow(inner).updateFocus(focused);
