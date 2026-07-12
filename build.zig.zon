@@ -30,8 +30,7 @@
         "build.zig.zon",
         "src",
         "README.md",
-        "README.implementation.md",
-        "video.md",
+        "docs",
         "LICENSE",
     },
 }

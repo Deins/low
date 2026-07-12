@@ -54,10 +54,9 @@ through a caller-owned `std.Io.Writer`. Vulkan Video dependencies are not
 resolved by normal builds.
 
 See the [Vulkan Video recording guide](docs/recording.md) for device setup,
-recording lifecycle, timing, output formats, and quality tradeoffs. The
-[Vulkan Video design notes](docs/video.md) describe the implementation plan.
-For platform and Vulkan-layer internals, see the
-[implementation notes](docs/implementation.md).
+recording lifecycle, timing, output formats, and quality tradeoffs. For
+platform and Vulkan-layer internals, including the Vulkan Video implementation
+invariants and validation guidance, see the [implementation notes](docs/implementation.md).
 
 ### Deployment & cross-compilation
 Zig builds & optimizes for specific hostmachine. For portable deployments or cross-compilation specify target such as `-Dtarget=x86_64-windows-gnu` or `-Dtarget=x86_64-linux-gnu`.

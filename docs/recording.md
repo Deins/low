@@ -60,6 +60,14 @@ defer requirements.deinit(allocator);
 // requirements.queue_create_infos to VkDeviceCreateInfo.
 ```
 
+Capability queries are also the normal unsupported-hardware path: an
+unavailable result carries a reason instead of requiring device creation to
+fail. The query checks the codec extension, an encode queue for that codec,
+the supported profile, coded extent and alignment, encode-input and DPB image
+formats, and at least one usable rate-control mode. For a runtime codec
+choice, use `selectVideoFormat` with the preferred order; apply the returned
+support object's extensions and queue requirements to the same device.
+
 Create `VideoDevice` from the resulting Vulkan device and supply it as
 `RenderTarget.Options.video_device`. The target must be deinitialized before
 its `VideoDevice`. The encode queue is owned by `low` for the lifetime of the

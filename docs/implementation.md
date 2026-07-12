@@ -72,6 +72,78 @@ For an offscreen target, provide `memory_allocator` callbacks to allocate and
 bind the target's images. Offscreen targets never create a surface or swapchain
 and leave the rendered image in `transfer_src_optimal` after submission.
 
+### Vulkan Video implementation invariants
+
+Recording is deliberately separate from screenshot readback. The recorded
+frame path is:
+
+```text
+completed BGRA8 render target
+    -> recorder-owned source image
+GPU color conversion to the selected codec input format
+    -> Vulkan Video encode
+feedback-selected compressed byte range
+    -> caller-owned writer
+```
+
+The source contract is `VK_FORMAT_B8G8R8A8_UNORM`; packed 10-bit render
+formats are not recordable until a separate source-conversion path exists.
+The common conversion path uses BT.709 limited-range 4:2:0 data, and the
+codec's color metadata must agree with the shader conversion. Swapchain images
+are copied to private recorder images before conversion so recording does not
+depend on swapchain sampling or storage usage. The normal rendering and
+readback paths must not allocate video resources, submit conversion or video
+commands, or wait on recorder fences.
+
+Each target has at most one recorder. A `VideoDevice` may serve multiple
+targets, but its encode queue is exclusively submitted by `low` while the
+device is alive; targets must detach before `VideoDevice.deinit`. There is no
+portable concurrent-session limit, so each `beginRecording` admits a stream
+only after creating its session, session memory, DPB, conversion ring,
+bitstream ring, and synchronization resources. A failed later admission must
+not stop already-running recorders.
+
+Recorder resources are organized as a per-frame ring. A slot is reused only
+after its encode fence completes, feedback reports a bounded offset and size,
+and the selected packet has been written. `endRecording` drains all submitted
+slots and flushes the writer; it never closes the caller-owned writer.
+Compatible GPU resources may remain cached between runs, while writer state,
+packet state, frame/GOP counters, sticky errors, and incompatible session
+parameters are reset. `releaseRecordingResources` explicitly drops that cache.
+
+When conversion and encode use the same queue family, submission ordering and
+per-slot semaphores are sufficient. Separate families require explicit
+release/acquire ownership transfers for intermediate images and semaphores
+between queue submissions. Fence waits belong at slot reuse or recording end,
+not once per submitted frame, so the ring can absorb normal GPU latency.
+
+## Vulkan Video validation and maintenance
+
+The implementation should remain testable without video hardware. Unit tests
+belong around extension and queue requirement merging, coded-extent alignment,
+frame-rate calculations, codec parameter-set construction, GOP/reference-slot
+state, feedback range bounds, raw stream headers, Matroska encoding, and the
+recorder state machine. Compile coverage must include the default build with
+video disabled and the optional video build on supported target platforms.
+
+Hardware validation should exercise both offscreen and WSI targets, more
+frames than the ring size, resize policies, fixed/monotonic/explicit timing,
+unsupported-device paths, and same-family and separate-family queues where
+available. Run with Vulkan validation layers, then verify output with a media
+probe and decoder. Hardware tests should be skipped with an explicit reason
+when no Vulkan Video encode device is present.
+
+The BGRA-to-NV12 GLSL source and checked-in SPIR-V are kept together under
+`src/vulkan/video/shaders`. Normal consumers use the checked-in binary; the
+maintainer-only `check-vk-video-shader` and `regenerate-vk-video-shader` build
+steps are used when `glslc` is available.
+
+The Vulkan Video implementation follows the Vulkan video coding specification
+and the `VK_KHR_video_encode_queue` and `VK_KHR_video_encode_*` extension
+proposals. Matroska details follow RFC 9559 and the Vulkan/Matroska codec
+mapping. These references are useful when changing synchronization, codec
+headers, or the forward-only muxer.
+
 ## Platform behavior
 
 - Wayland `show()` and `hide()` record requested visibility. The renderer owns
