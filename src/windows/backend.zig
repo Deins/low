@@ -309,7 +309,7 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             return 0;
         },
         win32.WM_SIZE => {
-            const minimized = wparam == @intFromEnum(win32.SIZE_MINIMIZED);
+            const minimized = wparam == @as(win32.WPARAM, win32.SIZE_MINIMIZED);
             window.minimized = minimized;
             updateRenderSuspension(window, minimized);
             var rect: win32.RECT = undefined;

@@ -11,11 +11,7 @@ const triangle_half_size_px: f32 = 70.0;
 // Recording
 const recording_bitrate: u32 = 12_000_000;
 const recording_gop_size: u32 = 60;
-const recording_format: video.RecordingFormat = .mkv;
-const recording_resize: video.ResizePolicy = if (recording_format == .mkv) .change_resolution else .scale_and_letterbox;
 const recording_timing: video.RecordingTiming = .{ .fixed_rate = .fps(60) };
-const recording_first_path = "tmp/first." ++ @tagName(recording_format);
-const recording_second_path = "tmp/second." ++ @tagName(recording_format);
 
 fn lowPhysicalDevice(value: vk.PhysicalDevice) low.vulkan.api.PhysicalDevice {
     return @ptrFromInt(@intFromEnum(value));
@@ -39,6 +35,7 @@ const DeviceSelection = struct {
     physical_device: vk.PhysicalDevice,
     graphics_queue_family: u32,
     encode_queue_family: ?u32 = null,
+    selected_video_format: ?video.SelectedVideoFormat = null,
 };
 
 const Renderer = struct {
@@ -58,15 +55,16 @@ const Renderer = struct {
     encode_queue: vk.Queue,
     encode_queue_family: ?u32,
     video_device: ?video.VideoDevice,
+    video_codec: ?video.Codec,
 
     fn init(
         gpa: std.mem.Allocator,
         instance: vk.InstanceProxy,
         low_instance_input: low.vulkan.Instance,
         presentation: bool,
-        recording: bool,
+        recording_codec: ?video.Codec,
     ) !Renderer {
-        const selection = try findDevice(gpa, instance, &low_instance_input, recording);
+        const selection = try findDevice(gpa, instance, &low_instance_input, recording_codec);
 
         var features_13 = vk.PhysicalDeviceVulkan13Features{
             .synchronization_2 = .true,
@@ -81,8 +79,8 @@ const Renderer = struct {
             extension_storage[extension_count] = "VK_KHR_swapchain";
             extension_count += 1;
         }
-        if (recording) {
-            for (video.required_device_extensions) |extension| {
+        if (recording_codec != null) {
+            for (video.requiredDeviceExtensions(selection.selected_video_format.?.codec())) |extension| {
                 extension_storage[extension_count] = extension;
                 extension_count += 1;
             }
@@ -96,14 +94,8 @@ const Renderer = struct {
             .p_queue_priorities = &queue_priority,
         };
         var queue_info_count: u32 = 1;
-        if (recording) {
-            const support = try video.queryH264Support(.{
-                .instance = &low_instance_input,
-                .physical_device = lowPhysicalDevice(selection.physical_device),
-                .extent = .{ .width = 640, .height = 480 },
-                .allocator = gpa,
-            });
-            var requirements = try support.deviceRequirements(.{
+        if (recording_codec != null) {
+            var requirements = try selection.selected_video_format.?.deviceRequirements(.{
                 .allocator = gpa,
                 .graphics_queue_family = selection.graphics_queue_family,
                 .queue_priority = 1.0,
@@ -168,11 +160,12 @@ const Renderer = struct {
             .encode_queue = encode_queue,
             .encode_queue_family = selection.encode_queue_family,
             .video_device = null,
+            .video_codec = if (selection.selected_video_format) |selected| selected.codec() else null,
         };
     }
 
     fn initVideo(self: *Renderer) !void {
-        const encode_family = self.encode_queue_family orelse return error.NoH264Device;
+        const encode_family = self.encode_queue_family orelse return error.NoVideoEncodeDevice;
         self.video_device = try video.VideoDevice.init(.{
             .allocator = self.gpa,
             .instance = &self.low_instance,
@@ -202,6 +195,7 @@ const AppWindow = struct {
     position: [2]f32,
     velocity: [2]f32,
     color: [3]f32,
+    recording_codec: ?video.Codec,
 
     fn init(
         gpa: std.mem.Allocator,
@@ -228,6 +222,7 @@ const AppWindow = struct {
             .position = position,
             .velocity = velocity,
             .color = color,
+            .recording_codec = renderer.video_codec,
         };
     }
 
@@ -253,8 +248,9 @@ const AppWindow = struct {
             .timing = recording_timing,
             .bitrate = recording_bitrate,
             .gop_size = recording_gop_size,
-            .format = recording_format,
-            .resize = recording_resize,
+            .codec = self.recording_codec orelse return error.VideoEncodeUnsupported,
+            .format = .mkv,
+            .resize = .change_resolution,
         });
     }
 
@@ -358,14 +354,12 @@ pub fn main(init: std.process.Init) !void {
     var second_record_writer: ?std.Io.File.Writer = null;
     if (recording_requested) {
         try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
-        first_record_file = try std.Io.Dir.cwd().createFile(init.io, recording_first_path, .{});
+        first_record_file = try std.Io.Dir.cwd().createFile(init.io, "tmp/first.mkv", .{});
         first_record_writer = first_record_file.?.writer(init.io, &first_record_buffer);
-    }
-    defer if (first_record_file) |*file| file.close(init.io);
-    if (recording_requested) {
-        second_record_file = try std.Io.Dir.cwd().createFile(init.io, recording_second_path, .{});
+        second_record_file = try std.Io.Dir.cwd().createFile(init.io, "tmp/second.mkv", .{});
         second_record_writer = second_record_file.?.writer(init.io, &second_record_buffer);
     }
+    defer if (first_record_file) |*file| file.close(init.io);
     defer if (second_record_file) |*file| file.close(init.io);
     var loader = try low.vulkan.Loader.init();
     defer loader.deinit();
@@ -399,9 +393,15 @@ pub fn main(init: std.process.Init) !void {
     defer instance.destroyInstance(null);
 
     const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance.handle)));
-    var renderer = Renderer.init(gpa, instance, low_instance, context.backendKind() != .offscreen, recording_requested) catch |err| {
+    var renderer = Renderer.init(
+        gpa,
+        instance,
+        low_instance,
+        context.backendKind() != .offscreen,
+        if (recording_requested) app_options.record_codec else null,
+    ) catch |err| {
         if (recording_requested) {
-            std.log.err("no device can render and encode H.264: {s}", .{@errorName(err)});
+            std.log.err("no device can render and encode the requested video format: {s}", .{@errorName(err)});
             return;
         }
         return err;
@@ -446,7 +446,6 @@ pub fn main(init: std.process.Init) !void {
     var previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
     var rendered_frames: u32 = 0;
     const offscreen = context.backendKind() == .offscreen;
-    const frame_limit: ?u32 = app_options.frames orelse if (offscreen) @as(u32, 10) else null;
     if (offscreen) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
     while (first != null or second != null) {
         if (offscreen) try context.nextFrame();
@@ -487,12 +486,14 @@ pub fn main(init: std.process.Init) !void {
         const now = std.Io.Timestamp.now(std.Options.debug_io, .awake);
         const dt: f32 = @min(0.05, @as(f32, @floatFromInt(now.nanoseconds - previous.nanoseconds)) / 1_000_000_000);
         previous = now;
+        var rendered = false;
         if (first) |*app_window| {
             if (app_window.window.shouldRender()) {
                 app_window.update(dt);
                 var path_buffer: [64]u8 = undefined;
                 const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
                 try app_window.draw(&renderer, init.io, path);
+                rendered = true;
             }
         }
         if (second) |*app_window| {
@@ -501,10 +502,12 @@ pub fn main(init: std.process.Init) !void {
                 var path_buffer: [64]u8 = undefined;
                 const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
                 try app_window.draw(&renderer, init.io, path);
+                rendered = true;
             }
         }
+        if (!rendered) continue;
         rendered_frames += 1;
-        if (frame_limit) |limit| {
+        if (app_options.frames) |limit| {
             if (rendered_frames == limit) {
                 if (first) |app_window| app_window.window.setShouldClose(true);
                 if (second) |app_window| app_window.window.setShouldClose(true);
@@ -514,7 +517,7 @@ pub fn main(init: std.process.Init) !void {
     try renderer.device.deviceWaitIdle();
 }
 
-fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy, low_instance: *const low.vulkan.Instance, recording: bool) !DeviceSelection {
+fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy, low_instance: *const low.vulkan.Instance, recording_codec: ?video.Codec) !DeviceSelection {
     const physical_devices = try instance.enumeratePhysicalDevicesAlloc(gpa);
     defer gpa.free(physical_devices);
     for (physical_devices) |physical_device| {
@@ -525,25 +528,25 @@ fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy, low_instance: 
         defer gpa.free(families);
         for (families, 0..) |family, index| {
             if (!family.queue_flags.graphics_bit) continue;
-            if (recording) {
-                const support = try video.queryH264Support(.{
+            if (recording_codec) |codec| {
+                const selected = try video.selectVideoFormat(.{
                     .instance = low_instance,
                     .physical_device = lowPhysicalDevice(physical_device),
                     .extent = .{ .width = 640, .height = 480 },
                     .allocator = gpa,
-                });
-                if (!support.available) continue;
-                std.log.info("H.264 encode: profile {s}, level {s}, coded extent {d}x{d}, queue family {d}", .{
-                    @tagName(support.profile),
-                    @tagName(support.max_level),
-                    support.coded_extent.width,
-                    support.coded_extent.height,
-                    support.encode_queue_family.?,
+                }, &.{codec}) orelse continue;
+                const coded_extent = selected.codedExtent();
+                std.log.info("{s} encode: coded extent {d}x{d}, queue family {d}", .{
+                    @tagName(selected.codec()),
+                    coded_extent.width,
+                    coded_extent.height,
+                    selected.encodeQueueFamily().?,
                 });
                 return .{
                     .physical_device = physical_device,
                     .graphics_queue_family = @intCast(index),
-                    .encode_queue_family = support.encode_queue_family,
+                    .encode_queue_family = selected.encodeQueueFamily(),
+                    .selected_video_format = selected,
                 };
             }
             return .{
@@ -663,6 +666,7 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
 const AppOptions = struct {
     backend: low.BackendRequest = .auto,
     record: bool = false,
+    record_codec: video.Codec = .av1,
     frames: ?u32 = null,
 };
 
@@ -679,10 +683,11 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
             desktop_selected = true;
         } else if (std.mem.eql(u8, arg, "--record")) {
             result.record = true;
-        } else if (std.mem.eql(u8, arg, "--frames")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.frames = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.startsWith(u8, arg, "--record-codec=")) {
+            const name = arg["--record-codec=".len..];
+            result.record_codec = std.meta.stringToEnum(video.Codec, name) orelse return error.InvalidRecordingCodec;
+        } else if (std.mem.startsWith(u8, arg, "--frames=")) {
+            result.frames = try std.fmt.parseInt(u32, arg["--frames=".len..], 10);
             if (result.frames.? == 0) return error.InvalidFrameCount;
         } else {
             return error.UnknownArgument;

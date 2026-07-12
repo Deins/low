@@ -1,8 +1,14 @@
 # low — let me open window
 
-A cross-platform desktop windowing library for Vulkan applications written in Zig.
-The main goal is to be as **portable** and **cross-compilable** as possible.
-Supports multiple windows, keyboard and mouse input, clipboard access, and more.
+A cross-platform desktop windowing library for Vulkan applications written in Zig.  
+With main goal to be as **portable** and **cross-compilable** as possible.
+Supports multiple windows, keyboard and mouse input, clipboard access etc.
+
+
+Additionally optionally provides vulkan swapchain management for windows with useful features:
+* grabbing screenshots of window contents (access raw bytes on cpu, or write bmp files)
+* recording encoded video streams (using vulkan video if supported by the gpu/driver), with av1, h265, or h264 codecs, either raw or packaged in mkv format
+
 
 ## Platforms
 

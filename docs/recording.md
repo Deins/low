@@ -1,8 +1,27 @@
 # Vulkan Video recording
 
-`low` can encode frames submitted to a Vulkan `RenderTarget` as H.264. The
+`low` can encode frames submitted to a Vulkan `RenderTarget` as AV1, H.265, or H.264. The
 feature is optional: build with `-Dvk_video=true`, then access it through
 `low.vulkan.video()`.
+
+The module can query and select the host's AV1, H.265, and H.264 Vulkan Video
+encode capabilities. Pass
+the formats in preference order; the returned support object carries the exact
+queue requirements for the selected codec:
+
+```zig
+const video = low.vulkan.video();
+const selected = try video.selectVideoFormat(.{
+    .instance = &instance,
+    .physical_device = physical_device,
+    .extent = .{ .width = 1920, .height = 1080 },
+}, &.{ .av1, .h265, .h264 }) orelse return error.NoRequestedVideoFormat;
+```
+
+Use `video.requiredDeviceExtensions(selected.codec())` and
+`selected.deviceRequirements(...)` when building the matching logical device.
+H.264's existing `required_device_extensions` value remains available for
+compatibility.
 
 The recorder captures the render target's submitted BGRA frames on the GPU. It
 does not capture the desktop, other application windows, or audio. Frames are
@@ -42,8 +61,8 @@ its `VideoDevice`. The encode queue is owned by `low` for the lifetime of the
 
 ## Minimal recording lifecycle
 
-Use Matroska unless a downstream consumer specifically requires raw Annex-B
-H.264. Start recording before submitting frames, then end it before closing the
+Use Matroska unless a downstream consumer specifically requires a raw codec
+stream. Start recording before submitting frames, then end it before closing the
 writer:
 
 ```zig
@@ -77,9 +96,11 @@ automatically.
 writer does not need seeking, and it supports variable frame timestamps and
 Matroska track updates for resize handling.
 
-`.h264` writes a raw Annex-B elementary stream. Choose it only when the
-consumer explicitly expects raw H.264. It has no container timestamps, so it
-only accepts fixed-rate timing.
+`.raw` writes the selected codec's native elementary stream (Annex-B for H.264
+and H.265, OBU stream for AV1). Choose it only when the consumer expects that codec. It
+has no container timestamps, so it only accepts fixed-rate timing. Set
+`RecordingOptions.codec`; unsupported recorder codecs are rejected before any
+output is written.
 
 ## Timing
 
@@ -109,7 +130,7 @@ Use `.explicit` when timestamps come from an application clock, a media source,
 or another external scheduler. Submit every recorded frame with
 `submitAndPresentAt(timestamp_ns)`. Timestamps are nanoseconds on the recording
 timeline and must be strictly increasing. The carried frame rate remains a
-nominal encoder setting because the Vulkan/H.264 session is configured before
+nominal encoder setting because the Vulkan Video session is configured before
 future timestamps are known.
 
 `.fps(60)` is the clearest choice for whole-number rates. Use
@@ -133,7 +154,7 @@ Use `.quality = .balanced` unless a specific tradeoff is required.
 mode can be unavailable on a given driver.
 
 Keep `.parameter_sets = .every_idr` for streaming or independently cut
-segments. It repeats the H.264 SPS/PPS headers at keyframes, adding a small
+segments. It repeats H.264 SPS/PPS or H.265 VPS/SPS/PPS at keyframes, adding a small
 amount of data but making those segments easier to decode independently.
 
 ## Resizing
