@@ -374,7 +374,8 @@ pub const RecordingOptions = struct {
     resize: ResizePolicy = .scale_and_letterbox,
     timestamp_mode: TimestampMode = .fixed_rate,
     parameter_sets: ParameterSetPolicy = .every_idr,
-    format: RecordingFormat = .h264,
+    codec: Codec = .h264,
+    format: RecordingFormat = .raw,
 };
 
 pub const Quality = enum { low_latency, balanced, high_quality };
@@ -382,7 +383,7 @@ pub const Rational = struct { numerator: u32, denominator: u32 };
 pub const ResizePolicy = enum { scale_and_letterbox, change_resolution, stop_recording };
 pub const TimestampMode = enum { fixed_rate, monotonic, explicit };
 pub const ParameterSetPolicy = enum { stream_start, every_idr };
-pub const RecordingFormat = enum { h264, mkv };
+pub const RecordingFormat = enum { raw, mkv };
 ```
 
 Avoid exposing raw codec structures in the basic API. An advanced options

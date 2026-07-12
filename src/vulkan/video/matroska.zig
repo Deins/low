@@ -15,6 +15,72 @@ pub const CodecState = struct {
     extent: Extent,
 };
 
+pub const Codec = enum { h264, h265, av1 };
+
+/// Codec-dispatching facade used by the Vulkan recorder. AVC keeps its codec
+/// private data path below; HEVC and AV1 are written as streaming tracks with
+/// in-band sequence headers.
+pub const RecordingMuxer = union(Codec) {
+    h264: Muxer,
+    h265: ElementaryMuxer,
+    av1: ElementaryMuxer,
+
+    pub fn init(writer: *std.Io.Writer, frame_rate: FrameRate, extent: Extent, parameter_sets: []const u8, variable: bool, codec: Codec) !RecordingMuxer {
+        return switch (codec) {
+            .h264 => .{ .h264 = try Muxer.init(writer, frame_rate, extent, parameter_sets, variable) },
+            .h265 => .{ .h265 = try ElementaryMuxer.init(writer, frame_rate, extent, variable, .h265) },
+            .av1 => .{ .av1 = try ElementaryMuxer.init(writer, frame_rate, extent, variable, .av1) },
+        };
+    }
+
+    pub fn writeFrame(self: *RecordingMuxer, prefix: ?[]const u8, state: ?CodecState, packet: []const u8, keyframe: bool, timestamp_ns: u64) !void {
+        return switch (self.*) {
+            .h264 => |*muxer| muxer.writeFrame(prefix, state, packet, keyframe, timestamp_ns),
+            inline .h265, .av1 => |*muxer| muxer.writeFrame(prefix, state, packet, keyframe, timestamp_ns),
+        };
+    }
+};
+
+const ElementaryMuxer = struct {
+    writer: *std.Io.Writer,
+    codec: Codec,
+    extent: Extent,
+    default_duration: ?u64,
+    last_timestamp_ns: ?u64 = null,
+
+    fn init(writer: *std.Io.Writer, rate: FrameRate, extent: Extent, variable: bool, codec: Codec) !ElementaryMuxer {
+        if (rate.numerator == 0 or rate.denominator == 0) return error.InvalidFrameRate;
+        if (extent.width == 0 or extent.height == 0) return error.UnsupportedVideoExtent;
+        const duration = if (variable) null else try defaultDuration(rate);
+        try writeEbmlHeader(writer);
+        try writeId(writer, ids.segment);
+        try writer.writeAll(&.{ 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
+        try writeInfo(writer);
+        try writeElementaryTracks(writer, extent, duration, codec);
+        return .{ .writer = writer, .codec = codec, .extent = extent, .default_duration = duration };
+    }
+
+    fn writeFrame(self: *ElementaryMuxer, prefix: ?[]const u8, state: ?CodecState, packet: []const u8, keyframe: bool, timestamp_ns: u64) !void {
+        if (self.last_timestamp_ns) |previous| if (timestamp_ns <= previous) return error.NonMonotonicFrameTimestamp;
+        const prefix_size: u64 = if (prefix) |bytes| try elementarySampleSize(self.codec, bytes) else 0;
+        const packet_size = try elementarySampleSize(self.codec, packet);
+        const sample_size = try checkedAdd(prefix_size, packet_size);
+        const block_payload = try checkedAdd(4, sample_size);
+        const timestamp = timestampTicks(timestamp_ns, Muxer.timestamp_scale_ns);
+        const timestamp_size = try uintElementLength(ids.timestamp, timestamp);
+        const block_size = try elementLength(ids.simple_block, block_payload);
+        if (state) |new_state| try writeElementaryTracks(self.writer, new_state.extent, self.default_duration, self.codec);
+        try writeElementHeader(self.writer, ids.cluster, try checkedAdd(timestamp_size, block_size));
+        try writeUIntElement(self.writer, ids.timestamp, timestamp);
+        try writeElementHeader(self.writer, ids.simple_block, block_payload);
+        try self.writer.writeAll(&.{ 0x81, 0x00, 0x00, if (keyframe) 0x80 else 0x00 });
+        if (prefix) |bytes| try writeElementarySample(self.writer, self.codec, bytes);
+        try writeElementarySample(self.writer, self.codec, packet);
+        if (state) |new_state| self.extent = new_state.extent;
+        self.last_timestamp_ns = timestamp_ns;
+    }
+};
+
 /// A forward-only Matroska muxer for the recorder's H.264 stream.
 ///
 /// The Segment has an unknown size, as permitted for live Matroska streams,
@@ -167,6 +233,8 @@ const ids = struct {
 
 const application_name = "low 0.0.0";
 const codec_name = "V_MPEG4/ISO/AVC";
+const hevc_codec_name = "V_MPEGH/ISO/HEVC";
+const av1_codec_name = "V_AV1";
 
 const ParameterSets = struct {
     sps: []const u8,
@@ -399,6 +467,72 @@ fn writeTracks(writer: *std.Io.Writer, extent: Extent, duration: ?u64, sets: Par
     try writeUIntElement(writer, ids.primaries, 1);
 }
 
+fn elementaryCodecName(codec: Codec) []const u8 {
+    return switch (codec) {
+        .h264 => codec_name,
+        .h265 => hevc_codec_name,
+        .av1 => av1_codec_name,
+    };
+}
+
+fn elementaryTrackEntryLength(extent: Extent, duration: ?u64, codec: Codec) !u64 {
+    var result: u64 = 0;
+    inline for (.{ ids.track_number, ids.track_uid, ids.track_type, ids.flag_enabled, ids.flag_default }) |id| result = try checkedAdd(result, try uintElementLength(id, 1));
+    result = try checkedAdd(result, try uintElementLength(ids.flag_forced, 0));
+    result = try checkedAdd(result, try uintElementLength(ids.flag_lacing, 0));
+    if (duration) |value| result = try checkedAdd(result, try uintElementLength(ids.default_duration, value));
+    result = try checkedAdd(result, try binaryElementLength(ids.codec_id, elementaryCodecName(codec).len));
+    result = try checkedAdd(result, try uintElementLength(ids.codec_delay, 0));
+    result = try checkedAdd(result, try uintElementLength(ids.seek_pre_roll, 0));
+    return checkedAdd(result, try elementLength(ids.video, try videoPayloadLength(extent)));
+}
+
+fn writeElementaryTracks(writer: *std.Io.Writer, extent: Extent, duration: ?u64, codec: Codec) !void {
+    const entry_length = try elementaryTrackEntryLength(extent, duration, codec);
+    try writeElementHeader(writer, ids.tracks, try elementLength(ids.track_entry, entry_length));
+    try writeElementHeader(writer, ids.track_entry, entry_length);
+    try writeUIntElement(writer, ids.track_number, 1);
+    try writeUIntElement(writer, ids.track_uid, 1);
+    try writeUIntElement(writer, ids.track_type, 1);
+    try writeUIntElement(writer, ids.flag_enabled, 1);
+    try writeUIntElement(writer, ids.flag_default, 1);
+    try writeUIntElement(writer, ids.flag_forced, 0);
+    try writeUIntElement(writer, ids.flag_lacing, 0);
+    if (duration) |value| try writeUIntElement(writer, ids.default_duration, value);
+    try writeBinaryElement(writer, ids.codec_id, elementaryCodecName(codec));
+    try writeUIntElement(writer, ids.codec_delay, 0);
+    try writeUIntElement(writer, ids.seek_pre_roll, 0);
+    try writeElementHeader(writer, ids.video, try videoPayloadLength(extent));
+    try writeUIntElement(writer, ids.flag_interlaced, 2);
+    try writeUIntElement(writer, ids.pixel_width, extent.width);
+    try writeUIntElement(writer, ids.pixel_height, extent.height);
+    try writeElementHeader(writer, ids.colour, try colourPayloadLength());
+    try writeUIntElement(writer, ids.matrix_coefficients, 1);
+    try writeUIntElement(writer, ids.bits_per_channel, 8);
+    try writeUIntElement(writer, ids.chroma_subsampling_horz, 1);
+    try writeUIntElement(writer, ids.chroma_subsampling_vert, 1);
+    try writeUIntElement(writer, ids.chroma_siting_horz, 2);
+    try writeUIntElement(writer, ids.chroma_siting_vert, 2);
+    try writeUIntElement(writer, ids.color_range, 1);
+    try writeUIntElement(writer, ids.transfer_characteristics, 1);
+    try writeUIntElement(writer, ids.primaries, 1);
+}
+
+fn elementarySampleSize(codec: Codec, bytes: []const u8) !u64 {
+    if (bytes.len == 0) return error.EncodedPacketOutOfBounds;
+    return switch (codec) {
+        .h265, .av1 => bytes.len,
+        .h264 => unreachable,
+    };
+}
+
+fn writeElementarySample(writer: *std.Io.Writer, codec: Codec, bytes: []const u8) !void {
+    switch (codec) {
+        .h265, .av1 => try writer.writeAll(bytes),
+        .h264 => unreachable,
+    }
+}
+
 fn defaultDuration(frame_rate: FrameRate) !u64 {
     const numerator = @as(u128, frame_rate.denominator) * std.time.ns_per_s;
     const rounded = (numerator + frame_rate.numerator / 2) / frame_rate.numerator;
@@ -577,4 +711,20 @@ test "Matroska rejects incomplete parameter sets before writing" {
         false,
     ));
     try std.testing.expectEqual(@as(usize, 0), output.written().len);
+}
+
+test "recording muxer labels and packages HEVC and AV1" {
+    var hevc_output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer hevc_output.deinit();
+    var hevc = try RecordingMuxer.init(&hevc_output.writer, .{ .numerator = 60, .denominator = 1 }, .{ .width = 64, .height = 64 }, &.{}, false, .h265);
+    try hevc.writeFrame(null, null, &.{ 0, 0, 0, 1, 0x26, 0x01, 0xaa }, true, 0);
+    try std.testing.expect(std.mem.indexOf(u8, hevc_output.written(), hevc_codec_name) != null);
+    try std.testing.expect(std.mem.endsWith(u8, hevc_output.written(), &.{ 0, 0, 0, 1, 0x26, 0x01, 0xaa }));
+
+    var av1_output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer av1_output.deinit();
+    var av1_muxer = try RecordingMuxer.init(&av1_output.writer, .{ .numerator = 60, .denominator = 1 }, .{ .width = 64, .height = 64 }, &.{}, false, .av1);
+    try av1_muxer.writeFrame(null, null, &.{ 0x12, 0x00, 0x32, 0x01, 0xaa }, true, 0);
+    try std.testing.expect(std.mem.indexOf(u8, av1_output.written(), av1_codec_name) != null);
+    try std.testing.expect(std.mem.endsWith(u8, av1_output.written(), &.{ 0x12, 0x00, 0x32, 0x01, 0xaa }));
 }

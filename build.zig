@@ -7,7 +7,7 @@ pub fn build(b: *Build) !void {
     const linux_target = target.result.os.tag == .linux;
     const enable_x11 = b.option(bool, "x11", "Enable the X11 backend") orelse linux_target;
     const enable_wayland = b.option(bool, "wayland", "Enable the Wayland backend") orelse linux_target;
-    const enable_vk_video = b.option(bool, "vk_video", "Enable Vulkan Video H.264 recording") orelse false;
+    const enable_vk_video = b.option(bool, "vk_video", "Enable Vulkan Video H.264/H.265/AV1 recording") orelse false;
     const enable_vk_extras = (b.option(bool, "vk_extras", "Expose optional Vulkan render-target helpers") orelse false) or enable_vk_video;
 
     if (linux_target and !enable_x11 and !enable_wayland) {
