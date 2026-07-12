@@ -76,8 +76,31 @@ and leave the rendered image in `transfer_src_optimal` after submission.
 
 - Wayland `show()` and `hide()` record requested visibility. The renderer owns
   the surface buffer and therefore controls when the surface is actually mapped.
-- Wayland minimized state cannot be queried reliably because the protocol does
-  not provide a minimized-state event.
+- Desktop windows expose `Window.isRenderSuspended()` and the
+  `WindowCallbacks.render_suspended` transition callback. Applications can use
+  these to pause rendering while a window is not being presented, but must
+  treat them as a best-effort hint rather than an exact visibility query.
+  Wayland reports the optional `xdg_toplevel.state.suspended` state when a
+  compositor supports xdg-shell v6 or newer; it may still omit the hint.
+  X11 uses map/unmap plus `VisibilityNotify`; a window moved to another virtual desktop is
+  normally unmapped by its window manager. Win32 uses minimization/window-
+  position messages plus DWM's `DWMWA_CLOAKED` state for shell- or
+  application-cloaked windows. Other compositor/window-manager decisions may
+  not generate a signal, so an application must remain correct if it continues
+  to render. Offscreen windows never emit this callback.
+- `Window.shouldRender()` is the portable rendering gate. On Wayland it is
+  initially true and becomes false after `Window.requestFrame()`; the next
+  `wl_surface.frame` callback makes it true again and invokes
+  `WindowCallbacks.frame` (with its Wayland millisecond timestamp). Call
+  `requestFrame()` immediately before the WSI presentation which commits the
+  surface, then wait for events while
+  `shouldRender()` is false; `Context.waitForRender(window)` filters unrelated
+  event wakeups until a permit arrives. A compositor may suppress callbacks for
+  an entirely occluded surface, but this is a pacing optimization rather than a
+  visibility guarantee. X11 and Win32 keep the gate open unless their
+  suspension hint is active. Offscreen always keeps it open. If presentation
+  fails before the surface is committed, call `Window.cancelFrameRequest()`
+  before recreating rendering resources.
 - Cursor shape requests use `wp_cursor_shape_manager_v1` when the compositor
   advertises it; otherwise the compositor's default cursor remains active.
 - Unsupported operating systems build the stub backend and return

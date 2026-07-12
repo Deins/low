@@ -181,6 +181,12 @@ fn setCursor(window: *api.Window, shape: api.CursorShape) void {
     nativeWindow(window).setCursor(@enumFromInt(@intFromEnum(shape)));
 }
 fn applyScale(_: *api.Window, _: f32) void {}
+fn requestFrame(window: *api.Window) bool {
+    return nativeWindow(window).requestFrame();
+}
+fn cancelFrameRequest(window: *api.Window) void {
+    nativeWindow(window).cancelFrameRequest();
+}
 
 fn pumpEvents(state: *api.State, timeout_ms: i32) api.Error!bool {
     const inner = data(state).native_state;
@@ -215,6 +221,12 @@ fn scale(inner: *native.Window, value: native.ContentScale) void {
 fn focus(inner: *native.Window, focused: bool) void {
     publicWindow(inner).updateFocus(focused);
 }
+fn renderSuspended(inner: *native.Window, suspended: bool) void {
+    publicWindow(inner).updateRenderSuspended(suspended);
+}
+fn frame(inner: *native.Window, time_ms: u32) void {
+    publicWindow(inner).updateFrameReady(time_ms);
+}
 fn cursorEnter(inner: *native.Window, entered: bool) void {
     publicWindow(inner).updateCursorEnter(entered);
 }
@@ -240,6 +252,8 @@ const callbacks: native.WindowCallbacks = .{
     .framebuffer_resize = framebufferResize,
     .scale = scale,
     .focus = focus,
+    .render_suspended = renderSuspended,
+    .frame = frame,
     .cursor_enter = cursorEnter,
     .cursor_motion = cursorMotion,
     .mouse_button = mouseButton,
@@ -273,6 +287,8 @@ const vtable: api.VTable = .{
     .set_cursor_visible = setCursorVisible,
     .set_cursor = setCursor,
     .apply_scale = applyScale,
+    .request_frame = requestFrame,
+    .cancel_frame_request = cancelFrameRequest,
 };
 
 test {

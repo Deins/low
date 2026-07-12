@@ -60,6 +60,17 @@ pub const WindowCallbacks = struct {
     /// pixel-addressed rendering resources and viewport dimensions.
     framebuffer_resize: ?*const fn (*Window, PixelSize) void = null,
     scale: ?*const fn (*Window, ContentScale) void = null,
+    /// The platform has determined that rendering this window is currently
+    /// unnecessary.  `false` means rendering may resume.  This is a hint: a
+    /// compositor may omit it, and it does not mean the window was destroyed.
+    /// The offscreen backend never emits this callback.
+    render_suspended: ?*const fn (*Window, bool) void = null,
+    /// The compositor has permitted one more frame. On Wayland this is backed
+    /// by `wl_surface.frame`; other desktop backends are always frame-ready
+    /// unless their render-suspension hint is active.
+    /// `time_ms` has an unspecified epoch and is suitable only for measuring
+    /// elapsed time between successive frame callbacks.
+    frame: ?*const fn (*Window, u32) void = null,
     focus: ?*const fn (*Window, bool) void = null,
     cursor_enter: ?*const fn (*Window, bool) void = null,
     /// Pointer location in logical content units, relative to the content
@@ -99,6 +110,8 @@ pub const VTable = struct {
     set_cursor_visible: *const fn (*Window, bool) void,
     set_cursor: *const fn (*Window, CursorShape) void,
     apply_scale: *const fn (*Window, f32) void,
+    request_frame: *const fn (*Window) bool,
+    cancel_frame_request: *const fn (*Window) void,
 };
 
 pub const State = struct {
@@ -160,6 +173,13 @@ pub const State = struct {
         _ = try self.waitEventsTimeout(std.math.maxInt(u64));
     }
 
+    /// Dispatches events until `window` has a render permit or is closing.
+    /// This filters unrelated input/configuration events that can otherwise
+    /// wake a frame-paced render loop before it is allowed to draw.
+    pub fn waitForRender(self: *State, window: *Window) Error!void {
+        while (!window.shouldRender() and !window.shouldClose()) try self.waitEvents();
+    }
+
     pub fn waitEventsTimeout(self: *State, timeout_ns: u64) Error!bool {
         const timeout_ms: i32 = if (timeout_ns == std.math.maxInt(u64))
             -1
@@ -198,6 +218,8 @@ pub const Window = struct {
     maximized: bool = false,
     fullscreen: bool = false,
     minimized: bool = false,
+    render_suspended: bool = false,
+    frame_ready: bool = true,
     hovered: bool = false,
     resizable: bool = true,
     min_size: ?Size = null,
@@ -339,6 +361,36 @@ pub const Window = struct {
         return self.minimized;
     }
 
+    /// Returns whether the platform currently advises pausing rendering for
+    /// this window.  It is a best-effort signal, not an exact visibility test.
+    pub fn isRenderSuspended(self: *const Window) bool {
+        return self.render_suspended;
+    }
+
+    /// Whether the window currently has a permit to render a frame. On
+    /// Wayland, call `requestFrame` immediately before presenting to wait for
+    /// the compositor's next frame callback.
+    pub fn shouldRender(self: *const Window) bool {
+        return !self.render_suspended and self.frame_ready;
+    }
+
+    /// Arms the next frame permit. This is a no-op on backends without a
+    /// native frame callback. Call it immediately before presentation.
+    pub fn requestFrame(self: *Window) void {
+        if (self.ctx.backend_kind != .wayland or !self.frame_ready) return;
+        if (self.ctx.vtable.request_frame(self)) self.frame_ready = false;
+    }
+
+    /// Releases a frame permit armed by `requestFrame` after presentation
+    /// fails before committing the Wayland surface. This lets the application
+    /// recreate its swapchain and render again instead of waiting forever for
+    /// a callback that may never arrive.
+    pub fn cancelFrameRequest(self: *Window) void {
+        if (self.ctx.backend_kind != .wayland or self.frame_ready) return;
+        self.ctx.vtable.cancel_frame_request(self);
+        self.frame_ready = true;
+    }
+
     pub fn isHovered(self: *const Window) bool {
         return self.hovered;
     }
@@ -353,11 +405,13 @@ pub const Window = struct {
 
     pub fn show(self: *Window) void {
         self.visible = true;
+        if (self.ctx.backend_kind != .offscreen) self.updateRenderSuspended(false);
         self.ctx.vtable.show(self);
     }
 
     pub fn hide(self: *Window) void {
         self.visible = false;
+        if (self.ctx.backend_kind != .offscreen) self.updateRenderSuspended(true);
         self.ctx.vtable.hide(self);
     }
 
@@ -366,6 +420,7 @@ pub const Window = struct {
         self.maximized = true;
         self.fullscreen = false;
         self.minimized = false;
+        if (self.ctx.backend_kind != .offscreen) self.updateRenderSuspended(false);
     }
 
     pub fn setFullscreen(self: *Window) void {
@@ -373,6 +428,7 @@ pub const Window = struct {
         self.maximized = false;
         self.fullscreen = true;
         self.minimized = false;
+        if (self.ctx.backend_kind != .offscreen) self.updateRenderSuspended(false);
     }
 
     pub fn restore(self: *Window) void {
@@ -380,11 +436,13 @@ pub const Window = struct {
         self.maximized = false;
         self.fullscreen = false;
         self.minimized = false;
+        if (self.ctx.backend_kind != .offscreen) self.updateRenderSuspended(false);
     }
 
     pub fn iconify(self: *Window) void {
         self.ctx.vtable.iconify(self);
         self.minimized = true;
+        if (self.ctx.backend_kind != .offscreen) self.updateRenderSuspended(true);
     }
 
     /// Sets the minimum drawable content size in logical content units.
@@ -454,6 +512,17 @@ pub const Window = struct {
     pub fn updateFocus(self: *Window, focused: bool) void {
         self.focused = focused;
         if (self.callbacks.focus) |cb| cb(self, focused);
+    }
+
+    pub fn updateRenderSuspended(self: *Window, suspended: bool) void {
+        if (self.render_suspended == suspended) return;
+        self.render_suspended = suspended;
+        if (self.callbacks.render_suspended) |cb| cb(self, suspended);
+    }
+
+    pub fn updateFrameReady(self: *Window, time_ms: u32) void {
+        self.frame_ready = true;
+        if (self.callbacks.frame) |cb| cb(self, time_ms);
     }
 
     pub fn updateClose(self: *Window) void {
@@ -543,4 +612,21 @@ test "window converts between content and pixel spaces" {
         ContentOffset{ .x = 10, .y = 5 },
         window.pixelToContentOffset(.{ .x = 15, .y = 10 }),
     );
+}
+
+test "render gate follows frame readiness and suspension" {
+    var window: Window = .{
+        .ctx = undefined,
+        .backend_data = undefined,
+        .size = .{ .width = 1, .height = 1 },
+        .framebuffer_size = .{ .width = 1, .height = 1 },
+    };
+    try std.testing.expect(window.shouldRender());
+    window.frame_ready = false;
+    try std.testing.expect(!window.shouldRender());
+    window.updateFrameReady(0);
+    window.updateRenderSuspended(true);
+    try std.testing.expect(!window.shouldRender());
+    window.updateRenderSuspended(false);
+    try std.testing.expect(window.shouldRender());
 }

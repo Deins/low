@@ -103,6 +103,7 @@ fn addPlatformSupport(
 fn addWindowsSupport(b: *Build, module: *Build.Module) bool {
     const win32 = b.lazyDependency("win32", .{}) orelse return false;
     module.addImport("win32", win32.module("win32"));
+    module.linkSystemLibrary("dwmapi", .{});
     module.link_libc = true;
     return true;
 }
@@ -114,8 +115,10 @@ fn addLinuxSupport(
     optimize: std.builtin.OptimizeMode,
     enable_wayland: bool,
 ) bool {
-    if (!enable_wayland) return true;
+    // Both the X11 and Wayland Linux backends use libc. X11-only test builds
+    // still need this even though they do not generate Wayland bindings.
     module.link_libc = true;
+    if (!enable_wayland) return true;
 
     const wayland = b.lazyImport(@This(), "wayland") orelse return false;
     const scanner = wayland.Scanner.create(b, .{

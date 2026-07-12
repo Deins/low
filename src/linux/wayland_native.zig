@@ -19,6 +19,7 @@ const c = struct {
     pub const wl_keyboard = wl.Keyboard;
     pub const wl_output = wl.Output;
     pub const wl_surface = wl.Surface;
+    pub const wl_callback = wl.Callback;
     pub const wl_array = wl.Array;
     pub const wl_fixed_t = wl.Fixed;
     pub const xdg_wm_base = xdg.WmBase;
@@ -63,6 +64,9 @@ const c = struct {
     pub const wl_surface_listener = struct {
         enter: ?*const fn (?*anyopaque, ?*wl_surface, ?*wl_output) callconv(.c) void = null,
         leave: ?*const fn (?*anyopaque, ?*wl_surface, ?*wl_output) callconv(.c) void = null,
+    };
+    pub const wl_callback_listener = struct {
+        done: ?*const fn (?*anyopaque, ?*wl_callback, u32) callconv(.c) void = null,
     };
     pub const wl_output_listener = struct {
         geometry: ?*const fn (?*anyopaque, ?*wl_output, i32, i32, i32, i32, i32, [*c]const u8, [*c]const u8, i32) callconv(.c) void = null,
@@ -255,6 +259,22 @@ const c = struct {
     }
     pub fn wl_surface_destroy(surface: *wl_surface) void {
         surface.destroy();
+    }
+    pub fn wl_surface_frame(surface: *wl_surface) ?*wl_callback {
+        return surface.frame() catch null;
+    }
+    pub fn wl_callback_destroy(callback: *wl_callback) void {
+        callback.destroy();
+    }
+    pub fn wl_callback_add_listener(callback: *wl_callback, listener: *const wl_callback_listener, data: ?*anyopaque) c_int {
+        _ = listener;
+        callback.setListener(?*anyopaque, callbackDispatch, data);
+        return 0;
+    }
+    fn callbackDispatch(callback: *wl_callback, event: wl.Callback.Event, data: ?*anyopaque) void {
+        switch (event) {
+            .done => |e| frameDone(data, callback, e.callback_data),
+        }
     }
     pub fn wl_surface_set_buffer_scale(surface: *wl_surface, scale: c_int) void {
         surface.setBufferScale(scale);
@@ -514,6 +534,7 @@ const c = struct {
     pub const XDG_TOPLEVEL_STATE_MAXIMIZED = xdg.Toplevel.State.maximized;
     pub const XDG_TOPLEVEL_STATE_FULLSCREEN = xdg.Toplevel.State.fullscreen;
     pub const XDG_TOPLEVEL_STATE_ACTIVATED = xdg.Toplevel.State.activated;
+    pub const XDG_TOPLEVEL_STATE_SUSPENDED = xdg.Toplevel.State.suspended;
     pub const ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE = zxdg.ToplevelDecorationV1.Mode.client_side;
     pub const ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE = zxdg.ToplevelDecorationV1.Mode.server_side;
 };
@@ -582,6 +603,8 @@ pub const WindowCallbacks = struct {
     framebuffer_resize: ?*const fn (*Window, Size) void = null,
     scale: ?*const fn (*Window, ContentScale) void = null,
     focus: ?*const fn (*Window, bool) void = null,
+    render_suspended: ?*const fn (*Window, bool) void = null,
+    frame: ?*const fn (*Window, u32) void = null,
     cursor_enter: ?*const fn (*Window, bool) void = null,
     cursor_motion: ?*const fn (*Window, Point) void = null,
     mouse_button: ?*const fn (*Window, MouseButton, Action, Modifiers) void = null,
@@ -1053,6 +1076,7 @@ pub const Window = struct {
     decorated: bool = true,
     decoration_mode: DecorationMode = .auto,
     decoration: ?*c.zxdg_toplevel_decoration_v1 = null,
+    frame_callback: ?*c.wl_callback = null,
     cursor_visible: bool = true,
     cursor_shape: CursorShape = .arrow,
 
@@ -1076,6 +1100,7 @@ pub const Window = struct {
         if (self.ctx.pointer_window == self) self.ctx.pointer_window = null;
         if (self.ctx.keyboard_window == self) self.ctx.keyboard_window = null;
         if (self.decoration) |decoration| c.zxdg_toplevel_decoration_v1_destroy(decoration);
+        if (self.frame_callback) |callback| c.wl_callback_destroy(callback);
         c.xdg_toplevel_destroy(self.xdg_toplevel);
         c.xdg_surface_destroy(self.xdg_surface);
         c.wl_surface_destroy(self.surface);
@@ -1161,6 +1186,19 @@ pub const Window = struct {
 
     pub fn isHovered(self: *const Window) bool {
         return self.hovered;
+    }
+
+    pub fn requestFrame(self: *Window) bool {
+        if (self.frame_callback != null) return false;
+        const callback = c.wl_surface_frame(self.surface) orelse return false;
+        self.frame_callback = callback;
+        _ = c.wl_callback_add_listener(callback, &frameListener, self);
+        return true;
+    }
+
+    pub fn cancelFrameRequest(self: *Window) void {
+        if (self.frame_callback) |callback| c.wl_callback_destroy(callback);
+        self.frame_callback = null;
     }
 
     pub fn getKey(self: *const Window, key: Key) bool {
@@ -1341,6 +1379,7 @@ pub const Window = struct {
         self.maximized = false;
         self.fullscreen = false;
         self.focused = false;
+        var render_suspended = false;
 
         if (states) |array| {
             const count = array.size / @sizeOf(u32);
@@ -1350,10 +1389,13 @@ pub const Window = struct {
                     @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_MAXIMIZED))) => self.maximized = true,
                     @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_FULLSCREEN))) => self.fullscreen = true,
                     @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_ACTIVATED))) => self.focused = true,
+                    @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_SUSPENDED))) => render_suspended = true,
                     else => {},
                 }
             }
         }
+
+        if (self.callbacks.render_suspended) |cb| cb(self, render_suspended);
     }
 };
 
@@ -1492,7 +1534,9 @@ fn registryGlobal(data: ?*anyopaque, registry: ?*c.wl_registry, name: u32, inter
         return;
     }
     if (std.mem.eql(u8, iface, "xdg_wm_base")) {
-        self.wm_base = self.registry.?.bind(name, c.xdg_wm_base, @min(version, 1)) catch return;
+        // `xdg_toplevel.state.suspended` was added in version 6, which is the
+        // newest xdg-shell version generated by this backend.
+        self.wm_base = self.registry.?.bind(name, c.xdg_wm_base, @min(version, 6)) catch return;
         _ = c.xdg_wm_base_add_listener(self.wm_base.?, &wmBaseListener, self);
         return;
     }
@@ -1757,6 +1801,15 @@ fn xdgToplevelClose(data: ?*anyopaque, xdg_toplevel: ?*c.xdg_toplevel) callconv(
     window.updateClose();
 }
 
+fn frameDone(data: ?*anyopaque, callback: ?*c.wl_callback, callback_data: u32) callconv(.c) void {
+    const window = @as(*Window, @ptrCast(@alignCast(data.?)));
+    window.frame_callback = null;
+    // `done` is the callback object's destructor. Drop the client proxy before
+    // handing control to user code, which may immediately arm another frame.
+    if (callback) |value| c.wl_callback_destroy(value);
+    if (window.callbacks.frame) |cb| cb(window, callback_data);
+}
+
 fn decorationConfigure(data: ?*anyopaque, decoration: ?*c.zxdg_toplevel_decoration_v1, mode: u32) callconv(.c) void {
     _ = decoration;
     const window = @as(*Window, @ptrCast(@alignCast(data.?)));
@@ -1807,6 +1860,8 @@ const surfaceListener = c.wl_surface_listener{
     .enter = surfaceEnter,
     .leave = surfaceLeave,
 };
+
+const frameListener = c.wl_callback_listener{ .done = frameDone };
 
 const outputListener = c.wl_output_listener{
     .scale = outputScale,

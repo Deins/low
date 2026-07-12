@@ -233,7 +233,9 @@ const AppWindow = struct {
 
     fn installCallbacks(self: *AppWindow) void {
         self.window.setUserData(self);
-        self.window.setCallbacks(.{ .mouse_button = onMouseButton });
+        self.window.setCallbacks(.{
+            .mouse_button = onMouseButton,
+        });
     }
 
     fn deinit(self: *AppWindow) void {
@@ -330,7 +332,11 @@ const AppWindow = struct {
             defer readback.deinit();
             try readback.writeBmp(io, path);
         } else {
-            try frame.submitAndPresent();
+            self.window.requestFrame();
+            frame.submitAndPresent() catch |err| {
+                self.window.cancelFrameRequest();
+                return err;
+            };
         }
     }
 };
@@ -470,20 +476,33 @@ pub fn main(init: std.process.Init) !void {
             if (first == null and second == null) break;
         }
 
+        const all_frames_blocked = !offscreen and
+            (first == null or !first.?.window.shouldRender()) and
+            (second == null or !second.?.window.shouldRender());
+        if (all_frames_blocked) {
+            try context.waitEvents();
+            previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
+            continue;
+        }
+
         const now = std.Io.Timestamp.now(std.Options.debug_io, .awake);
         const dt: f32 = @min(0.05, @as(f32, @floatFromInt(now.nanoseconds - previous.nanoseconds)) / 1_000_000_000);
         previous = now;
         if (first) |*app_window| {
-            app_window.update(dt);
-            var path_buffer: [64]u8 = undefined;
-            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
-            try app_window.draw(&renderer, init.io, path);
+            if (app_window.window.shouldRender()) {
+                app_window.update(dt);
+                var path_buffer: [64]u8 = undefined;
+                const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
+                try app_window.draw(&renderer, init.io, path);
+            }
         }
         if (second) |*app_window| {
-            app_window.update(dt);
-            var path_buffer: [64]u8 = undefined;
-            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
-            try app_window.draw(&renderer, init.io, path);
+            if (app_window.window.shouldRender()) {
+                app_window.update(dt);
+                var path_buffer: [64]u8 = undefined;
+                const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
+                try app_window.draw(&renderer, init.io, path);
+            }
         }
         rendered_frames += 1;
         if (frame_limit) |limit| {
