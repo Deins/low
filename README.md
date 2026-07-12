@@ -1,14 +1,13 @@
 # low — let me open window
 
 A cross-platform desktop windowing library for Vulkan applications written in Zig.  
-With main goal to be as **portable** and **cross-compilable** as possible.
+With goal of being **portable** and **cross-compilable**.  
 Supports multiple windows, keyboard and mouse input, clipboard access etc.
 
 
-Additionally optionally provides vulkan swapchain management for windows with useful features:
-* grabbing screenshots of window contents (access raw bytes on cpu, or write bmp files)
-* recording encoded video streams (using vulkan video if supported by the gpu/driver), with av1, h265, or h264 codecs, either raw or packaged in mkv format
-
+Optionally provides vulkan swapchain management and useful window content features:
+* screenshot grabbing (raw image bytes on cpu and utils to write bmp image files)
+* recording encoded video streams of window contents (using vulkan video if supported by the gpu/driver), with av1, h265, or h264 codecs, either raw or packaged in mkv format.
 
 ## Platforms
 
@@ -16,6 +15,13 @@ Additionally optionally provides vulkan swapchain management for windows with us
 - Linux X11
 - Windows (Win32)
 - Offscreen - no desktop at all. Render to vulkan texture and inject your own events for testing etc.
+
+### Dependencies
+See [build.zig.zon](./build.zig.zon)
+- [zig-wayland](https://codeberg.org/ifreund/zig-wayland) for generating api
+- For video recording/encoding: 
+  - [vulkan-zig](https://github.com/Snektron/vulkan-zig)
+  - additionaly vulkan headers if no VULKAN_SDK is found 
 
 ## Build and examples
 
