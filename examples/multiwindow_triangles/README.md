@@ -21,81 +21,36 @@ cd examples/multiwindow_triangles
 zig build run
 ```
 
-Choose a specific Linux window-system backend at runtime when testing both
-paths (the default is `low`'s automatic selection):
+`low` automatically selects the active desktop backend. Override it with
+`--desktop=x11`, `--desktop=wayland`, or `--desktop=offscreen`:
 
 ```sh
-zig build run -- --wayland
-zig build run -- --x11
-zig build run -- --offscreen
+zig build run -- --desktop=x11
 ```
 
-`--offscreen` renders ten frames into direct Vulkan images (no surface or
-swapchain), reads each completed image back to the CPU, and writes
-`tmp/first-0001.bmp` through `tmp/second-0010.bmp` before exiting.
-`RenderTarget` manages the offscreen image ring, device-local allocation, and
-staging-buffer readback.
+## Matroska recording
 
-## H.264 and MKV recording
-
-Build the optional recorder and write either window, or both windows, to
-independent raw Annex-B streams:
+The example is built with Vulkan Video recording enabled. `--record` records
+both windows as independent Matroska files containing H.264 video:
 
 ```sh
-zig build run -Dvk_video=true -- --offscreen \
-  --record tmp/first.h264 \
-  --record-second tmp/second.h264
+zig build run -- --record
 ```
 
-Use a `.mkv` filename to select the streaming Matroska container. Other
-extensions retain the raw Annex-B H.264 output:
+It creates `tmp/first.mkv` and `tmp/second.mkv`. The recording configuration
+(60 fps, 12 Mbps, and a 60-frame GOP) is kept as compile-time constants near
+the top of `src/main.zig` so the example focuses on the two-window lifecycle.
+
+`--frames` makes the demo close itself after a fixed number of frames, which
+is useful for automated recording runs:
 
 ```sh
-zig build run -Dvk_video=true -- --offscreen \
-  --record tmp/first.mkv \
-  --record-second tmp/second.mkv
+zig build run -- --frames 300 --record
 ```
 
-Recording can also be exercised through a WSI path. `--frames` makes the demo
-close itself after a fixed number of frames:
+Inspect either recording:
 
 ```sh
-zig build run -Dvk_video=true -- --x11 --frames 300 \
-  --record tmp/first.h264
-```
-
-Additional options are:
-
-```text
---record-fps 60
---record-bitrate 12000000
---record-gop 60
---record-dynamic-resize
---record-monotonic-timestamps
---record-explicit-timestamps
---resize-at 150
---timestamp-gap-at 150
---restart-recording-at 150
-```
-
-`--record-dynamic-resize` recreates the encoder when an offscreen resize event
-is injected by `--resize-at`. The monotonic timestamp mode preserves real
-application stalls in MKV playback. Explicit mode demonstrates caller-supplied
-nanosecond timestamps; `--timestamp-gap-at` adds a one-second gap at the chosen
-frame. Variable timestamp modes require `.mkv` output.
-
-The restart option demonstrates stopping and beginning raw H.264 again while
-reusing compatible cached GPU resources. It is rejected for `.mkv` paths
-because each MKV recording starts an independent timeline and therefore needs
-a fresh writer. The example owns and closes its files;
-`RenderTarget.endRecording` only flushes the supplied writer. Matroska is
-written as a forward-only stream without Cues or a declared Segment duration,
-so seeking metadata is intentionally omitted. Inspect either format, or remux
-the elementary stream without re-encoding, for example:
-
-```sh
-ffprobe tmp/first.h264
-ffmpeg -i tmp/first.h264 -c copy tmp/first.mp4
 ffprobe tmp/first.mkv
 ```
 
@@ -106,16 +61,16 @@ Without `VULKAN_SDK`, binding generation falls back to the lazy
 zig build -Dvk_registry=/path/to/registry/vk.xml
 ```
 
-For recording builds, `-Dvk_video_registry=/path/to/registry/video.xml` can be
-used as well. Both registries otherwise come from `VULKAN_SDK` or the pinned
-lazy headers dependency.
+`-Dvk_video_registry=/path/to/registry/video.xml` selects the Vulkan Video
+registry. Both registries otherwise come from `VULKAN_SDK` or the pinned lazy
+headers dependency.
 
 `glslc` must still be available on `PATH` to compile the two GLSL shaders.
 
 ## Relevant `low` glue
 
 `low.vulkan.Loader` dynamically opens the system Vulkan loader, avoiding a
-link-time dependency. `low.vulkan.requiredInstanceExtensions(&context)` uses
-the backend chosen by `low`. `RenderTarget` creates the matching Wayland,
-Xlib, or Win32 surface and owns its swapchain, image views, command buffers,
-semaphores, fences, and recreation path.
+link-time dependency. `Context.requiredVulkanInstanceExtensions()` supplies
+the extensions for the display backend chosen by `low`. `RenderTarget` creates
+the matching Wayland, Xlib, or Win32 surface and owns its swapchain, image
+views, command buffers, semaphores, fences, and recreation path.

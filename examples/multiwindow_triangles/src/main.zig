@@ -1,13 +1,22 @@
 const std = @import("std");
 const low = @import("low");
 const vk = @import("vulkan");
-const example_options = @import("example_options");
-const video = if (example_options.vk_video) low.vulkan.video() else struct {};
+const video = low.vulkan.video();
 
 const RenderTarget = low.vulkan.targets().RenderTarget;
 const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
 const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
 const triangle_half_size_px: f32 = 70.0;
+
+// Recording
+const recording_frame_rate: u32 = 60;
+const recording_bitrate: u32 = 12_000_000;
+const recording_gop_size: u32 = 60;
+const recording_format: video.RecordingFormat = .mkv;
+const recording_resize: video.ResizePolicy = if (recording_format == .mkv) .change_resolution else .scale_and_letterbox;
+const recording_timestamp_mode: video.TimestampMode = .fixed_rate;
+const recording_first_path = "tmp/first." ++ @tagName(recording_format);
+const recording_second_path = "tmp/second." ++ @tagName(recording_format);
 
 fn lowPhysicalDevice(value: vk.PhysicalDevice) low.vulkan.api.PhysicalDevice {
     return @ptrFromInt(@intFromEnum(value));
@@ -33,10 +42,6 @@ const DeviceSelection = struct {
     encode_queue_family: ?u32 = null,
 };
 
-const RecordingFileFormat = if (example_options.vk_video) video.RecordingFormat else enum { h264, mkv };
-const RecordingResizePolicy = if (example_options.vk_video) video.ResizePolicy else enum { scale_and_letterbox, change_resolution, stop_recording };
-const RecordingTimestampMode = if (example_options.vk_video) video.TimestampMode else enum { fixed_rate, monotonic, explicit };
-
 const Renderer = struct {
     gpa: std.mem.Allocator,
     instance: vk.InstanceProxy,
@@ -53,7 +58,7 @@ const Renderer = struct {
     color_format: vk.Format,
     encode_queue: vk.Queue,
     encode_queue_family: ?u32,
-    video_device: if (example_options.vk_video) ?video.VideoDevice else void,
+    video_device: ?video.VideoDevice,
 
     fn init(
         gpa: std.mem.Allocator,
@@ -78,7 +83,6 @@ const Renderer = struct {
             extension_count += 1;
         }
         if (recording) {
-            if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
             for (video.required_device_extensions) |extension| {
                 extension_storage[extension_count] = extension;
                 extension_count += 1;
@@ -94,7 +98,6 @@ const Renderer = struct {
         };
         var queue_info_count: u32 = 1;
         if (recording) {
-            if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
             const support = try video.queryH264Support(.{
                 .instance = &low_instance_input,
                 .physical_device = lowPhysicalDevice(selection.physical_device),
@@ -165,12 +168,11 @@ const Renderer = struct {
             .color_format = color_format,
             .encode_queue = encode_queue,
             .encode_queue_family = selection.encode_queue_family,
-            .video_device = if (comptime example_options.vk_video) null else {},
+            .video_device = null,
         };
     }
 
     fn initVideo(self: *Renderer) !void {
-        if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
         const encode_family = self.encode_queue_family orelse return error.NoH264Device;
         self.video_device = try video.VideoDevice.init(.{
             .allocator = self.gpa,
@@ -185,7 +187,7 @@ const Renderer = struct {
     }
 
     fn deinit(self: *Renderer) void {
-        if (comptime example_options.vk_video) if (self.video_device) |*video_device| video_device.deinit();
+        if (self.video_device) |*video_device| video_device.deinit();
         self.device.destroyPipeline(self.pipeline, null);
         self.device.destroyPipelineLayout(self.pipeline_layout, null);
         self.device.destroyCommandPool(self.command_pool, null);
@@ -224,7 +226,7 @@ const AppWindow = struct {
                 .command_pool = @intFromEnum(renderer.command_pool),
                 .color_format = lowFormat(renderer.color_format),
                 .frames_in_flight = 2,
-                .video_device = if (comptime example_options.vk_video) if (renderer.video_device) |*video_device| video_device else null else null,
+                .video_device = if (renderer.video_device) |*video_device| video_device else null,
             }),
             .position = position,
             .velocity = velocity,
@@ -238,29 +240,27 @@ const AppWindow = struct {
     }
 
     fn deinit(self: *AppWindow) void {
-        if (comptime example_options.vk_video) self.target.endRecording() catch |err| std.log.err("failed to finalize recording: {s}", .{@errorName(err)});
+        self.target.endRecording() catch |err| std.log.err("failed to finalize recording: {s}", .{@errorName(err)});
         self.target.deinit();
         self.window.deinit();
         self.* = undefined;
     }
 
-    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer, format: RecordingFileFormat, fps: u32, bitrate: u32, gop_size: u32, resize: RecordingResizePolicy, timestamp_mode: RecordingTimestampMode) !void {
-        if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
+    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer) !void {
         try self.target.beginRecording(.{
             .allocator = self.target.allocator,
             .io = io,
             .writer = writer,
-            .frame_rate = .{ .numerator = fps, .denominator = 1 },
-            .bitrate = bitrate,
-            .gop_size = gop_size,
-            .format = format,
-            .resize = resize,
-            .timestamp_mode = timestamp_mode,
+            .frame_rate = .{ .numerator = recording_frame_rate, .denominator = 1 },
+            .bitrate = recording_bitrate,
+            .gop_size = recording_gop_size,
+            .format = recording_format,
+            .resize = recording_resize,
+            .timestamp_mode = recording_timestamp_mode,
         });
     }
 
     fn stopRecording(self: *AppWindow) !void {
-        if (comptime !example_options.vk_video) return;
         try self.target.endRecording();
     }
 
@@ -284,7 +284,7 @@ const AppWindow = struct {
         }
     }
 
-    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8, recording_timestamp_ns: ?u64) !void {
+    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8) !void {
         var frame = self.target.acquire() catch |err| switch (err) {
             error.FrameSkipped, error.FrameOutOfDate => return,
             else => return err,
@@ -330,17 +330,11 @@ const AppWindow = struct {
         renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
         renderer.device.cmdEndRendering(command_buffer);
         if (dump_path) |path| {
-            var readback = if (recording_timestamp_ns) |timestamp_ns|
-                try frame.submitAndReadbackAt(renderer.gpa, timestamp_ns)
-            else
-                try frame.submitAndReadback(renderer.gpa);
+            var readback = try frame.submitAndReadback(renderer.gpa);
             defer readback.deinit();
             try readback.writeBmp(io, path);
         } else {
-            if (recording_timestamp_ns) |timestamp_ns|
-                try frame.submitAndPresentAt(timestamp_ns)
-            else
-                try frame.submitAndPresent();
+            try frame.submitAndPresent();
         }
     }
 };
@@ -352,30 +346,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const app_options = try parseOptions(args);
-    const backend = app_options.backend;
-    const recording_requested = app_options.first_record_path != null or app_options.second_record_path != null;
-    if (app_options.restart_recording_at != null and
-        ((app_options.first_record_path != null and recordingFileFormat(app_options.first_record_path.?) == .mkv) or
-            (app_options.second_record_path != null and recordingFileFormat(app_options.second_record_path.?) == .mkv)))
-    {
-        std.log.err("--restart-recording-at cannot append a second Matroska timeline to the same file; use a fresh writer for each MKV recording", .{});
-        return;
-    }
-    if (app_options.timestamp_mode != .fixed_rate and
-        ((app_options.first_record_path != null and recordingFileFormat(app_options.first_record_path.?) != .mkv) or
-            (app_options.second_record_path != null and recordingFileFormat(app_options.second_record_path.?) != .mkv)))
-    {
-        std.log.err("monotonic and explicit timestamps require MKV output", .{});
-        return;
-    }
-    if (app_options.resize_at != null and backend != .offscreen) {
-        std.log.err("--resize-at is an offscreen example test option", .{});
-        return;
-    }
-    if (recording_requested and !example_options.vk_video) {
-        std.log.err("recording support is not compiled; rebuild with -Dvk_video=true", .{});
-        return;
-    }
+    const recording_requested = app_options.record;
 
     var first_record_file: ?std.Io.File = null;
     var second_record_file: ?std.Io.File = null;
@@ -383,13 +354,14 @@ pub fn main(init: std.process.Init) !void {
     var second_record_buffer: [64 * 1024]u8 = undefined;
     var first_record_writer: ?std.Io.File.Writer = null;
     var second_record_writer: ?std.Io.File.Writer = null;
-    if (app_options.first_record_path) |path| {
-        first_record_file = try std.Io.Dir.cwd().createFile(init.io, path, .{});
+    if (recording_requested) {
+        try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
+        first_record_file = try std.Io.Dir.cwd().createFile(init.io, recording_first_path, .{});
         first_record_writer = first_record_file.?.writer(init.io, &first_record_buffer);
     }
     defer if (first_record_file) |*file| file.close(init.io);
-    if (app_options.second_record_path) |path| {
-        second_record_file = try std.Io.Dir.cwd().createFile(init.io, path, .{});
+    if (recording_requested) {
+        second_record_file = try std.Io.Dir.cwd().createFile(init.io, recording_second_path, .{});
         second_record_writer = second_record_file.?.writer(init.io, &second_record_buffer);
     }
     defer if (second_record_file) |*file| file.close(init.io);
@@ -400,7 +372,7 @@ pub fn main(init: std.process.Init) !void {
 
     var context = try low.Context.init(gpa, .{
         .app_name = "low.multiwindow_triangles",
-        .backend = backend,
+        .backend = app_options.backend,
         .offscreen = .{ .frame_mode = .{ .continuous = .{} } },
     });
     defer context.deinit();
@@ -464,10 +436,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (second) |*app_window| app_window.deinit();
     first.?.installCallbacks();
     second.?.installCallbacks();
-    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode) catch |err| {
+    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface) catch |err| {
         std.log.err("first stream could not start: {s}", .{@errorName(err)});
     };
-    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode) catch |err| {
+    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface) catch |err| {
         std.log.err("second stream could not start: {s}", .{@errorName(err)});
     };
 
@@ -477,10 +449,6 @@ pub fn main(init: std.process.Init) !void {
     const frame_limit: ?u32 = app_options.frames orelse if (offscreen) @as(u32, 10) else null;
     if (offscreen) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
     while (first != null or second != null) {
-        if (app_options.resize_at) |resize_at| if (rendered_frames == resize_at) {
-            if (first) |app_window| try app_window.window.injectEvent(.{ .resize = .{ .width = 800, .height = 450 } });
-            if (second) |app_window| try app_window.window.injectEvent(.{ .resize = .{ .width = 640, .height = 360 } });
-        };
         if (offscreen) try context.nextFrame();
         context.pollEvents();
 
@@ -511,35 +479,19 @@ pub fn main(init: std.process.Init) !void {
         const now = std.Io.Timestamp.now(std.Options.debug_io, .awake);
         const dt: f32 = @min(0.05, @as(f32, @floatFromInt(now.nanoseconds - previous.nanoseconds)) / 1_000_000_000);
         previous = now;
-        const recording_timestamp_ns: ?u64 = if (app_options.timestamp_mode == .explicit)
-            explicitFrameTimestamp(rendered_frames, app_options.record_fps, app_options.timestamp_gap_at)
-        else
-            null;
         if (first) |*app_window| {
             app_window.update(dt);
             var path_buffer: [64]u8 = undefined;
             const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
-            try app_window.draw(&renderer, init.io, path, recording_timestamp_ns);
+            try app_window.draw(&renderer, init.io, path);
         }
         if (second) |*app_window| {
             app_window.update(dt);
             var path_buffer: [64]u8 = undefined;
             const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
-            try app_window.draw(&renderer, init.io, path, recording_timestamp_ns);
+            try app_window.draw(&renderer, init.io, path);
         }
         rendered_frames += 1;
-        if (app_options.restart_recording_at) |restart_frame| {
-            if (rendered_frames == restart_frame) {
-                if (first_record_writer) |*writer| if (first) |*app_window| {
-                    try app_window.stopRecording();
-                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode);
-                };
-                if (second_record_writer) |*writer| if (second) |*app_window| {
-                    try app_window.stopRecording();
-                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode);
-                };
-            }
-        }
         if (frame_limit) |limit| {
             if (rendered_frames == limit) {
                 if (first) |app_window| app_window.window.setShouldClose(true);
@@ -562,7 +514,6 @@ fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy, low_instance: 
         for (families, 0..) |family, index| {
             if (!family.queue_flags.graphics_bit) continue;
             if (recording) {
-                if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
                 const support = try video.queryH264Support(.{
                     .instance = low_instance,
                     .physical_device = lowPhysicalDevice(physical_device),
@@ -699,93 +650,33 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
 
 const AppOptions = struct {
     backend: low.BackendRequest = .auto,
-    first_record_path: ?[]const u8 = null,
-    second_record_path: ?[]const u8 = null,
-    record_fps: u32 = 60,
-    record_bitrate: u32 = 12_000_000,
-    record_gop: u32 = 60,
+    record: bool = false,
     frames: ?u32 = null,
-    restart_recording_at: ?u32 = null,
-    resize: RecordingResizePolicy = .scale_and_letterbox,
-    timestamp_mode: RecordingTimestampMode = .fixed_rate,
-    resize_at: ?u32 = null,
-    timestamp_gap_at: ?u32 = null,
 };
 
 fn parseOptions(args: []const [:0]const u8) !AppOptions {
     var result: AppOptions = .{};
-    var backend_selected = false;
+    var desktop_selected = false;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--x11") or std.mem.eql(u8, arg, "--wayland") or std.mem.eql(u8, arg, "--offscreen")) {
-            if (backend_selected) return error.ConflictingBackendArguments;
-            result.backend = if (std.mem.eql(u8, arg, "--x11")) .x11 else if (std.mem.eql(u8, arg, "--wayland")) .wayland else .offscreen;
-            backend_selected = true;
+        if (std.mem.startsWith(u8, arg, "--desktop=")) {
+            if (desktop_selected) return error.ConflictingDesktopArguments;
+            const name = arg["--desktop=".len..];
+            result.backend = std.meta.stringToEnum(low.BackendRequest, name) orelse return error.InvalidDesktop;
+            desktop_selected = true;
         } else if (std.mem.eql(u8, arg, "--record")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.first_record_path = args[index];
-        } else if (std.mem.eql(u8, arg, "--record-second")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.second_record_path = args[index];
-        } else if (std.mem.eql(u8, arg, "--record-fps")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.record_fps = try std.fmt.parseInt(u32, args[index], 10);
-            if (result.record_fps == 0) return error.InvalidFrameRate;
-        } else if (std.mem.eql(u8, arg, "--record-bitrate")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.record_bitrate = try std.fmt.parseInt(u32, args[index], 10);
-            if (result.record_bitrate == 0) return error.InvalidBitrate;
-        } else if (std.mem.eql(u8, arg, "--record-gop")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.record_gop = try std.fmt.parseInt(u32, args[index], 10);
-            if (result.record_gop == 0 or result.record_gop > 32_768) return error.InvalidGopSize;
+            result.record = true;
         } else if (std.mem.eql(u8, arg, "--frames")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
             result.frames = try std.fmt.parseInt(u32, args[index], 10);
             if (result.frames.? == 0) return error.InvalidFrameCount;
-        } else if (std.mem.eql(u8, arg, "--restart-recording-at")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.restart_recording_at = try std.fmt.parseInt(u32, args[index], 10);
-            if (result.restart_recording_at.? == 0) return error.InvalidFrameCount;
-        } else if (std.mem.eql(u8, arg, "--record-dynamic-resize")) {
-            result.resize = .change_resolution;
-        } else if (std.mem.eql(u8, arg, "--record-monotonic-timestamps")) {
-            if (result.timestamp_mode != .fixed_rate) return error.ConflictingTimestampModes;
-            result.timestamp_mode = .monotonic;
-        } else if (std.mem.eql(u8, arg, "--record-explicit-timestamps")) {
-            if (result.timestamp_mode != .fixed_rate) return error.ConflictingTimestampModes;
-            result.timestamp_mode = .explicit;
-        } else if (std.mem.eql(u8, arg, "--resize-at")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.resize_at = try std.fmt.parseInt(u32, args[index], 10);
-        } else if (std.mem.eql(u8, arg, "--timestamp-gap-at")) {
-            index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
-            result.timestamp_gap_at = try std.fmt.parseInt(u32, args[index], 10);
         } else {
             return error.UnknownArgument;
         }
     }
     return result;
-}
-
-fn recordingFileFormat(path: []const u8) RecordingFileFormat {
-    return if (std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".mkv")) .mkv else .h264;
-}
-
-fn explicitFrameTimestamp(frame_index: u32, frame_rate: u32, gap_at: ?u32) u64 {
-    const nominal = (@as(u128, frame_index) * std.time.ns_per_s + frame_rate / 2) / frame_rate;
-    const gap: u64 = if (gap_at) |index| if (frame_index >= index) std.time.ns_per_s else 0 else 0;
-    return @intCast(nominal + gap);
 }
 
 fn onMouseButton(window: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {

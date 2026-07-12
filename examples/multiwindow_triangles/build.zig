@@ -4,7 +4,7 @@ const Build = std.Build;
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const enable_video = b.option(bool, "vk_video", "Compile Vulkan Video recording support") orelse true;
+    const enable_video = true;
 
     const low_dep = b.dependency("low", .{
         .target = target,
@@ -30,9 +30,6 @@ pub fn build(b: *Build) !void {
     });
     exe.root_module.addImport("low", low_dep.module("low"));
     exe.root_module.addImport("vulkan", vulkan_dep.module("vulkan-zig"));
-    const options = b.addOptions();
-    options.addOption(bool, "vk_video", enable_video);
-    exe.root_module.addOptions("example_options", options);
     addShader(b, exe, "triangle_vert", "shaders/triangle.vert");
     addShader(b, exe, "triangle_frag", "shaders/triangle.frag");
 
