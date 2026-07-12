@@ -70,8 +70,19 @@ Additional options are:
 --record-fps 60
 --record-bitrate 12000000
 --record-gop 60
+--record-dynamic-resize
+--record-monotonic-timestamps
+--record-explicit-timestamps
+--resize-at 150
+--timestamp-gap-at 150
 --restart-recording-at 150
 ```
+
+`--record-dynamic-resize` recreates the encoder when an offscreen resize event
+is injected by `--resize-at`. The monotonic timestamp mode preserves real
+application stalls in MKV playback. Explicit mode demonstrates caller-supplied
+nanosecond timestamps; `--timestamp-gap-at` adds a one-second gap at the chosen
+frame. Variable timestamp modes require `.mkv` output.
 
 The restart option demonstrates stopping and beginning raw H.264 again while
 reusing compatible cached GPU resources. It is rejected for `.mkv` paths

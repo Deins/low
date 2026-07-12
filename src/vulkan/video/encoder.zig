@@ -25,6 +25,7 @@ pub const RecordingOptions = struct {
     resize: capabilities.ResizePolicy = .scale_and_letterbox,
     parameter_sets: capabilities.ParameterSetPolicy = .every_idr,
     format: RecordingFormat = .h264,
+    timestamp_mode: capabilities.TimestampMode = .fixed_rate,
 };
 
 pub const RecordingStatus = union(enum) {
@@ -59,12 +60,18 @@ pub const Recorder = struct {
         parameter_sets: capabilities.ParameterSetPolicy,
         format: RecordingFormat,
         mkv: ?matroska.Muxer = null,
+        allocator: std.mem.Allocator,
+        timestamp_mode: capabilities.TimestampMode,
+        start_time_ns: i128,
+        output_frames: u64 = 0,
+        last_timestamp_ns: ?u64 = null,
         source_extent: low_vk.Extent2D,
         submitted: u64 = 0,
         consumed: u64 = 0,
         accepting: bool = true,
         stopped_resize: bool = false,
         sticky_error: ?anyerror = null,
+        pending_sequence_header: bool = false,
     };
 
     pub fn init(allocator: std.mem.Allocator, video_device: *VideoDevice, frames_in_flight: u32, color_format: low_vk.Format) Recorder {
@@ -90,7 +97,43 @@ pub const Recorder = struct {
         try options.frame_rate.validate();
         if (options.bitrate == 0) return error.InvalidBitrate;
         if (options.gop_size == 0) return error.InvalidGopSize;
+        if (options.format != .mkv and options.timestamp_mode != .fixed_rate) return error.TimestampedOutputRequiresMkv;
 
+        _ = try self.configureCache(extent, options, true);
+
+        var run = Run{
+            .io = options.io,
+            .writer = options.writer,
+            .frame_rate = options.frame_rate,
+            .bitrate = options.bitrate,
+            .gop_size = options.gop_size,
+            .quality = options.quality,
+            .resize = options.resize,
+            .parameter_sets = options.parameter_sets,
+            .format = options.format,
+            .allocator = options.allocator,
+            .timestamp_mode = options.timestamp_mode,
+            .start_time_ns = 0,
+            .source_extent = extent,
+        };
+        // Container headers are written synchronously so a failed output is
+        // reported by begin and cannot leave an apparently active recorder.
+        switch (run.format) {
+            .h264 => try run.writer.writeAll(self.cache.?.header),
+            .mkv => run.mkv = try matroska.Muxer.init(
+                run.writer,
+                .{ .numerator = run.frame_rate.numerator, .denominator = run.frame_rate.denominator },
+                .{ .width = self.cache.?.key.extent.width, .height = self.cache.?.key.extent.height },
+                self.cache.?.header,
+                run.timestamp_mode != .fixed_rate,
+            ),
+        }
+        run.start_time_ns = std.Io.Timestamp.now(run.io, .awake).nanoseconds;
+        self.run = run;
+        self.last_error = null;
+    }
+
+    fn configureCache(self: *Recorder, extent: low_vk.Extent2D, options: RecordingOptions, reset_compatible: bool) !bool {
         const support = try capabilities.queryH264Support(.{
             .instance = self.video_device.low_instance,
             .physical_device = toLowPhysicalDevice(self.video_device.physical_device),
@@ -136,45 +179,20 @@ pub const Recorder = struct {
                 options.allocator.destroy(replacement);
             }
             try replacement.create();
+            try replacement.initializeVideoSession();
             if (self.cache) |old| {
                 old.deinit();
                 old.allocator.destroy(old);
             }
             self.cache = replacement;
+            return true;
         }
 
-        // A cached session is reusable, but its coding state and rate-control
-        // state are run-specific. Reset them before associating the writer.
-        self.cache.?.initializeVideoSession() catch |err| {
+        if (reset_compatible) self.cache.?.initializeVideoSession() catch |err| {
             self.cache_poisoned = true;
             return err;
         };
-
-        var run = Run{
-            .io = options.io,
-            .writer = options.writer,
-            .frame_rate = options.frame_rate,
-            .bitrate = options.bitrate,
-            .gop_size = options.gop_size,
-            .quality = options.quality,
-            .resize = options.resize,
-            .parameter_sets = options.parameter_sets,
-            .format = options.format,
-            .source_extent = extent,
-        };
-        // Container headers are written synchronously so a failed output is
-        // reported by begin and cannot leave an apparently active recorder.
-        switch (run.format) {
-            .h264 => try run.writer.writeAll(self.cache.?.header),
-            .mkv => run.mkv = try matroska.Muxer.init(
-                run.writer,
-                .{ .numerator = run.frame_rate.numerator, .denominator = run.frame_rate.denominator },
-                .{ .width = self.cache.?.key.extent.width, .height = self.cache.?.key.extent.height },
-                self.cache.?.header,
-            ),
-        }
-        self.run = run;
-        self.last_error = null;
+        return false;
     }
 
     pub fn end(self: *Recorder) !void {
@@ -226,16 +244,55 @@ pub const Recorder = struct {
         return if (self.cache) |cache| cache.key.extent else null;
     }
 
-    pub fn noticeResize(self: *Recorder, extent: low_vk.Extent2D) void {
+    pub fn noticeResize(self: *Recorder, extent: low_vk.Extent2D) !void {
         var run = &(self.run orelse return);
         if (run.source_extent.width == extent.width and run.source_extent.height == extent.height) return;
-        if (run.resize == .stop_recording) {
-            run.accepting = false;
-            run.stopped_resize = true;
+        switch (run.resize) {
+            .scale_and_letterbox => {},
+            .stop_recording => {
+                run.accepting = false;
+                run.stopped_resize = true;
+            },
+            .change_resolution => self.reconfigureForResize(extent) catch |err| {
+                if (isSharedError(err)) {
+                    self.failShared(err);
+                    return err;
+                }
+                self.failLocal(err);
+            },
         }
     }
 
-    pub fn prepareFrame(self: *Recorder, command_buffer: low_vk.CommandBuffer, image: low_vk.Image, extent: low_vk.Extent2D) !?PreparedFrame {
+    fn reconfigureForResize(self: *Recorder, extent: low_vk.Extent2D) !void {
+        if (self.prepared_slot != null) return error.FrameAlreadyAcquired;
+        while (self.run.?.consumed < self.run.?.submitted) {
+            const slot_index: usize = @intCast(self.run.?.consumed % self.cache.?.slots.len);
+            try self.consumeSlot(slot_index);
+        }
+
+        const run = &self.run.?;
+        const options = RecordingOptions{
+            .allocator = run.allocator,
+            .io = run.io,
+            .writer = run.writer,
+            .frame_rate = run.frame_rate,
+            .bitrate = run.bitrate,
+            .gop_size = run.gop_size,
+            .quality = run.quality,
+            .resize = run.resize,
+            .parameter_sets = run.parameter_sets,
+            .format = run.format,
+            .timestamp_mode = run.timestamp_mode,
+        };
+        const changed = try self.configureCache(extent, options, false);
+        self.run.?.source_extent = extent;
+        if (!changed) return;
+        self.run.?.submitted = 0;
+        self.run.?.consumed = 0;
+        self.run.?.pending_sequence_header = true;
+    }
+
+    pub fn prepareFrame(self: *Recorder, command_buffer: low_vk.CommandBuffer, image: low_vk.Image, extent: low_vk.Extent2D, explicit_timestamp_ns: ?u64) !?PreparedFrame {
         const run = &(self.run orelse return null);
         if (!run.accepting or run.sticky_error != null) return null;
         std.debug.assert(self.prepared_slot == null);
@@ -254,6 +311,7 @@ pub const Recorder = struct {
 
         const device = self.video_device.device();
         const slot = &cache.slots[slot_index];
+        const timestamp_ns = try self.resolveTimestamp(explicit_timestamp_ns);
         errdefer |err| self.failShared(err);
         try device.resetCommandBuffer(slot.encode_command_buffer, .{});
         try device.resetCommandBuffer(slot.compute_command_buffer, .{});
@@ -279,6 +337,7 @@ pub const Recorder = struct {
         try cache.recordEncode(slot_index, run.submitted);
         slot.frame_index = run.submitted;
         slot.is_idr = run.submitted % run.gop_size == 0;
+        slot.timestamp_ns = timestamp_ns;
         self.prepared_slot = slot_index;
         return .{ .signal_semaphore = @intFromEnum(slot.copy_finished) };
     }
@@ -315,6 +374,8 @@ pub const Recorder = struct {
         slot.pending = true;
         slot.initialized = true;
         self.run.?.submitted += 1;
+        self.run.?.output_frames += 1;
+        self.run.?.last_timestamp_ns = slot.timestamp_ns;
         self.prepared_slot = null;
     }
 
@@ -366,17 +427,24 @@ pub const Recorder = struct {
             const bytes: [*]const u8 = @ptrCast(slot.mapped.?);
             const packet = bytes[range.offset..][0..range.size];
             const repeat_parameter_sets = slot.is_idr and slot.frame_index != 0 and run.parameter_sets == .every_idr;
+            const new_sequence = run.pending_sequence_header;
             switch (run.format) {
                 .h264 => {
-                    if (repeat_parameter_sets) try run.writer.writeAll(cache.header);
+                    if (new_sequence or repeat_parameter_sets) try run.writer.writeAll(cache.header);
                     try run.writer.writeAll(packet);
                 },
                 .mkv => try run.mkv.?.writeFrame(
-                    if (repeat_parameter_sets) cache.header else null,
+                    if (new_sequence or repeat_parameter_sets) cache.header else null,
+                    if (new_sequence) .{
+                        .parameter_sets = cache.header,
+                        .extent = .{ .width = cache.key.extent.width, .height = cache.key.extent.height },
+                    } else null,
                     packet,
                     slot.is_idr,
+                    slot.timestamp_ns,
                 ),
             }
+            run.pending_sequence_header = false;
         }
         slot.pending = false;
         run.consumed += 1;
@@ -401,6 +469,23 @@ pub const Recorder = struct {
     fn failShared(self: *Recorder, err: anyerror) void {
         self.cache_poisoned = true;
         self.failLocal(err);
+    }
+
+    fn resolveTimestamp(self: *Recorder, explicit_timestamp_ns: ?u64) !u64 {
+        const run = &self.run.?;
+        const timestamp_ns = switch (run.timestamp_mode) {
+            .fixed_rate => if (explicit_timestamp_ns != null)
+                return error.UnexpectedFrameTimestamp
+            else
+                try fixedFrameTimestamp(run.output_frames, run.frame_rate),
+            .monotonic => explicit_timestamp_ns orelse blk: {
+                const now = std.Io.Timestamp.now(run.io, .awake).nanoseconds;
+                break :blk @as(u64, @intCast(@max(now - run.start_time_ns, 0)));
+            },
+            .explicit => explicit_timestamp_ns orelse return error.FrameTimestampRequired,
+        };
+        if (run.last_timestamp_ns) |previous| if (timestamp_ns <= previous) return error.NonMonotonicFrameTimestamp;
+        return timestamp_ns;
     }
 };
 
@@ -965,6 +1050,7 @@ const Slot = struct {
     initialized: bool = false,
     frame_index: u64 = 0,
     is_idr: bool = false,
+    timestamp_ns: u64 = 0,
 
     fn create(self: *Slot, cache: *Cache) !void {
         const device = cache.video_device.device();
@@ -1132,6 +1218,13 @@ fn alignedBitstreamSize(extent: vk.Extent2D, alignment_value: u64) !u64 {
     return if (remainder == 0) conservative else try std.math.add(u64, conservative, alignment - remainder);
 }
 
+fn fixedFrameTimestamp(frame_index: u64, frame_rate: capabilities.Rational) !u64 {
+    const numerator = @as(u128, frame_index) * frame_rate.denominator * std.time.ns_per_s;
+    const rounded = (numerator + frame_rate.numerator / 2) / frame_rate.numerator;
+    if (rounded > std.math.maxInt(u64)) return error.FrameTimestampOverflow;
+    return @intCast(rounded);
+}
+
 fn pictureResource(view: vk.ImageView, extent: vk.Extent2D) vk.VideoPictureResourceInfoKHR {
     return .{
         .coded_offset = .{ .x = 0, .y = 0 },
@@ -1223,6 +1316,9 @@ test "recorder status transitions are non-consuming" {
         .resize = .stop_recording,
         .parameter_sets = .stream_start,
         .format = .h264,
+        .allocator = std.testing.allocator,
+        .timestamp_mode = .fixed_rate,
+        .start_time_ns = 0,
         .source_extent = .{ .width = 64, .height = 64 },
     };
     try std.testing.expect(recorder.status().? == .recording);

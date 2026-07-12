@@ -10,29 +10,39 @@ pub const Extent = struct {
     height: u32,
 };
 
-/// A forward-only Matroska muxer for the recorder's fixed-rate H.264 stream.
+pub const CodecState = struct {
+    parameter_sets: []const u8,
+    extent: Extent,
+};
+
+/// A forward-only Matroska muxer for the recorder's H.264 stream.
 ///
 /// The Segment has an unknown size, as permitted for live Matroska streams,
 /// so the caller's writer does not need to seek. Each frame gets a known-size
-/// Cluster and SimpleBlock. H.264 NAL units are converted from Annex B to the
-/// four-byte length-prefixed AVC representation required by Matroska.
+/// Cluster and block. H.264 NAL units are converted from Annex B to the
+/// four-byte length-prefixed AVC representation required by Matroska. A
+/// resolution change uses a new Track description and BlockGroup CodecState.
 pub const Muxer = struct {
     writer: *std.Io.Writer,
     frame_rate: FrameRate,
-    frame_index: u64 = 0,
+    variable_timestamps: bool,
+    extent: Extent,
+    default_duration: ?u64,
+    last_timestamp_ns: ?u64 = null,
 
-    const timestamp_scale_ns: u64 = 1_000_000;
+    const timestamp_scale_ns: u64 = 1;
 
     pub fn init(
         writer: *std.Io.Writer,
         frame_rate: FrameRate,
         extent: Extent,
         parameter_sets: []const u8,
+        variable_timestamps: bool,
     ) !Muxer {
         if (frame_rate.numerator == 0 or frame_rate.denominator == 0) return error.InvalidFrameRate;
         if (extent.width == 0 or extent.height == 0) return error.UnsupportedVideoExtent;
         const sets = try findParameterSets(parameter_sets);
-        const default_duration = try defaultDuration(frame_rate);
+        const default_duration = if (variable_timestamps) null else try defaultDuration(frame_rate);
 
         // Finish all validation and size calculations before the first write,
         // so malformed parameter sets cannot leave a partial container header.
@@ -45,32 +55,59 @@ pub const Muxer = struct {
         try writer.writeAll(&.{ 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
         try writeInfo(writer);
         try writeTracks(writer, extent, default_duration, sets);
-        return .{ .writer = writer, .frame_rate = frame_rate };
+        return .{
+            .writer = writer,
+            .frame_rate = frame_rate,
+            .variable_timestamps = variable_timestamps,
+            .extent = extent,
+            .default_duration = default_duration,
+        };
     }
 
     pub fn writeFrame(
         self: *Muxer,
         repeated_parameter_sets: ?[]const u8,
+        codec_state: ?CodecState,
         packet: []const u8,
         keyframe: bool,
+        timestamp_ns: u64,
     ) !void {
-        if (self.frame_index == std.math.maxInt(u64)) return error.FrameIndexOverflow;
+        if (self.last_timestamp_ns) |previous| if (timestamp_ns <= previous) return error.NonMonotonicFrameTimestamp;
         const prefix_size = if (repeated_parameter_sets) |prefix| try avcSampleSize(prefix) else 0;
         const packet_size = try avcSampleSize(packet);
         const sample_size = try checkedAdd(prefix_size, packet_size);
         const block_payload_size = try checkedAdd(4, sample_size);
-        const timestamp = try frameTimestamp(self.frame_index, self.frame_rate, timestamp_scale_ns);
+        const timestamp = timestampTicks(timestamp_ns, timestamp_scale_ns);
         const timestamp_element_size = try uintElementLength(ids.timestamp, timestamp);
-        const block_element_size = try elementLength(ids.simple_block, block_payload_size);
-        const cluster_payload_size = try checkedAdd(timestamp_element_size, block_element_size);
+        const state_sets = if (codec_state) |state| try findParameterSets(state.parameter_sets) else null;
+        const frame_element_size = if (state_sets) |sets| blk: {
+            const block_size = try elementLength(ids.block, block_payload_size);
+            const state_size = try elementLength(ids.codec_state, try avcConfigurationLength(sets));
+            break :blk try elementLength(ids.block_group, try checkedAdd(block_size, state_size));
+        } else try elementLength(ids.simple_block, block_payload_size);
+        const cluster_payload_size = try checkedAdd(timestamp_element_size, frame_element_size);
 
+        if (codec_state) |state| try writeTracks(self.writer, state.extent, self.default_duration, state_sets.?);
         try writeElementHeader(self.writer, ids.cluster, cluster_payload_size);
         try writeUIntElement(self.writer, ids.timestamp, timestamp);
-        try writeElementHeader(self.writer, ids.simple_block, block_payload_size);
-        try self.writer.writeAll(&.{ 0x81, 0x00, 0x00, if (keyframe) 0x80 else 0x00 });
-        if (repeated_parameter_sets) |prefix| try writeAvcSample(self.writer, prefix);
-        try writeAvcSample(self.writer, packet);
-        self.frame_index += 1;
+        if (state_sets) |sets| {
+            const block_size = try elementLength(ids.block, block_payload_size);
+            const state_size = try elementLength(ids.codec_state, try avcConfigurationLength(sets));
+            try writeElementHeader(self.writer, ids.block_group, try checkedAdd(block_size, state_size));
+            try writeElementHeader(self.writer, ids.block, block_payload_size);
+            try self.writer.writeAll(&.{ 0x81, 0x00, 0x00, 0x00 });
+            if (repeated_parameter_sets) |prefix| try writeAvcSample(self.writer, prefix);
+            try writeAvcSample(self.writer, packet);
+            try writeElementHeader(self.writer, ids.codec_state, try avcConfigurationLength(sets));
+            try writeAvcConfiguration(self.writer, sets);
+        } else {
+            try writeElementHeader(self.writer, ids.simple_block, block_payload_size);
+            try self.writer.writeAll(&.{ 0x81, 0x00, 0x00, if (keyframe) 0x80 else 0x00 });
+            if (repeated_parameter_sets) |prefix| try writeAvcSample(self.writer, prefix);
+            try writeAvcSample(self.writer, packet);
+        }
+        if (codec_state) |state| self.extent = state.extent;
+        self.last_timestamp_ns = timestamp_ns;
     }
 };
 
@@ -123,6 +160,9 @@ const ids = struct {
     const cluster: u32 = 0x1f43b675;
     const timestamp: u32 = 0xe7;
     const simple_block: u32 = 0xa3;
+    const block_group: u32 = 0xa0;
+    const block: u32 = 0xa1;
+    const codec_state: u32 = 0xa4;
 };
 
 const application_name = "low 0.0.0";
@@ -304,7 +344,7 @@ fn videoPayloadLength(extent: Extent) !u64 {
     return result;
 }
 
-fn trackEntryPayloadLength(extent: Extent, duration: u64, sets: ParameterSets) !u64 {
+fn trackEntryPayloadLength(extent: Extent, duration: ?u64, sets: ParameterSets) !u64 {
     var result: u64 = 0;
     result = try checkedAdd(result, try uintElementLength(ids.track_number, 1));
     result = try checkedAdd(result, try uintElementLength(ids.track_uid, 1));
@@ -313,7 +353,7 @@ fn trackEntryPayloadLength(extent: Extent, duration: u64, sets: ParameterSets) !
     result = try checkedAdd(result, try uintElementLength(ids.flag_default, 1));
     result = try checkedAdd(result, try uintElementLength(ids.flag_forced, 0));
     result = try checkedAdd(result, try uintElementLength(ids.flag_lacing, 0));
-    result = try checkedAdd(result, try uintElementLength(ids.default_duration, duration));
+    if (duration) |value| result = try checkedAdd(result, try uintElementLength(ids.default_duration, value));
     result = try checkedAdd(result, try binaryElementLength(ids.codec_id, codec_name.len));
     result = try checkedAdd(result, try elementLength(ids.codec_private, try avcConfigurationLength(sets)));
     result = try checkedAdd(result, try uintElementLength(ids.codec_delay, 0));
@@ -322,11 +362,11 @@ fn trackEntryPayloadLength(extent: Extent, duration: u64, sets: ParameterSets) !
     return result;
 }
 
-fn tracksPayloadLength(extent: Extent, duration: u64, sets: ParameterSets) !u64 {
+fn tracksPayloadLength(extent: Extent, duration: ?u64, sets: ParameterSets) !u64 {
     return elementLength(ids.track_entry, try trackEntryPayloadLength(extent, duration, sets));
 }
 
-fn writeTracks(writer: *std.Io.Writer, extent: Extent, duration: u64, sets: ParameterSets) !void {
+fn writeTracks(writer: *std.Io.Writer, extent: Extent, duration: ?u64, sets: ParameterSets) !void {
     try writeElementHeader(writer, ids.tracks, try tracksPayloadLength(extent, duration, sets));
     try writeElementHeader(writer, ids.track_entry, try trackEntryPayloadLength(extent, duration, sets));
     try writeUIntElement(writer, ids.track_number, 1);
@@ -336,7 +376,7 @@ fn writeTracks(writer: *std.Io.Writer, extent: Extent, duration: u64, sets: Para
     try writeUIntElement(writer, ids.flag_default, 1);
     try writeUIntElement(writer, ids.flag_forced, 0);
     try writeUIntElement(writer, ids.flag_lacing, 0);
-    try writeUIntElement(writer, ids.default_duration, duration);
+    if (duration) |value| try writeUIntElement(writer, ids.default_duration, value);
     try writeBinaryElement(writer, ids.codec_id, codec_name);
     try writeElementHeader(writer, ids.codec_private, try avcConfigurationLength(sets));
     try writeAvcConfiguration(writer, sets);
@@ -366,12 +406,9 @@ fn defaultDuration(frame_rate: FrameRate) !u64 {
     return @intCast(rounded);
 }
 
-fn frameTimestamp(frame_index: u64, frame_rate: FrameRate, scale_ns: u64) !u64 {
-    const numerator = @as(u128, frame_index) * frame_rate.denominator * std.time.ns_per_s;
-    const denominator = @as(u128, frame_rate.numerator) * scale_ns;
-    const rounded = (numerator + denominator / 2) / denominator;
-    if (rounded > std.math.maxInt(u64)) return error.FrameTimestampOverflow;
-    return @intCast(rounded);
+fn timestampTicks(timestamp_ns: u64, scale_ns: u64) u64 {
+    const quotient = timestamp_ns / scale_ns;
+    return quotient + @intFromBool(timestamp_ns % scale_ns >= (scale_ns + 1) / 2);
 }
 
 fn checkedAdd(a: u64, b: anytype) !u64 {
@@ -456,8 +493,8 @@ test "streaming Matroska header carries AVC configuration and length-prefixed fr
     };
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    var muxer = try Muxer.init(&output.writer, .{ .numerator = 60, .denominator = 1 }, .{ .width = 640, .height = 480 }, parameter_sets);
-    try muxer.writeFrame(null, &.{ 0x00, 0x00, 0x01, 0x65, 0xaa, 0xbb }, true);
+    var muxer = try Muxer.init(&output.writer, .{ .numerator = 60, .denominator = 1 }, .{ .width = 640, .height = 480 }, parameter_sets, false);
+    try muxer.writeFrame(null, null, &.{ 0x00, 0x00, 0x01, 0x65, 0xaa, 0xbb }, true, 0);
 
     const bytes = output.written();
     try std.testing.expect(std.mem.startsWith(u8, bytes, &.{ 0x1a, 0x45, 0xdf, 0xa3 }));
@@ -480,9 +517,30 @@ test "streaming Matroska header carries AVC configuration and length-prefixed fr
 test "Matroska timestamps preserve fractional fixed frame rates" {
     const rate = FrameRate{ .numerator = 30_000, .denominator = 1001 };
     try std.testing.expectEqual(@as(u64, 33_366_667), try defaultDuration(rate));
-    try std.testing.expectEqual(@as(u64, 0), try frameTimestamp(0, rate, Muxer.timestamp_scale_ns));
-    try std.testing.expectEqual(@as(u64, 33), try frameTimestamp(1, rate, Muxer.timestamp_scale_ns));
-    try std.testing.expectEqual(@as(u64, 67), try frameTimestamp(2, rate, Muxer.timestamp_scale_ns));
+    try std.testing.expectEqual(@as(u64, 0), timestampTicks(0, Muxer.timestamp_scale_ns));
+    try std.testing.expectEqual(@as(u64, 33_366_667), timestampTicks(33_366_667, Muxer.timestamp_scale_ns));
+}
+
+test "Matroska writes codec state for a resolution change" {
+    const parameter_sets = &.{
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f, 0xaa,
+        0x00, 0x00, 0x01, 0x68, 0xee, 0x3c,
+    };
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var muxer = try Muxer.init(&output.writer, .{ .numerator = 60, .denominator = 1 }, .{ .width = 640, .height = 480 }, parameter_sets, true);
+    try muxer.writeFrame(null, null, &.{ 0x00, 0x00, 0x01, 0x65, 0xaa }, true, 0);
+    const before_change = output.written().len;
+    try muxer.writeFrame(parameter_sets, .{
+        .parameter_sets = parameter_sets,
+        .extent = .{ .width = 800, .height = 464 },
+    }, &.{ 0x00, 0x00, 0x01, 0x65, 0xbb }, true, 1_000_000_000);
+
+    const changed = output.written()[before_change..];
+    try std.testing.expect(std.mem.indexOf(u8, changed, &.{ 0x16, 0x54, 0xae, 0x6b }) != null);
+    try std.testing.expect(std.mem.indexOf(u8, changed, &.{0xa0}) != null);
+    try std.testing.expect(std.mem.indexOf(u8, changed, &.{0xa4}) != null);
+    try std.testing.expectEqual(Extent{ .width = 800, .height = 464 }, muxer.extent);
 }
 
 test "Matroska validates packets before writing and converts repeated parameter sets" {
@@ -492,12 +550,12 @@ test "Matroska validates packets before writing and converts repeated parameter 
     };
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    var muxer = try Muxer.init(&output.writer, .{ .numerator = 24, .denominator = 1 }, .{ .width = 64, .height = 64 }, parameter_sets);
+    var muxer = try Muxer.init(&output.writer, .{ .numerator = 24, .denominator = 1 }, .{ .width = 64, .height = 64 }, parameter_sets, true);
     const header_length = output.written().len;
-    try std.testing.expectError(error.MalformedAnnexB, muxer.writeFrame(null, &.{ 0x65, 0xaa }, true));
+    try std.testing.expectError(error.MalformedAnnexB, muxer.writeFrame(null, null, &.{ 0x65, 0xaa }, true, 1_000_000));
     try std.testing.expectEqual(header_length, output.written().len);
 
-    try muxer.writeFrame(parameter_sets, &.{ 0x00, 0x00, 0x01, 0x65, 0xaa }, true);
+    try muxer.writeFrame(parameter_sets, null, &.{ 0x00, 0x00, 0x01, 0x65, 0xaa }, true, 1_000_000);
     try std.testing.expect(std.mem.endsWith(u8, output.written(), &.{
         0x81, 0x00, 0x00, 0x80,
         0x00, 0x00, 0x00, 0x04,
@@ -516,6 +574,7 @@ test "Matroska rejects incomplete parameter sets before writing" {
         .{ .numerator = 60, .denominator = 1 },
         .{ .width = 64, .height = 64 },
         &.{ 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f },
+        false,
     ));
     try std.testing.expectEqual(@as(usize, 0), output.written().len);
 }

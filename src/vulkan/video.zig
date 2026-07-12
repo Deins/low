@@ -19,6 +19,7 @@ pub const Rational = capabilities.Rational;
 pub const Quality = capabilities.Quality;
 pub const ResizePolicy = capabilities.ResizePolicy;
 pub const ParameterSetPolicy = capabilities.ParameterSetPolicy;
+pub const TimestampMode = capabilities.TimestampMode;
 pub const TuningModeSupport = capabilities.TuningModeSupport;
 pub const required_device_extensions = capabilities.required_device_extensions;
 pub const queryH264Support = capabilities.queryH264Support;
