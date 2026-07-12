@@ -838,7 +838,7 @@ fn normalizeRecordingOptions(options: anytype) Video.RecordingOptions {
         .quality = if (@hasField(Options, "quality")) options.quality else .balanced,
         .resize = if (@hasField(Options, "resize")) options.resize else .scale_and_letterbox,
         .parameter_sets = if (@hasField(Options, "parameter_sets")) options.parameter_sets else .every_idr,
-        .format = if (@hasField(Options, "format")) options.format else .h264,
+        .format = if (@hasField(Options, "format")) options.format else .mkv,
         .timestamp_mode = if (@hasField(Options, "timestamp_mode")) options.timestamp_mode else .fixed_rate,
     };
 }

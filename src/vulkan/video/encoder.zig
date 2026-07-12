@@ -24,7 +24,7 @@ pub const RecordingOptions = struct {
     quality: capabilities.Quality = .balanced,
     resize: capabilities.ResizePolicy = .scale_and_letterbox,
     parameter_sets: capabilities.ParameterSetPolicy = .every_idr,
-    format: RecordingFormat = .h264,
+    format: RecordingFormat = .mkv,
     timestamp_mode: capabilities.TimestampMode = .fixed_rate,
 };
 
