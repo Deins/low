@@ -9,6 +9,7 @@ const h264 = @import("video/h264.zig");
 const conversion = @import("video/conversion.zig");
 const device = @import("video/device.zig");
 const encoder = @import("video/encoder.zig");
+const matroska = @import("video/matroska.zig");
 
 pub const UnsupportedReason = capabilities.UnsupportedReason;
 pub const H264Support = capabilities.H264Support;
@@ -25,6 +26,7 @@ pub const alignCodedExtent = capabilities.alignCodedExtent;
 pub const VideoDevice = device.VideoDevice;
 pub const RecordingOptions = encoder.RecordingOptions;
 pub const RecordingStatus = encoder.RecordingStatus;
+pub const RecordingFormat = encoder.RecordingFormat;
 pub const VideoRecorder = encoder.Recorder;
 
 test {
@@ -33,4 +35,5 @@ test {
     _ = conversion;
     _ = device;
     _ = encoder;
+    _ = matroska;
 }

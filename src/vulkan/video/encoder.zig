@@ -4,7 +4,15 @@ const low_vk = @import("../api.zig");
 const capabilities = @import("capabilities.zig");
 const conversion = @import("conversion.zig");
 const h264 = @import("h264.zig");
+const matroska = @import("matroska.zig");
 const VideoDevice = @import("device.zig").VideoDevice;
+
+pub const RecordingFormat = enum {
+    /// Raw H.264 byte stream with Annex-B start codes.
+    h264,
+    /// Streaming Matroska container containing the H.264 video track.
+    mkv,
+};
 
 pub const RecordingOptions = struct {
     allocator: std.mem.Allocator,
@@ -16,6 +24,7 @@ pub const RecordingOptions = struct {
     quality: capabilities.Quality = .balanced,
     resize: capabilities.ResizePolicy = .scale_and_letterbox,
     parameter_sets: capabilities.ParameterSetPolicy = .every_idr,
+    format: RecordingFormat = .h264,
 };
 
 pub const RecordingStatus = union(enum) {
@@ -48,6 +57,8 @@ pub const Recorder = struct {
         quality: capabilities.Quality,
         resize: capabilities.ResizePolicy,
         parameter_sets: capabilities.ParameterSetPolicy,
+        format: RecordingFormat,
+        mkv: ?matroska.Muxer = null,
         source_extent: low_vk.Extent2D,
         submitted: u64 = 0,
         consumed: u64 = 0,
@@ -148,11 +159,20 @@ pub const Recorder = struct {
             .quality = options.quality,
             .resize = options.resize,
             .parameter_sets = options.parameter_sets,
+            .format = options.format,
             .source_extent = extent,
         };
-        // Headers are written synchronously so a failed output is reported by
-        // begin and cannot leave an apparently active recorder.
-        try run.writer.writeAll(self.cache.?.header);
+        // Container headers are written synchronously so a failed output is
+        // reported by begin and cannot leave an apparently active recorder.
+        switch (run.format) {
+            .h264 => try run.writer.writeAll(self.cache.?.header),
+            .mkv => run.mkv = try matroska.Muxer.init(
+                run.writer,
+                .{ .numerator = run.frame_rate.numerator, .denominator = run.frame_rate.denominator },
+                .{ .width = self.cache.?.key.extent.width, .height = self.cache.?.key.extent.height },
+                self.cache.?.header,
+            ),
+        }
         self.run = run;
         self.last_error = null;
     }
@@ -343,9 +363,20 @@ pub const Recorder = struct {
         }});
         const run = &self.run.?;
         if (run.sticky_error == null) {
-            if (slot.is_idr and slot.frame_index != 0 and run.parameter_sets == .every_idr) try run.writer.writeAll(cache.header);
             const bytes: [*]const u8 = @ptrCast(slot.mapped.?);
-            try run.writer.writeAll(bytes[range.offset..][0..range.size]);
+            const packet = bytes[range.offset..][0..range.size];
+            const repeat_parameter_sets = slot.is_idr and slot.frame_index != 0 and run.parameter_sets == .every_idr;
+            switch (run.format) {
+                .h264 => {
+                    if (repeat_parameter_sets) try run.writer.writeAll(cache.header);
+                    try run.writer.writeAll(packet);
+                },
+                .mkv => try run.mkv.?.writeFrame(
+                    if (repeat_parameter_sets) cache.header else null,
+                    packet,
+                    slot.is_idr,
+                ),
+            }
         }
         slot.pending = false;
         run.consumed += 1;
@@ -1191,6 +1222,7 @@ test "recorder status transitions are non-consuming" {
         .quality = .balanced,
         .resize = .stop_recording,
         .parameter_sets = .stream_start,
+        .format = .h264,
         .source_extent = .{ .width = 64, .height = 64 },
     };
     try std.testing.expect(recorder.status().? == .recording);

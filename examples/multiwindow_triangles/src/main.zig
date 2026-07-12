@@ -33,6 +33,8 @@ const DeviceSelection = struct {
     encode_queue_family: ?u32 = null,
 };
 
+const RecordingFileFormat = if (example_options.vk_video) video.RecordingFormat else enum { h264, mkv };
+
 const Renderer = struct {
     gpa: std.mem.Allocator,
     instance: vk.InstanceProxy,
@@ -240,7 +242,7 @@ const AppWindow = struct {
         self.* = undefined;
     }
 
-    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer, fps: u32, bitrate: u32, gop_size: u32) !void {
+    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer, format: RecordingFileFormat, fps: u32, bitrate: u32, gop_size: u32) !void {
         if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
         try self.target.beginRecording(.{
             .allocator = self.target.allocator,
@@ -249,6 +251,7 @@ const AppWindow = struct {
             .frame_rate = .{ .numerator = fps, .denominator = 1 },
             .bitrate = bitrate,
             .gop_size = gop_size,
+            .format = format,
         });
     }
 
@@ -341,6 +344,13 @@ pub fn main(init: std.process.Init) !void {
     const app_options = try parseOptions(args);
     const backend = app_options.backend;
     const recording_requested = app_options.first_record_path != null or app_options.second_record_path != null;
+    if (app_options.restart_recording_at != null and
+        ((app_options.first_record_path != null and recordingFileFormat(app_options.first_record_path.?) == .mkv) or
+            (app_options.second_record_path != null and recordingFileFormat(app_options.second_record_path.?) == .mkv)))
+    {
+        std.log.err("--restart-recording-at cannot append a second Matroska timeline to the same file; use a fresh writer for each MKV recording", .{});
+        return;
+    }
     if (recording_requested and !example_options.vk_video) {
         std.log.err("recording support is not compiled; rebuild with -Dvk_video=true", .{});
         return;
@@ -433,10 +443,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (second) |*app_window| app_window.deinit();
     first.?.installCallbacks();
     second.?.installCallbacks();
-    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
+    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
         std.log.err("first stream could not start: {s}", .{@errorName(err)});
     };
-    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
+    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
         std.log.err("second stream could not start: {s}", .{@errorName(err)});
     };
 
@@ -493,11 +503,11 @@ pub fn main(init: std.process.Init) !void {
             if (rendered_frames == restart_frame) {
                 if (first_record_writer) |*writer| if (first) |*app_window| {
                     try app_window.stopRecording();
-                    try app_window.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
+                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
                 };
                 if (second_record_writer) |*writer| if (second) |*app_window| {
                     try app_window.stopRecording();
-                    try app_window.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
+                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
                 };
             }
         }
@@ -717,6 +727,10 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
         }
     }
     return result;
+}
+
+fn recordingFileFormat(path: []const u8) RecordingFileFormat {
+    return if (std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".mkv")) .mkv else .h264;
 }
 
 fn onMouseButton(window: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {
