@@ -34,6 +34,14 @@ zig build run -- --record
 Output: `tmp/first.mkv` and `tmp/second.mkv`. Recording settings (60 fps,
 12 Mbps, 60-frame GOP) are compile-time constants near the top of `src/main.zig`.
 
+`low` records the frames submitted to each `RenderTarget`; it does not capture
+desktop contents and it does not record audio. The default `.mkv` format is the
+right choice for most uses. Always stop recording before closing its writer so
+the remaining GPU work and container data are finalized.
+
+See the [Vulkan Video recording guide](../../docs/recording.md) for setup,
+timing modes, quality tradeoffs, resizing, and the recording lifecycle.
+
 For automated runs, `--frames` closes the demo after a fixed number of frames:
 
 ```sh

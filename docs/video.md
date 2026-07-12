@@ -1,5 +1,9 @@
 # Vulkan H.264 recording plan
 
+> Historical design notes. For the current public API, setup, timing behavior,
+> and recording tradeoffs, see the [Vulkan Video recording guide](recording.md).
+> Some API sketches below predate the implemented API.
+
 ## Status and scope
 
 This document plans an optional Vulkan Video recorder for `low`. It does not
