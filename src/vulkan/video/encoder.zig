@@ -41,6 +41,7 @@ pub const PreparedFrame = struct {
 pub const Recorder = struct {
     allocator: std.mem.Allocator,
     video_device: *VideoDevice,
+    graphics_queue_family: u32,
     frames_in_flight: u32,
     color_format: low_vk.Format,
     cache: ?*Cache = null,
@@ -74,10 +75,11 @@ pub const Recorder = struct {
         pending_sequence_header: bool = false,
     };
 
-    pub fn init(allocator: std.mem.Allocator, video_device: *VideoDevice, frames_in_flight: u32, color_format: low_vk.Format) Recorder {
+    pub fn init(allocator: std.mem.Allocator, video_device: *VideoDevice, graphics_queue_family: u32, frames_in_flight: u32, color_format: low_vk.Format) Recorder {
         return .{
             .allocator = allocator,
             .video_device = video_device,
+            .graphics_queue_family = graphics_queue_family,
             .frames_in_flight = frames_in_flight,
             .color_format = color_format,
         };
@@ -173,7 +175,7 @@ pub const Recorder = struct {
 
         if (self.cache == null or !std.meta.eql(self.cache.?.key, key)) {
             const replacement = try options.allocator.create(Cache);
-            replacement.* = Cache.empty(options.allocator, self.video_device, key, support);
+            replacement.* = Cache.empty(options.allocator, self.video_device, self.graphics_queue_family, key, support);
             errdefer {
                 replacement.deinit();
                 options.allocator.destroy(replacement);
@@ -555,6 +557,7 @@ const CacheKey = struct {
 const Cache = struct {
     allocator: std.mem.Allocator,
     video_device: *VideoDevice,
+    graphics_queue_family: u32,
     key: CacheKey,
     support: capabilities.H264Support,
     usage_info: vk.VideoEncodeUsageInfoKHR = undefined,
@@ -578,8 +581,8 @@ const Cache = struct {
     bitstream_size: u64 = 0,
     session_initialized: bool = false,
 
-    fn empty(allocator: std.mem.Allocator, video_device: *VideoDevice, key: CacheKey, support: capabilities.H264Support) Cache {
-        return .{ .allocator = allocator, .video_device = video_device, .key = key, .support = support };
+    fn empty(allocator: std.mem.Allocator, video_device: *VideoDevice, graphics_queue_family: u32, key: CacheKey, support: capabilities.H264Support) Cache {
+        return .{ .allocator = allocator, .video_device = video_device, .graphics_queue_family = graphics_queue_family, .key = key, .support = support };
     }
 
     fn create(self: *Cache) !void {
@@ -651,7 +654,7 @@ const Cache = struct {
         if (self.session != .null_handle) device.destroyVideoSessionKHR(self.session, null);
         for (self.session_memory) |memory| if (memory != .null_handle) device.freeMemory(memory, null);
         if (self.session_memory.len != 0) self.allocator.free(self.session_memory);
-        self.* = empty(self.allocator, self.video_device, self.key, self.support);
+        self.* = empty(self.allocator, self.video_device, self.graphics_queue_family, self.key, self.support);
     }
 
     fn initProfile(self: *Cache) void {
@@ -1054,6 +1057,7 @@ const Slot = struct {
 
     fn create(self: *Slot, cache: *Cache) !void {
         const device = cache.video_device.device();
+        const source_queue_families = [_]u32{ cache.graphics_queue_family, cache.video_device.compute_queue_family };
         self.source = try device.createImage(&.{
             .image_type = .@"2d",
             .format = .r8g8b8a8_unorm,
@@ -1063,7 +1067,9 @@ const Slot = struct {
             .samples = .{ .@"1_bit" = true },
             .tiling = .optimal,
             .usage = .{ .transfer_dst_bit = true, .storage_bit = true },
-            .sharing_mode = .exclusive,
+            .sharing_mode = if (source_queue_families[0] == source_queue_families[1]) .exclusive else .concurrent,
+            .queue_family_index_count = if (source_queue_families[0] == source_queue_families[1]) 0 else 2,
+            .p_queue_family_indices = if (source_queue_families[0] == source_queue_families[1]) null else &source_queue_families,
             .initial_layout = .undefined,
         }, null);
         const source_requirements = device.getImageMemoryRequirements(self.source);
@@ -1303,7 +1309,7 @@ test "Annex-B parameter streams accept both standard start codes" {
 
 test "recorder status transitions are non-consuming" {
     var video_device: VideoDevice = undefined;
-    var recorder = Recorder.init(std.testing.allocator, &video_device, 2, low_vk.format.b8g8r8a8_unorm);
+    var recorder = Recorder.init(std.testing.allocator, &video_device, 0, 2, low_vk.format.b8g8r8a8_unorm);
     try std.testing.expect(recorder.status() == null);
     var writer: std.Io.Writer = .failing;
     recorder.run = .{
