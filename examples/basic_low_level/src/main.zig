@@ -269,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
     var instance_wrapper = vk.InstanceWrapper.load(instance_handle, get_instance_proc_addr);
     const instance = vk.InstanceProxy.init(instance_handle, &instance_wrapper);
     defer instance.destroyInstance(null);
-    const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance_handle)));
+    const low_instance = try loader.loadInstanceApi(low.vulkan.toInstance(instance_handle));
 
     const window = try context.createWindow(.{ .title = "low raw Vulkan setup", .size = .{ .width = 800, .height = 600 } });
     window.setCallbacks(.{
@@ -278,12 +278,7 @@ pub fn main(init: std.process.Init) !void {
         .key = onKey,
         .text = onText,
     });
-    const low_surface = try low.vulkan.createSurface(
-        &low_instance,
-        context.backendKind(),
-        window.nativeDisplay(),
-        window.nativeSurface(),
-    );
+    const low_surface = try context.createVulkanSurface(&low_instance, window);
     const surface: vk.SurfaceKHR = @enumFromInt(low_surface);
     defer instance.destroySurfaceKHR(surface, null);
     const selection = try selectDevice(allocator, instance, surface);

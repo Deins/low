@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const types = @import("internal/types.zig");
 const input = @import("internal/input.zig");
 const runtime = @import("internal/runtime.zig");
+const Vulkan = @import("vulkan.zig");
 
 const platform = if (builtin.target.os.tag == .linux)
     @import("linux/backend.zig")
@@ -32,6 +33,15 @@ pub const Context = struct {
         return self.state.get().requiredVulkanInstanceExtensions();
     }
 
+    /// Creates a Vulkan presentation surface for a low window.
+    ///
+    /// The Vulkan instance must already have been created with
+    /// `requiredVulkanInstanceExtensions()` enabled. Offscreen contexts do
+    /// not have native surfaces and return `error.OffscreenSurfaceUnavailable`.
+    pub fn createVulkanSurface(self: *const @This(), instance: *const Vulkan.Instance, window: *Window) !Vulkan.api.SurfaceKHR {
+        return Vulkan.createSurface(instance, self.backendKind(), self.nativeDisplay(), window.nativeSurface());
+    }
+
     pub fn backendKind(self: *const @This()) BackendKind {
         return self.state.get().backendKind();
     }
@@ -51,6 +61,16 @@ pub const Context = struct {
     /// Dispatches events until the given window may render again or closes.
     pub fn waitForRender(self: *const @This(), window: *Window) Error!void {
         return self.state.get().waitForRender(window);
+    }
+
+    /// Dispatches events until at least one window may render again or closes.
+    /// An empty slice returns immediately.
+    pub fn waitForAnyRender(self: *const @This(), windows: []const *Window) Error!void {
+        while (true) {
+            for (windows) |window| if (window.shouldRender() or window.shouldClose()) return;
+            if (windows.len == 0) return;
+            try self.waitEvents();
+        }
     }
 
     pub fn waitEventsTimeout(self: *const @This(), timeout_ns: u64) Error!bool {
@@ -127,6 +147,8 @@ test "root API exposes the supported contract" {
     _ = callbacks;
     _ = Context.init;
     _ = Context.waitForRender;
+    _ = Context.waitForAnyRender;
+    _ = Context.createVulkanSurface;
     _ = Window.requestFrame;
     _ = Window.cancelFrameRequest;
     _ = Window.deinit;

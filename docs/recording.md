@@ -68,10 +68,10 @@ formats, and at least one usable rate-control mode. For a runtime codec
 choice, use `selectVideoFormat` with the preferred order; apply the returned
 support object's extensions and queue requirements to the same device.
 
-Create `VideoDevice` from the resulting Vulkan device and supply it as
-`RenderTarget.Options.video_device`. The target must be deinitialized before
-its `VideoDevice`. The encode queue is owned by `low` for the lifetime of the
-`VideoDevice`; do not submit application work to that queue directly.
+Create `VideoDevice` from the resulting Vulkan device and supply it through
+`targets().RenderContext.video_device`. The target must be deinitialized
+before its `VideoDevice`. The encode queue is owned by `low` for the lifetime
+of the `VideoDevice`; do not submit application work to that queue directly.
 
 ## Minimal recording lifecycle
 

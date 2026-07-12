@@ -36,10 +36,15 @@ const RenderTarget = low.vulkan.targets().RenderTarget;
 ```
 
 `RenderTarget` owns desktop surface/swapchain setup, frame command buffers,
-synchronization, resize recreation, and layout transitions. The application
-still owns the Vulkan instance, physical-device selection, queues, command
-pool, and rendering commands. It can use any Vulkan binding alongside low's
-binding-agnostic ABI.
+synchronization, resize recreation, layout transitions, and presentation frame
+pacing. The application still owns the Vulkan instance, physical-device
+selection, queues, command pool, and rendering commands. Use
+`targets().RenderContext` to share those low Vulkan resources across multiple
+targets. It can use any Vulkan binding alongside low's binding-agnostic ABI.
+
+`Context.createVulkanSurface()` is a convenience for applications that need a
+surface before device or queue-family selection. `low.vulkan` also exposes
+handle conversion helpers for bridging generated Vulkan bindings to its ABI.
 
 Vulkan Video recording is enabled separately and implies `vk_extras`:
 
@@ -55,7 +60,8 @@ owned encode queue across independently admitted render-target recorders.
 
 Each recorder copies the completed target into a private image before WSI
 presentation, converts that image to BT.709 limited-range NV12 on the compute
-queue, and submits H.264 encode work through a per-frame semaphore/fence ring.
+queue, and submits selected-codec encode work through a per-frame
+semaphore/fence ring.
 Only feedback-selected compressed ranges are mapped and written on the CPU.
 Compatible sessions, DPB storage, pipelines, and per-flight resources stay
 cached after `endRecording`; `releaseRecordingResources` returns that memory
@@ -138,11 +144,14 @@ The BGRA-to-NV12 GLSL source and checked-in SPIR-V are kept together under
 maintainer-only `check-vk-video-shader` and `regenerate-vk-video-shader` build
 steps are used when `glslc` is available.
 
-The Vulkan Video implementation follows the Vulkan video coding specification
-and the `VK_KHR_video_encode_queue` and `VK_KHR_video_encode_*` extension
-proposals. Matroska details follow RFC 9559 and the Vulkan/Matroska codec
-mapping. These references are useful when changing synchronization, codec
-headers, or the forward-only muxer.
+The Vulkan Video implementation follows the [Vulkan video coding
+specification](https://docs.vulkan.org/spec/latest/chapters/videocoding.html),
+the [`VK_KHR_video_encode_queue` proposal](https://docs.vulkan.org/features/latest/features/proposals/VK_KHR_video_encode_queue.html),
+and the codec-specific encode proposals. Matroska details follow
+[RFC 9559](https://www.rfc-editor.org/rfc/rfc9559.html) and the
+[Vulkan/Matroska codec mapping](https://datatracker.ietf.org/doc/draft-ietf-cellar-codec/).
+These references are useful when changing synchronization, codec headers, or
+the forward-only muxer.
 
 ## Platform behavior
 
@@ -160,17 +169,18 @@ headers, or the forward-only muxer.
   not generate a signal, so an application must remain correct if it continues
   to render. Offscreen windows never report suspension.
 - `Window.shouldRender()` is the portable rendering gate. On Wayland it is
-  initially true and becomes false after `Window.requestFrame()`; the next
-  `wl_surface.frame` callback makes it true again. Call
-  `requestFrame()` immediately before the WSI presentation which commits the
-  surface, then wait for events while
-  `shouldRender()` is false; `Context.waitForRender(window)` filters unrelated
-  event wakeups until a permit arrives. A compositor may suppress callbacks for
-  an entirely occluded surface, but this is a pacing optimization rather than a
-  visibility guarantee. X11 and Win32 keep the gate open unless their
-  suspension hint is active. Offscreen always keeps it open. If presentation
-  fails before the surface is committed, call `Window.cancelFrameRequest()`
-  before recreating rendering resources.
+  initially true and becomes false after a presented `RenderTarget` arms the
+  next frame; the next `wl_surface.frame` callback makes it true again. Raw
+  Vulkan presentation still calls `requestFrame()` immediately before the WSI
+  presentation which commits the surface. Use
+  `Context.waitForRender(window)` or `Context.waitForAnyRender(windows)` to
+  filter unrelated event wakeups until a permit arrives. A compositor may
+  suppress callbacks for an entirely occluded surface, but this is a pacing
+  optimization rather than a visibility guarantee. X11 and Win32 keep the gate
+  open unless their suspension hint is active. Offscreen always keeps it open.
+  `RenderTarget` cancels its frame request if presentation fails before the
+  surface is committed; raw presenters should call
+  `Window.cancelFrameRequest()` in the same situation.
 - Cursor shape requests use `wp_cursor_shape_manager_v1` when the compositor
   advertises it; otherwise the compositor's default cursor remains active.
 - Unsupported operating systems build the stub backend and return

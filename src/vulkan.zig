@@ -479,6 +479,47 @@ pub const Device = struct {
     }
 };
 
+/// Converts a dispatchable handle from a generated Vulkan binding to low's
+/// ABI handle representation.
+pub inline fn toInstance(value: anytype) api.InstanceHandle {
+    return @ptrFromInt(@intFromEnum(value));
+}
+
+/// Converts a dispatchable physical-device handle from a generated Vulkan
+/// binding to low's ABI handle representation.
+pub inline fn toPhysicalDevice(value: anytype) api.PhysicalDevice {
+    return @ptrFromInt(@intFromEnum(value));
+}
+
+/// Converts a dispatchable device handle from a generated Vulkan binding to
+/// low's ABI handle representation.
+pub inline fn toDevice(value: anytype) api.DeviceHandle {
+    return @ptrFromInt(@intFromEnum(value));
+}
+
+/// Converts a dispatchable queue handle from a generated Vulkan binding to
+/// low's ABI handle representation.
+pub inline fn toQueue(value: anytype) api.Queue {
+    return @ptrFromInt(@intFromEnum(value));
+}
+
+/// Converts a dispatchable command-buffer handle from a generated Vulkan
+/// binding to low's ABI handle representation.
+pub inline fn toCommandBuffer(value: anytype) api.CommandBuffer {
+    return @ptrFromInt(@intFromEnum(value));
+}
+
+/// Converts a generated Vulkan format enum to low's numeric format ABI.
+pub inline fn toFormat(value: anytype) api.Format {
+    return @intCast(@intFromEnum(value));
+}
+
+/// Converts a generated Vulkan non-dispatchable image-view handle to low's
+/// numeric handle ABI.
+pub inline fn toImageView(value: anytype) api.ImageView {
+    return @intCast(@intFromEnum(value));
+}
+
 pub fn targets() type {
     if (!build_options.vk_extras) @compileError("enable -Dvk_extras=true");
     return @import("vulkan/targets.zig");

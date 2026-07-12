@@ -41,8 +41,8 @@ an unsupported-surface-format error instead of silently falling back.
 zig build run -- --record
 ```
 
-Output: `tmp/first.mkv` and `tmp/second.mkv`. Recording settings (60 fps,
-12 Mbps, 60-frame GOP) are compile-time constants near the top of `src/main.zig`.
+Output: `tmp/first.mkv` and `tmp/second.mkv`. Recording uses `low`'s defaults:
+60 fps, 12 Mbps, and a 60-frame GOP.
 
 Select AV1, H.265, or H.264 with `--record-codec`:
 

@@ -20,6 +20,20 @@ pub const MemoryAllocator = struct {
     free: *const fn (?*anyopaque, vk.DeviceMemory) void,
 };
 
+/// Vulkan resources shared by one or more render targets.
+///
+/// The context must remain at a stable address, and all of its fields must
+/// remain valid, for as long as any `RenderTarget` created from it exists.
+pub const RenderContext = struct {
+    instance: Vulkan.Instance,
+    physical_device: vk.PhysicalDevice,
+    device: Vulkan.Device,
+    graphics_queue: vk.Queue,
+    graphics_queue_family: u32,
+    command_pool: vk.CommandPool,
+    video_device: ?*Video.VideoDevice = null,
+};
+
 /// A Vulkan render target associated with one low window.
 pub const RenderTarget = struct {
     const Self = @This();
@@ -27,20 +41,14 @@ pub const RenderTarget = struct {
 
     pub const Options = struct {
         window: *Window,
-        instance: *const Vulkan.Instance,
-        physical_device: vk.PhysicalDevice,
-        device: *const Vulkan.Device,
-        graphics_queue: vk.Queue,
-        graphics_queue_family: u32,
-        command_pool: vk.CommandPool,
+        context: *const RenderContext,
         /// Exact render-target format. A WSI target selects the first surface
         /// format with this VkFormat; it does not silently substitute another
         /// format. Packed 10-bit formats are therefore usable when the
         /// application supplies one advertised by the surface.
         color_format: vk.Format,
-        frames_in_flight: u32,
+        frames_in_flight: u32 = 2,
         memory_allocator: ?MemoryAllocator = null,
-        video_device: ?*Video.VideoDevice = null,
     };
 
     pub const Error = error{
@@ -481,6 +489,7 @@ pub const RenderTarget = struct {
 
                 var present_error: ?anyerror = null;
                 if (self.surface != 0) {
+                    self.window.requestFrame();
                     const swapchains = [_]vk.SwapchainKHR{self.swapchain};
                     const indices = [_]u32{image_index};
                     const present = self.device.queuePresentKHR(self.graphics_queue, &.{
@@ -494,11 +503,13 @@ pub const RenderTarget = struct {
                         .p_results = null,
                     }) catch |err| switch (err) {
                         error.OutOfDateKHR => blk: {
+                            self.window.cancelFrameRequest();
                             self.recreate_pending = true;
                             present_error = error.FrameOutOfDate;
                             break :blk .success;
                         },
                         else => blk: {
+                            self.window.cancelFrameRequest();
                             present_error = err;
                             break :blk .success;
                         },
@@ -746,16 +757,16 @@ pub const RenderTarget = struct {
         state.* = .{
             .allocator = allocator,
             .window = options.window,
-            .instance = options.instance,
-            .physical_device = options.physical_device,
-            .device = options.device,
-            .graphics_queue = options.graphics_queue,
-            .graphics_queue_family = options.graphics_queue_family,
-            .command_pool = options.command_pool,
+            .instance = &options.context.instance,
+            .physical_device = options.context.physical_device,
+            .device = &options.context.device,
+            .graphics_queue = options.context.graphics_queue,
+            .graphics_queue_family = options.context.graphics_queue_family,
+            .command_pool = options.context.command_pool,
             .color_format = options.color_format,
             .memory_allocator = options.memory_allocator,
             .frames_in_flight = options.frames_in_flight,
-            .video_device = if (comptime build_options.vk_video) options.video_device else null,
+            .video_device = if (comptime build_options.vk_video) options.context.video_device else null,
         };
         errdefer State.deinitOpaque(@ptrCast(state));
 
@@ -772,7 +783,7 @@ pub const RenderTarget = struct {
                 options.window.nativeDisplay(),
                 options.window.nativeSurface(),
             );
-            if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, options.graphics_queue_family, state.surface) != vk.TRUE) return error.QueueFamilyCannotPresent;
+            if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, options.context.graphics_queue_family, state.surface) != vk.TRUE) return error.QueueFamilyCannotPresent;
         } else {
             if (state.memory_allocator == null) state.memory_allocator = .{
                 .context = state,
