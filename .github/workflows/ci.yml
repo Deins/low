@@ -24,7 +24,7 @@ jobs:
           zig build compile -Dvk_extras=true --summary all
       - name: Build examples
         run: |
-          zig build --build-file examples/basic_low_level/build.zig --summary all
+          zig build --build-file examples/basic_low_level/build.zig --fetch --summary all
           zig build --build-file examples/basic_low_level/build.zig --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig --summary all
@@ -47,7 +47,7 @@ jobs:
           zig build compile -Dtarget=x86_64-windows-gnu -Dvk_extras=true --summary all
       - name: Cross-compile examples for Windows
         run: |
-          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-windows-gnu --summary all
+          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-windows-gnu --fetch --summary all
           zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-windows-gnu --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-windows-gnu --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-windows-gnu --summary all
@@ -74,7 +74,7 @@ jobs:
       - name: Build examples
         shell: bash
         run: |
-          zig build --build-file examples/basic_low_level/build.zig --summary all
+          zig build --build-file examples/basic_low_level/build.zig --fetch --summary all
           zig build --build-file examples/basic_low_level/build.zig --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig --summary all
@@ -101,7 +101,7 @@ jobs:
       - name: Cross-compile examples for Linux
         shell: bash
         run: |
-          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-linux-gnu --summary all
+          zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-linux-gnu --fetch --summary all
           zig build --build-file examples/basic_low_level/build.zig -Dtarget=x86_64-linux-gnu --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-linux-gnu --summary all
           zig build --build-file examples/multiwindow_triangles/build.zig -Dtarget=x86_64-linux-gnu --summary all

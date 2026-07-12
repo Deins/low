@@ -14,11 +14,13 @@ pub fn build(b: *Build) !void {
         .x11 = b.option(bool, "x11", "Enable the X11 backend") orelse (target.result.os.tag == .linux),
         .wayland = b.option(bool, "wayland", "Enable the Wayland backend") orelse (target.result.os.tag == .linux),
     });
-    const vk_registry = try vulkanRegistry(b);
+    const vk_registry = vulkanRegistry(b);
+    const vk_video_registry = if (enable_video) vulkanVideoRegistry(b) else null;
+    if (vk_registry == null or (enable_video and vk_video_registry == null)) return;
     const vulkan_dep = if (enable_video)
-        b.dependency("vulkan", .{ .registry = vk_registry, .video = try vulkanVideoRegistry(b) })
+        b.dependency("vulkan", .{ .registry = vk_registry.?, .video = vk_video_registry.? })
     else
-        b.dependency("vulkan", .{ .registry = vk_registry });
+        b.dependency("vulkan", .{ .registry = vk_registry.? });
 
     const exe = b.addExecutable(.{
         .name = "multiwindow_triangles",
@@ -43,27 +45,25 @@ pub fn build(b: *Build) !void {
     run_step.dependOn(&run.step);
 }
 
-fn vulkanVideoRegistry(b: *Build) !Build.LazyPath {
+fn vulkanVideoRegistry(b: *Build) ?Build.LazyPath {
     if (b.option([]const u8, "vk_video_registry", "Path to Vulkan Video registry/video.xml")) |path| {
         return .{ .cwd_relative = path };
     }
     if (b.graph.environ_map.get("VULKAN_SDK")) |sdk| {
         return .{ .cwd_relative = b.pathJoin(&.{ sdk, "share", "vulkan", "registry", "video.xml" }) };
     }
-    const headers = b.lazyDependency("vulkan_headers", .{}) orelse
-        return error.VulkanVideoRegistryUnavailable;
+    const headers = b.lazyDependency("vulkan_headers", .{}) orelse return null;
     return headers.path("registry/video.xml");
 }
 
-fn vulkanRegistry(b: *Build) !Build.LazyPath {
+fn vulkanRegistry(b: *Build) ?Build.LazyPath {
     if (b.option([]const u8, "vk_registry", "Path to Vulkan-Headers registry/vk.xml")) |path| {
         return .{ .cwd_relative = path };
     }
     if (b.graph.environ_map.get("VULKAN_SDK")) |sdk| {
         return .{ .cwd_relative = b.pathJoin(&.{ sdk, "share", "vulkan", "registry", "vk.xml" }) };
     }
-    const headers = b.lazyDependency("vulkan_headers", .{}) orelse
-        return error.VulkanRegistryUnavailable;
+    const headers = b.lazyDependency("vulkan_headers", .{}) orelse return null;
     std.log.info("VULKAN_SDK is unset; using the lazy vulkan_headers dependency", .{});
     return headers.path("registry/vk.xml");
 }
