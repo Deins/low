@@ -20,8 +20,13 @@ pub const UnsupportedReason = enum {
 };
 
 pub const Quality = enum { low_latency, balanced, high_quality };
-pub const ResizePolicy = enum { scale_and_letterbox, stop_recording };
+pub const ResizePolicy = enum { scale_and_letterbox, change_resolution, stop_recording };
 pub const ParameterSetPolicy = enum { stream_start, every_idr };
+pub const TimestampMode = enum {
+    fixed_rate,
+    monotonic,
+    explicit,
+};
 
 pub const Rational = struct {
     numerator: u32,

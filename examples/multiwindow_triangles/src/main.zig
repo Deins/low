@@ -34,6 +34,8 @@ const DeviceSelection = struct {
 };
 
 const RecordingFileFormat = if (example_options.vk_video) video.RecordingFormat else enum { h264, mkv };
+const RecordingResizePolicy = if (example_options.vk_video) video.ResizePolicy else enum { scale_and_letterbox, change_resolution, stop_recording };
+const RecordingTimestampMode = if (example_options.vk_video) video.TimestampMode else enum { fixed_rate, monotonic, explicit };
 
 const Renderer = struct {
     gpa: std.mem.Allocator,
@@ -242,7 +244,7 @@ const AppWindow = struct {
         self.* = undefined;
     }
 
-    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer, format: RecordingFileFormat, fps: u32, bitrate: u32, gop_size: u32) !void {
+    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer, format: RecordingFileFormat, fps: u32, bitrate: u32, gop_size: u32, resize: RecordingResizePolicy, timestamp_mode: RecordingTimestampMode) !void {
         if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
         try self.target.beginRecording(.{
             .allocator = self.target.allocator,
@@ -252,6 +254,8 @@ const AppWindow = struct {
             .bitrate = bitrate,
             .gop_size = gop_size,
             .format = format,
+            .resize = resize,
+            .timestamp_mode = timestamp_mode,
         });
     }
 
@@ -280,7 +284,7 @@ const AppWindow = struct {
         }
     }
 
-    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8) !void {
+    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8, recording_timestamp_ns: ?u64) !void {
         var frame = self.target.acquire() catch |err| switch (err) {
             error.FrameSkipped, error.FrameOutOfDate => return,
             else => return err,
@@ -326,11 +330,17 @@ const AppWindow = struct {
         renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
         renderer.device.cmdEndRendering(command_buffer);
         if (dump_path) |path| {
-            var readback = try frame.submitAndReadback(renderer.gpa);
+            var readback = if (recording_timestamp_ns) |timestamp_ns|
+                try frame.submitAndReadbackAt(renderer.gpa, timestamp_ns)
+            else
+                try frame.submitAndReadback(renderer.gpa);
             defer readback.deinit();
             try readback.writeBmp(io, path);
         } else {
-            try frame.submitAndPresent();
+            if (recording_timestamp_ns) |timestamp_ns|
+                try frame.submitAndPresentAt(timestamp_ns)
+            else
+                try frame.submitAndPresent();
         }
     }
 };
@@ -349,6 +359,17 @@ pub fn main(init: std.process.Init) !void {
             (app_options.second_record_path != null and recordingFileFormat(app_options.second_record_path.?) == .mkv)))
     {
         std.log.err("--restart-recording-at cannot append a second Matroska timeline to the same file; use a fresh writer for each MKV recording", .{});
+        return;
+    }
+    if (app_options.timestamp_mode != .fixed_rate and
+        ((app_options.first_record_path != null and recordingFileFormat(app_options.first_record_path.?) != .mkv) or
+            (app_options.second_record_path != null and recordingFileFormat(app_options.second_record_path.?) != .mkv)))
+    {
+        std.log.err("monotonic and explicit timestamps require MKV output", .{});
+        return;
+    }
+    if (app_options.resize_at != null and backend != .offscreen) {
+        std.log.err("--resize-at is an offscreen example test option", .{});
         return;
     }
     if (recording_requested and !example_options.vk_video) {
@@ -443,10 +464,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (second) |*app_window| app_window.deinit();
     first.?.installCallbacks();
     second.?.installCallbacks();
-    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
+    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode) catch |err| {
         std.log.err("first stream could not start: {s}", .{@errorName(err)});
     };
-    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
+    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode) catch |err| {
         std.log.err("second stream could not start: {s}", .{@errorName(err)});
     };
 
@@ -456,6 +477,10 @@ pub fn main(init: std.process.Init) !void {
     const frame_limit: ?u32 = app_options.frames orelse if (offscreen) @as(u32, 10) else null;
     if (offscreen) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
     while (first != null or second != null) {
+        if (app_options.resize_at) |resize_at| if (rendered_frames == resize_at) {
+            if (first) |app_window| try app_window.window.injectEvent(.{ .resize = .{ .width = 800, .height = 450 } });
+            if (second) |app_window| try app_window.window.injectEvent(.{ .resize = .{ .width = 640, .height = 360 } });
+        };
         if (offscreen) try context.nextFrame();
         context.pollEvents();
 
@@ -486,28 +511,32 @@ pub fn main(init: std.process.Init) !void {
         const now = std.Io.Timestamp.now(std.Options.debug_io, .awake);
         const dt: f32 = @min(0.05, @as(f32, @floatFromInt(now.nanoseconds - previous.nanoseconds)) / 1_000_000_000);
         previous = now;
+        const recording_timestamp_ns: ?u64 = if (app_options.timestamp_mode == .explicit)
+            explicitFrameTimestamp(rendered_frames, app_options.record_fps, app_options.timestamp_gap_at)
+        else
+            null;
         if (first) |*app_window| {
             app_window.update(dt);
             var path_buffer: [64]u8 = undefined;
             const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
-            try app_window.draw(&renderer, init.io, path);
+            try app_window.draw(&renderer, init.io, path, recording_timestamp_ns);
         }
         if (second) |*app_window| {
             app_window.update(dt);
             var path_buffer: [64]u8 = undefined;
             const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
-            try app_window.draw(&renderer, init.io, path);
+            try app_window.draw(&renderer, init.io, path, recording_timestamp_ns);
         }
         rendered_frames += 1;
         if (app_options.restart_recording_at) |restart_frame| {
             if (rendered_frames == restart_frame) {
                 if (first_record_writer) |*writer| if (first) |*app_window| {
                     try app_window.stopRecording();
-                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
+                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.first_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode);
                 };
                 if (second_record_writer) |*writer| if (second) |*app_window| {
                     try app_window.stopRecording();
-                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
+                    try app_window.startRecording(init.io, &writer.interface, recordingFileFormat(app_options.second_record_path.?), app_options.record_fps, app_options.record_bitrate, app_options.record_gop, app_options.resize, app_options.timestamp_mode);
                 };
             }
         }
@@ -677,6 +706,10 @@ const AppOptions = struct {
     record_gop: u32 = 60,
     frames: ?u32 = null,
     restart_recording_at: ?u32 = null,
+    resize: RecordingResizePolicy = .scale_and_letterbox,
+    timestamp_mode: RecordingTimestampMode = .fixed_rate,
+    resize_at: ?u32 = null,
+    timestamp_gap_at: ?u32 = null,
 };
 
 fn parseOptions(args: []const [:0]const u8) !AppOptions {
@@ -722,6 +755,22 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
             if (index == args.len) return error.MissingArgumentValue;
             result.restart_recording_at = try std.fmt.parseInt(u32, args[index], 10);
             if (result.restart_recording_at.? == 0) return error.InvalidFrameCount;
+        } else if (std.mem.eql(u8, arg, "--record-dynamic-resize")) {
+            result.resize = .change_resolution;
+        } else if (std.mem.eql(u8, arg, "--record-monotonic-timestamps")) {
+            if (result.timestamp_mode != .fixed_rate) return error.ConflictingTimestampModes;
+            result.timestamp_mode = .monotonic;
+        } else if (std.mem.eql(u8, arg, "--record-explicit-timestamps")) {
+            if (result.timestamp_mode != .fixed_rate) return error.ConflictingTimestampModes;
+            result.timestamp_mode = .explicit;
+        } else if (std.mem.eql(u8, arg, "--resize-at")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.resize_at = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, arg, "--timestamp-gap-at")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.timestamp_gap_at = try std.fmt.parseInt(u32, args[index], 10);
         } else {
             return error.UnknownArgument;
         }
@@ -731,6 +780,12 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
 
 fn recordingFileFormat(path: []const u8) RecordingFileFormat {
     return if (std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".mkv")) .mkv else .h264;
+}
+
+fn explicitFrameTimestamp(frame_index: u32, frame_rate: u32, gap_at: ?u32) u64 {
+    const nominal = (@as(u128, frame_index) * std.time.ns_per_s + frame_rate / 2) / frame_rate;
+    const gap: u64 = if (gap_at) |index| if (frame_index >= index) std.time.ns_per_s else 0 else 0;
+    return @intCast(nominal + gap);
 }
 
 fn onMouseButton(window: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {

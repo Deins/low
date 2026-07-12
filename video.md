@@ -337,10 +337,9 @@ returned by `endRecording`.
 
 Raw mode writes one continuous Annex-B elementary stream. Matroska mode writes
 an unknown-sized Segment, AVC configuration in `CodecPrivate`, and one
-fixed-rate H.264 picture per `SimpleBlock`. Each Matroska recording starts an
+H.264 picture per block. Each Matroska recording starts an
 independent timeline and therefore needs a fresh writer rather than appending
-to an earlier MKV recording. Packet callbacks and application timestamps remain
-out of scope.
+to an earlier MKV recording.
 
 ### Container scope
 
@@ -350,7 +349,7 @@ can store timestamps and additional streams, but requires muxing tables,
 packetization, finalization, and often seeking. It does not simplify Vulkan
 Video encoding. Raw Annex-B remains the smallest output and can be played by
 tools such as `ffplay` or remuxed later without re-encoding. The built-in MKV
-path adds fixed-rate timestamps and standard AVC framing without seeking,
+path adds fixed-rate or clock/caller-driven timestamps and standard AVC framing without seeking,
 audio, Cues, or general-purpose muxing machinery. MP4 still requires a
 seekable/finalizable muxing design and remains out of scope.
 
@@ -369,13 +368,15 @@ pub const RecordingOptions = struct {
     gop_size: u32 = 60,
     quality: Quality = .balanced,
     resize: ResizePolicy = .scale_and_letterbox,
+    timestamp_mode: TimestampMode = .fixed_rate,
     parameter_sets: ParameterSetPolicy = .every_idr,
     format: RecordingFormat = .h264,
 };
 
 pub const Quality = enum { low_latency, balanced, high_quality };
 pub const Rational = struct { numerator: u32, denominator: u32 };
-pub const ResizePolicy = enum { scale_and_letterbox, stop_recording };
+pub const ResizePolicy = enum { scale_and_letterbox, change_resolution, stop_recording };
+pub const TimestampMode = enum { fixed_rate, monotonic, explicit };
 pub const ParameterSetPolicy = enum { stream_start, every_idr };
 pub const RecordingFormat = enum { h264, mkv };
 ```
@@ -515,15 +516,15 @@ For frames:
 
 Raw `.h264` has no timestamps or audio. Its configured frame rate is signaled
 through SPS/VUI and rate control, while playback timing depends on that
-metadata/player behavior. Matroska additionally writes fixed-rate presentation
-timestamps derived from the same rational frame rate.
-
-The recorder has no timestamp input and performs no cadence correction. Each
-successfully submitted rendered frame produces exactly one
-encoded frame in the same order. If the application submits faster or slower
-than `RecordingOptions.frame_rate`, playback duration follows the configured
-rate rather than elapsed wall-clock time in both formats. Exact variable timing
-and caller-provided timestamps remain out of scope.
+metadata/player behavior. Matroska supports three timestamp modes.
+`.fixed_rate` derives timestamps from the rational frame rate. `.monotonic`
+records elapsed monotonic time from `beginRecording`, so an application stall
+remains a gap in playback. `.explicit` requires
+`Frame.submitAndPresentAt(timestamp_ns)` or
+`Frame.submitAndReadbackAt(allocator, timestamp_ns)`; timestamps are relative
+to the recording timeline and must increase strictly. The `At` methods may
+also override individual timestamps in `.monotonic` mode. Variable timestamp
+modes are rejected for raw H.264, which has no container timestamps.
 
 ## Frame submission and synchronization
 
@@ -577,18 +578,18 @@ submissions, or recorder fence waits may occur.
 Video sessions have coded-extent constraints, while desktop targets can resize
 at any time.
 
-Recommended initial policy:
+Available policies:
 
-- lock recording to the extent at `beginRecording`;
-- if an onscreen target resizes, letterbox or scale into the fixed encode
-  extent in the conversion shader;
-- do not recreate the video session mid-stream;
-- offscreen resize follows the same fixed-output behavior;
-- expose the chosen coded extent through recorder state/logging.
+- `.scale_and_letterbox` locks the coded extent selected at `beginRecording`;
+- `.stop_recording` records until the first target resize;
+- `.change_resolution` drains pending frames, recreates the Vulkan Video
+  session and extent-dependent resources, forces an IDR with new SPS/PPS, and
+  continues the same recording timeline.
 
-This keeps one valid sequence parameter set and avoids producing a stream whose
-resolution changes midway. A later API could allow segmented output and a new
-SPS/PPS on resize.
+For MKV, a resolution transition emits an updated Track entry and AVC
+`CodecState` on the first new-resolution block. Raw H.264 emits new Annex-B
+SPS/PPS before that IDR. The actual coded dimensions can be rounded to the
+encoder's picture-access granularity, as with the initial extent.
 
 ## Rate control and quality
 
@@ -699,7 +700,9 @@ On a Vulkan Video-capable machine:
 - record offscreen and WSI targets;
 - exercise same-family and separate-family encode queues when hardware permits;
 - record more frames than the resource-ring size;
-- record across target resize with fixed coded extent;
+- record across target resize with fixed and changing coded extents;
+- verify fixed-rate, monotonic, and explicit timestamp modes, including a
+  deliberate submission gap;
 - verify `ffprobe` recognizes H.264 profile, dimensions, and frame rate;
 - decode with `ffmpeg` and compare selected frames against screenshot readback
   within expected lossy compression tolerance;
@@ -753,8 +756,9 @@ recording works before a valid stream can be produced.
 1. Multiple requested streams start independently. Failure to admit a later
    stream does not stop streams already running.
 2. Resize behavior is selected at `beginRecording`: fixed coded extent with
-   scaling/letterboxing, or stop accepting frames and drain the recording.
-   Resize-stop is a normal stop reason rather than an encode error;
+   scaling/letterboxing, a mid-stream session/codec-state transition, or stop
+   accepting frames and drain the recording. Resize-stop is a normal stop
+   reason rather than an encode error;
    `recordingStatus` exposes `.stopped_resize` and `endRecording` finalizes it
    successfully.
 3. The recorder writes raw Annex-B H.264 or forward-only Matroska to a
@@ -765,10 +769,10 @@ recording works before a valid stream can be produced.
    unsupported settings fail instead of silently falling back.
 6. SPS/PPS policy is configurable as stream-start-only or every-IDR, defaulting
    to every IDR.
-7. Every submitted frame is encoded in submission order at the fixed frame rate
-   configured by `RecordingOptions.frame_rate`. Matroska derives block
-   timestamps from that rate. Exact wall-clock timestamps and variable-rate
-   muxing are out of scope.
+7. Every submitted frame is encoded in submission order. Fixed mode derives
+   Matroska timestamps from `RecordingOptions.frame_rate`; monotonic mode uses
+   elapsed recording time; explicit mode accepts strictly increasing
+   nanosecond timestamps from the frame submission API.
 8. GLSL and generated SPIR-V live together in the source tree. SPIR-V is
    checked in and loaded with `@embedFile`; downstream builds do not run shader
    generation. Regeneration is a documented maintainer command, not part of the
@@ -776,7 +780,7 @@ recording works before a valid stream can be produced.
 
 ## Remaining decisions
 
-None currently. Both outputs remain fixed-rate and preserve the forward-only
+None currently. Both outputs preserve the forward-only
 `std.Io.Writer` contract.
 
 ## References

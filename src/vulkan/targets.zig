@@ -76,14 +76,23 @@ pub const RenderTarget = struct {
         view: vk.ImageView,
         extent: vk.Extent2D,
         command_buffer: vk.CommandBuffer,
-        submit_fn: *const fn (?*anyopaque) anyerror!void,
-        readback_fn: *const fn (?*anyopaque, std.mem.Allocator) anyerror!Readback,
+        submit_fn: *const fn (?*anyopaque, ?u64) anyerror!void,
+        readback_fn: *const fn (?*anyopaque, std.mem.Allocator, ?u64) anyerror!Readback,
         abort_fn: *const fn (?*anyopaque) void,
         state: ?*anyopaque,
 
         pub fn submitAndPresent(self: *Frame) !void {
             const state = self.state orelse return error.FrameAlreadyFinished;
-            try self.submit_fn(state);
+            try self.submit_fn(state, null);
+            self.state = null;
+        }
+
+        /// Submits with an explicit recording timestamp, in nanoseconds on
+        /// the recording timeline. Recording must use `.timestamp_mode = .explicit`
+        /// or `.monotonic`.
+        pub fn submitAndPresentAt(self: *Frame, timestamp_ns: u64) !void {
+            const state = self.state orelse return error.FrameAlreadyFinished;
+            try self.submit_fn(state, timestamp_ns);
             self.state = null;
         }
 
@@ -92,7 +101,14 @@ pub const RenderTarget = struct {
         /// presented after the copy.
         pub fn submitAndReadback(self: *Frame, allocator: std.mem.Allocator) !Readback {
             const state = self.state orelse return error.FrameAlreadyFinished;
-            const result = try self.readback_fn(state, allocator);
+            const result = try self.readback_fn(state, allocator, null);
+            self.state = null;
+            return result;
+        }
+
+        pub fn submitAndReadbackAt(self: *Frame, allocator: std.mem.Allocator, timestamp_ns: u64) !Readback {
+            const state = self.state orelse return error.FrameAlreadyFinished;
+            const result = try self.readback_fn(state, allocator, timestamp_ns);
             self.state = null;
             return result;
         }
@@ -184,14 +200,14 @@ pub const RenderTarget = struct {
                 return self.acquireFrame(ptr);
             }
 
-            fn submitOpaque(ptr: ?*anyopaque) anyerror!void {
+            fn submitOpaque(ptr: ?*anyopaque, timestamp_ns: ?u64) anyerror!void {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
-                _ = try self.submitFrame(null);
+                _ = try self.submitFrame(null, timestamp_ns);
             }
 
-            fn readbackOpaque(ptr: ?*anyopaque, output_allocator: std.mem.Allocator) anyerror!Readback {
+            fn readbackOpaque(ptr: ?*anyopaque, output_allocator: std.mem.Allocator, timestamp_ns: ?u64) anyerror!Readback {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
-                return (try self.submitFrame(output_allocator)).?;
+                return (try self.submitFrame(output_allocator, timestamp_ns)).?;
             }
 
             fn abortOpaque(ptr: ?*anyopaque) void {
@@ -346,7 +362,7 @@ pub const RenderTarget = struct {
                 };
             }
 
-            fn submitFrame(self: *StateSelf, readback_allocator: ?std.mem.Allocator) anyerror!?Readback {
+            fn submitFrame(self: *StateSelf, readback_allocator: ?std.mem.Allocator, recording_timestamp_ns: ?u64) anyerror!?Readback {
                 const slot_index = self.active_slot orelse return error.FrameAlreadyFinished;
                 const image_index = self.active_image orelse return error.FrameAlreadyFinished;
                 const slot = &self.slots[slot_index];
@@ -366,7 +382,7 @@ pub const RenderTarget = struct {
                 var recorder_signal: vk.Semaphore = 0;
                 if (comptime build_options.vk_video) {
                     if (wants_recording) {
-                        if (try self.recorder.?.prepareFrame(slot.command_buffer, image_handle, self.extent)) |prepared| {
+                        if (try self.recorder.?.prepareFrame(slot.command_buffer, image_handle, self.extent, recording_timestamp_ns)) |prepared| {
                             recorder_prepared = true;
                             recorder_signal = prepared.signal_semaphore;
                         }
@@ -545,8 +561,8 @@ pub const RenderTarget = struct {
                         });
                         self.extent = wanted;
                     } else if (self.extent.width != wanted.width or self.extent.height != wanted.height) {
-                        if (comptime build_options.vk_video) if (self.recorder) |*recorder| recorder.noticeResize(wanted);
                         try self.device.deviceWaitIdle();
+                        if (comptime build_options.vk_video) if (self.recorder) |*recorder| try recorder.noticeResize(wanted);
                         try self.ring.?.resize(wanted);
                         self.extent = wanted;
                     }
@@ -557,8 +573,8 @@ pub const RenderTarget = struct {
                 const wanted_extent = chooseExtent(capabilities, wanted);
                 if (wanted_extent.width == 0 or wanted_extent.height == 0) return error.FrameSkipped;
                 if (self.swapchain == 0 or self.recreate_pending or self.extent.width != wanted_extent.width or self.extent.height != wanted_extent.height) {
-                    if (comptime build_options.vk_video) if (self.recorder) |*recorder| recorder.noticeResize(wanted_extent);
                     if (self.swapchain != 0) try self.device.deviceWaitIdle();
+                    if (comptime build_options.vk_video) if (self.recorder) |*recorder| try recorder.noticeResize(wanted_extent);
                     self.destroySwapchain();
                     try self.createSwapchain(capabilities, wanted_extent);
                 }
@@ -822,6 +838,7 @@ fn normalizeRecordingOptions(options: anytype) Video.RecordingOptions {
         .resize = if (@hasField(Options, "resize")) options.resize else .scale_and_letterbox,
         .parameter_sets = if (@hasField(Options, "parameter_sets")) options.parameter_sets else .every_idr,
         .format = if (@hasField(Options, "format")) options.format else .h264,
+        .timestamp_mode = if (@hasField(Options, "timestamp_mode")) options.timestamp_mode else .fixed_rate,
     };
 }
 
