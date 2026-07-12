@@ -57,6 +57,12 @@ pub const QueryH264SupportOptions = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
 };
 
+pub const DeviceRequirementsOptions = struct {
+    graphics_queue_family: u32,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    queue_priority: f32 = 1.0,
+};
+
 pub const H264Support = struct {
     available: bool = false,
     reason: ?UnsupportedReason = null,
@@ -84,15 +90,14 @@ pub const H264Support = struct {
 
     const capabilities_required_extensions = required_device_extensions;
 
-    pub fn deviceRequirements(self: H264Support, options: anytype) !DeviceRequirements {
+    pub fn deviceRequirements(self: H264Support, options: DeviceRequirementsOptions) !DeviceRequirements {
         if (!self.available) return error.VideoEncodeUnsupported;
         const encode_family = self.encode_queue_family orelse return error.MissingVideoEncodeQueue;
-        const allocator = if (@hasField(@TypeOf(options), "allocator")) options.allocator else std.heap.page_allocator;
         return DeviceRequirements.init(
-            allocator,
+            options.allocator,
             options.graphics_queue_family,
             encode_family,
-            if (@hasField(@TypeOf(options), "queue_priority")) options.queue_priority else 1.0,
+            options.queue_priority,
         );
     }
 };
@@ -130,17 +135,16 @@ pub const DeviceRequirements = struct {
     }
 };
 
-pub fn queryH264Support(options: anytype) !H264Support {
-    const opts = normalizeQueryOptions(options);
-    const instance_handle = toInstance(opts.instance.handle);
-    const physical_device = toPhysicalDevice(opts.physical_device);
-    const get_instance_proc_addr: vk.PfnGetInstanceProcAddr = @ptrCast(opts.instance.get_instance_proc_addr);
+pub fn queryH264Support(options: QueryH264SupportOptions) !H264Support {
+    const instance_handle = toInstance(options.instance.handle);
+    const physical_device = toPhysicalDevice(options.physical_device);
+    const get_instance_proc_addr: vk.PfnGetInstanceProcAddr = @ptrCast(options.instance.get_instance_proc_addr);
     const instance = vk.InstanceWrapper.load(instance_handle, get_instance_proc_addr);
 
     var support = H264Support{};
     if (instance.dispatch.vkEnumerateDeviceExtensionProperties == null) return error.VulkanFunctionUnavailable;
-    const extensions = try instance.enumerateDeviceExtensionPropertiesAlloc(physical_device, null, opts.allocator);
-    defer opts.allocator.free(extensions);
+    const extensions = try instance.enumerateDeviceExtensionPropertiesAlloc(physical_device, null, options.allocator);
+    defer options.allocator.free(extensions);
     if (!hasRequiredDeviceExtensions(extensions)) {
         support.reason = .missing_device_extension;
         return support;
@@ -153,7 +157,7 @@ pub fn queryH264Support(options: anytype) !H264Support {
         return error.VulkanFunctionUnavailable;
     }
 
-    support.encode_queue_family = try findEncodeQueueFamily(instance, physical_device, opts.allocator);
+    support.encode_queue_family = try findEncodeQueueFamily(instance, physical_device, options.allocator);
     if (support.encode_queue_family == null) {
         support.reason = .no_h264_encode_queue;
         return support;
@@ -197,7 +201,7 @@ pub fn queryH264Support(options: anytype) !H264Support {
     support.tuning_modes.high_quality = tuningModeSupported(instance, physical_device, selected.profile, .high_quality_khr);
 
     support.coded_extent = alignCodedExtent(
-        .{ .width = opts.extent.width, .height = opts.extent.height },
+        .{ .width = options.extent.width, .height = options.extent.height },
         support.min_extent,
         support.max_extent,
         support.picture_access_granularity,
@@ -215,7 +219,7 @@ pub fn queryH264Support(options: anytype) !H264Support {
         &profile_info.profile,
         .{ .storage_bit = true, .video_encode_src_bit_khr = true },
         true,
-        opts.allocator,
+        options.allocator,
     );
     if (support.input_format == null) {
         support.reason = .no_encode_input_format;
@@ -227,7 +231,7 @@ pub fn queryH264Support(options: anytype) !H264Support {
         &profile_info.profile,
         .{ .video_encode_dpb_bit_khr = true },
         false,
-        opts.allocator,
+        options.allocator,
     );
     if (support.dpb_format == null) {
         support.reason = .no_dpb_format;
@@ -244,15 +248,6 @@ pub fn queryH264Support(options: anytype) !H264Support {
     support.available = true;
     support.reason = null;
     return support;
-}
-
-fn normalizeQueryOptions(options: anytype) QueryH264SupportOptions {
-    return .{
-        .instance = options.instance,
-        .physical_device = options.physical_device,
-        .extent = .{ .width = options.extent.width, .height = options.extent.height },
-        .allocator = if (@hasField(@TypeOf(options), "allocator")) options.allocator else std.heap.page_allocator,
-    };
 }
 
 const ProfileChain = struct {

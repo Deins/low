@@ -411,8 +411,8 @@ fn timestampTicks(timestamp_ns: u64, scale_ns: u64) u64 {
     return quotient + @intFromBool(timestamp_ns % scale_ns >= (scale_ns + 1) / 2);
 }
 
-fn checkedAdd(a: u64, b: anytype) !u64 {
-    return std.math.add(u64, a, @intCast(b)) catch error.MatroskaElementTooLarge;
+fn checkedAdd(a: u64, b: u64) !u64 {
+    return std.math.add(u64, a, b) catch error.MatroskaElementTooLarge;
 }
 
 fn idLength(id: u32) usize {
@@ -444,8 +444,8 @@ fn uintElementLength(id: u32, value: u64) !u64 {
     return elementLength(id, uintLength(value));
 }
 
-fn binaryElementLength(id: u32, length: anytype) !u64 {
-    return elementLength(id, @intCast(length));
+fn binaryElementLength(id: u32, length: u64) !u64 {
+    return elementLength(id, length);
 }
 
 fn writeId(writer: *std.Io.Writer, id: u32) !void {
