@@ -28,6 +28,12 @@ does not capture the desktop, other application windows, or audio. Frames are
 converted to a video input format on the GPU, encoded with Vulkan Video, and
 written to a caller-owned `std.Io.Writer`.
 
+The current recorder source contract is `VK_FORMAT_B8G8R8A8_UNORM` (BGRA8).
+Render targets may use packed 10-bit UNORM formats for rendering, but recording
+must be disabled for those targets. Supporting 10-bit render sources would
+require an explicit source conversion path and does not make the existing
+8-bit 4:2:0 codec profiles produce 10-bit video.
+
 ## Before creating the Vulkan device
 
 Vulkan Video extensions and an encode queue must be enabled when the device is

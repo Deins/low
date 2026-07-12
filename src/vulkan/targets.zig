@@ -33,6 +33,10 @@ pub const RenderTarget = struct {
         graphics_queue: vk.Queue,
         graphics_queue_family: u32,
         command_pool: vk.CommandPool,
+        /// Exact render-target format. A WSI target selects the first surface
+        /// format with this VkFormat; it does not silently substitute another
+        /// format. Packed 10-bit formats are therefore usable when the
+        /// application supplies one advertised by the surface.
         color_format: vk.Format,
         frames_in_flight: u32,
         memory_allocator: ?MemoryAllocator = null,
@@ -43,6 +47,7 @@ pub const RenderTarget = struct {
         InvalidFramesInFlight,
         InvalidImageCount,
         UnsupportedSurfaceFormat,
+        UnsupportedSurfaceUsage,
         QueueFamilyCannotPresent,
         FrameAlreadyAcquired,
         FrameAlreadyFinished,
@@ -381,7 +386,7 @@ pub const RenderTarget = struct {
                 const slot = &self.slots[slot_index];
                 const image_handle = self.image(image_index);
                 if (readback_allocator != null) {
-                    if (self.color_format != vk.format.b8g8r8a8_unorm) return error.ReadbackUnavailable;
+                    if (!readbackFormatSupported(self.color_format)) return error.ReadbackUnavailable;
                     try self.ensureReadbackBuffer(slot, @as(u64, self.extent.width) * self.extent.height * 4);
                 }
                 const wants_recording = if (comptime build_options.vk_video)
@@ -509,7 +514,8 @@ pub const RenderTarget = struct {
                     errdefer output_allocator.free(pixels);
                     const mapped = try self.device.mapMemory(slot.readback_memory, 0, len);
                     defer self.device.unmapMemory(slot.readback_memory);
-                    @memcpy(pixels, @as([*]const u8, @ptrCast(mapped))[0..len]);
+                    const source = @as([*]const u8, @ptrCast(mapped))[0..len];
+                    convertReadback(self.color_format, source, pixels);
                     return .{ .allocator = output_allocator, .pixels = pixels, .extent = self.extent };
                 }
                 return null;
@@ -604,6 +610,9 @@ pub const RenderTarget = struct {
                     }
                 }
                 const selected_format = format orelse return error.UnsupportedSurfaceFormat;
+                if (capabilities.supported_usage_flags & vk.image_usage.transfer_src_bit == 0) {
+                    return error.UnsupportedSurfaceUsage;
+                }
                 var image_count = capabilities.min_image_count + 1;
                 if (capabilities.max_image_count != 0) image_count = @min(image_count, capabilities.max_image_count);
                 self.swapchain = try self.device.createSwapchainKHR(&.{
@@ -981,6 +990,41 @@ pub const OffscreenImageRing = struct {
         self.layouts = &.{};
     }
 };
+
+fn readbackFormatSupported(format: vk.Format) bool {
+    return format == vk.format.b8g8r8a8_unorm or
+        format == vk.format.a2b10g10r10_unorm_pack32 or
+        format == vk.format.a2r10g10b10_unorm_pack32;
+}
+
+fn convertReadback(format: vk.Format, source: []const u8, destination: []u8) void {
+    if (format == vk.format.b8g8r8a8_unorm) {
+        @memcpy(destination, source);
+        return;
+    }
+
+    std.debug.assert(source.len == destination.len);
+    for (0..source.len / 4) |index| {
+        const packed_value = std.mem.readInt(u32, source[index * 4 ..][0..4], .little);
+        const r: u32 = if (format == vk.format.a2b10g10r10_unorm_pack32) packed_value & 0x3ff else (packed_value >> 20) & 0x3ff;
+        const g: u32 = (packed_value >> 10) & 0x3ff;
+        const b: u32 = if (format == vk.format.a2b10g10r10_unorm_pack32) (packed_value >> 20) & 0x3ff else packed_value & 0x3ff;
+        const a: u32 = (packed_value >> 30) & 0x3;
+        destination[index * 4 + 0] = @intCast((b * 255 + 511) / 1023);
+        destination[index * 4 + 1] = @intCast((g * 255 + 511) / 1023);
+        destination[index * 4 + 2] = @intCast((r * 255 + 511) / 1023);
+        destination[index * 4 + 3] = @intCast((a * 255 + 1) / 3);
+    }
+}
+
+test "packed 10-bit readback conversion" {
+    const packed_value: u32 = 1023 | (512 << 10) | (3 << 30);
+    var source: [4]u8 = undefined;
+    std.mem.writeInt(u32, &source, packed_value, .little);
+    var destination: [4]u8 = undefined;
+    convertReadback(vk.format.a2b10g10r10_unorm_pack32, &source, &destination);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 128, 255, 255 }, &destination);
+}
 
 fn chooseExtent(capabilities: vk.SurfaceCapabilitiesKHR, requested: vk.Extent2D) vk.Extent2D {
     if (capabilities.current_extent.width != std.math.maxInt(u32)) return capabilities.current_extent;

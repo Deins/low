@@ -8,6 +8,20 @@ const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
 const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
 const triangle_half_size_px: f32 = 70.0;
 
+const ColorFormat = enum {
+    bgra8,
+    a2b10g10r10,
+    a2r10g10b10,
+
+    fn vkFormat(self: ColorFormat) vk.Format {
+        return switch (self) {
+            .bgra8 => .b8g8r8a8_unorm,
+            .a2b10g10r10 => .a2b10g10r10_unorm_pack32,
+            .a2r10g10b10 => .a2r10g10b10_unorm_pack32,
+        };
+    }
+};
+
 // Recording
 const recording_bitrate: u32 = 12_000_000;
 const recording_gop_size: u32 = 60;
@@ -62,6 +76,7 @@ const Renderer = struct {
         instance: vk.InstanceProxy,
         low_instance_input: low.vulkan.Instance,
         presentation: bool,
+        color_format: vk.Format,
         recording_codec: ?video.Codec,
     ) !Renderer {
         const selection = try findDevice(gpa, instance, &low_instance_input, recording_codec);
@@ -133,8 +148,6 @@ const Renderer = struct {
             .queue_family_index = selection.graphics_queue_family,
         }, null);
         errdefer device.destroyCommandPool(command_pool, null);
-
-        const color_format: vk.Format = .b8g8r8a8_unorm;
 
         const pipeline_layout = try createPipelineLayout(device);
         errdefer device.destroyPipelineLayout(pipeline_layout, null);
@@ -345,6 +358,9 @@ pub fn main(init: std.process.Init) !void {
 
     const app_options = try parseOptions(args);
     const recording_requested = app_options.record;
+    if (recording_requested and app_options.color_format != .bgra8) {
+        return error.VideoRecordingRequiresBgra8;
+    }
 
     var first_record_file: ?std.Io.File = null;
     var second_record_file: ?std.Io.File = null;
@@ -398,6 +414,7 @@ pub fn main(init: std.process.Init) !void {
         instance,
         low_instance,
         context.backendKind() != .offscreen,
+        app_options.color_format.vkFormat(),
         if (recording_requested) app_options.record_codec else null,
     ) catch |err| {
         if (recording_requested) {
@@ -665,6 +682,7 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
 
 const AppOptions = struct {
     backend: low.BackendRequest = .auto,
+    color_format: ColorFormat = .bgra8,
     record: bool = false,
     record_codec: video.Codec = .av1,
     frames: ?u32 = null,
@@ -681,6 +699,9 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
             const name = arg["--desktop=".len..];
             result.backend = std.meta.stringToEnum(low.BackendRequest, name) orelse return error.InvalidDesktop;
             desktop_selected = true;
+        } else if (std.mem.startsWith(u8, arg, "--color-format=")) {
+            const name = arg["--color-format=".len..];
+            result.color_format = std.meta.stringToEnum(ColorFormat, name) orelse return error.InvalidColorFormat;
         } else if (std.mem.eql(u8, arg, "--record")) {
             result.record = true;
         } else if (std.mem.startsWith(u8, arg, "--record-codec=")) {

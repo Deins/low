@@ -85,6 +85,8 @@ pub const Format = i32;
 pub const format = struct {
     pub const @"undefined": Format = 0;
     pub const b8g8r8a8_unorm: Format = 44;
+    pub const a2r10g10b10_unorm_pack32: Format = 58;
+    pub const a2b10g10r10_unorm_pack32: Format = 64;
 };
 
 pub const ColorSpaceKHR = i32;

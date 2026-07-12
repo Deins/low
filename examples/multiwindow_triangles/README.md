@@ -23,6 +23,16 @@ zig build run
 zig build run -- --desktop=x11
 ```
 
+The render format defaults to 8-bit BGRA. Select a packed 10-bit UNORM
+surface format explicitly when the window system advertises it:
+
+```sh
+zig build run -- --color-format=a2b10g10r10
+```
+
+`a2r10g10b10` is also accepted. The selection is exact; the example reports
+an unsupported-surface-format error instead of silently falling back.
+
 ## Recording
 
 `--record` creates independent AV1 Matroska recordings for both windows:
@@ -47,6 +57,10 @@ changes.
 desktop contents and it does not record audio. The default `.mkv` format is the
 right choice for most uses. Always stop recording before closing its writer so
 the remaining GPU work and container data are finalized.
+
+Recording currently requires the default BGRA8 render format. The Vulkan Video
+path converts that 8-bit source to the selected codec's 8-bit 4:2:0 input; use
+the 10-bit formats for rendering without `--record`.
 
 See the [Vulkan Video recording guide](../../docs/recording.md) for setup,
 timing modes, quality tradeoffs, resizing, and the recording lifecycle.
