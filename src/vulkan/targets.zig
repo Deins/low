@@ -5,6 +5,12 @@
 const std = @import("std");
 const vk = @import("api.zig");
 const Vulkan = @import("../vulkan.zig");
+const build_options = @import("build_options");
+const Video = if (build_options.vk_video) @import("video.zig") else struct {
+    pub const VideoDevice = opaque {};
+    pub const VideoRecorder = struct {};
+    pub const RecordingStatus = void;
+};
 
 pub const MemoryAllocator = struct {
     context: ?*anyopaque = null,
@@ -26,6 +32,7 @@ pub const RenderTarget = struct {
         FrameSkipped,
         FrameOutOfDate,
         ReadbackUnavailable,
+        VideoDeviceUnavailable,
     };
 
     pub const Readback = struct {
@@ -100,6 +107,12 @@ pub const RenderTarget = struct {
     state: *anyopaque,
     deinit_fn: *const fn (*anyopaque) void,
     acquire_fn: *const fn (*anyopaque) anyerror!Frame,
+    begin_recording_fn: *const fn (*anyopaque, *const anyopaque) anyerror!void,
+    end_recording_fn: *const fn (*anyopaque) anyerror!void,
+    recording_status_fn: *const fn (*anyopaque, *anyopaque) void,
+    is_recording_fn: *const fn (*anyopaque) bool,
+    release_recording_fn: *const fn (*anyopaque) void,
+    recording_extent_fn: *const fn (*anyopaque, *anyopaque) void,
 
     pub fn init(allocator: std.mem.Allocator, options: anytype) !Self {
         const OptionsType = @TypeOf(options);
@@ -114,7 +127,6 @@ pub const RenderTarget = struct {
             const Slot = struct {
                 command_buffer: vk.CommandBuffer = null,
                 image_available: vk.Semaphore = 0,
-                render_finished: vk.Semaphore = 0,
                 fence: vk.Fence = 0,
                 readback_buffer: vk.Buffer = 0,
                 readback_memory: vk.DeviceMemory = 0,
@@ -139,6 +151,7 @@ pub const RenderTarget = struct {
             swapchain_images: []vk.Image = &.{},
             swapchain_views: []vk.ImageView = &.{},
             swapchain_layouts: []vk.ImageLayout = &.{},
+            swapchain_render_finished: []vk.Semaphore = &.{},
             extent: vk.Extent2D = .{ .width = 0, .height = 0 },
             recreate_pending: bool = false,
             ring: ?OffscreenImageRing = null,
@@ -146,10 +159,17 @@ pub const RenderTarget = struct {
             active_slot: ?u32 = null,
             active_image: ?u32 = null,
             submitted: bool = false,
+            video_device: ?*Video.VideoDevice = null,
+            video_device_attached: bool = false,
+            recorder: ?Video.VideoRecorder = null,
 
             fn deinitOpaque(ptr: *anyopaque) void {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr));
                 self.device.deviceWaitIdle() catch {};
+                if (comptime build_options.vk_video) {
+                    if (self.recorder) |*recorder| recorder.deinit();
+                    if (self.video_device_attached) self.video_device.?.detachTarget();
+                }
                 self.destroyTarget();
                 self.destroySync();
                 if (self.surface != 0) {
@@ -177,6 +197,61 @@ pub const RenderTarget = struct {
             fn abortOpaque(ptr: ?*anyopaque) void {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
                 self.abortFrame();
+            }
+
+            fn beginRecordingOpaque(ptr: *anyopaque, options_ptr: *const anyopaque) anyerror!void {
+                if (comptime !build_options.vk_video) return error.VideoDeviceUnavailable;
+                const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                if (self.active_slot != null) return error.FrameAlreadyAcquired;
+                const video_device = self.video_device orelse return error.VideoDeviceUnavailable;
+                try self.ensureTarget();
+                if (self.recorder == null) self.recorder = Video.VideoRecorder.init(
+                    self.allocator,
+                    video_device,
+                    self.frames_in_flight,
+                    self.color_format,
+                );
+                const recording_options: *const Video.RecordingOptions = @ptrCast(@alignCast(options_ptr));
+                try self.recorder.?.begin(self.extent, recording_options.*);
+            }
+
+            fn endRecordingOpaque(ptr: *anyopaque) anyerror!void {
+                if (comptime !build_options.vk_video) return error.VideoDeviceUnavailable;
+                const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                if (self.active_slot != null) return error.FrameAlreadyAcquired;
+                if (self.recorder) |*recorder| try recorder.end();
+            }
+
+            fn recordingStatusOpaque(ptr: *anyopaque, output: *anyopaque) void {
+                if (comptime build_options.vk_video) {
+                    const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                    const result: *?Video.RecordingStatus = @ptrCast(@alignCast(output));
+                    result.* = if (self.recorder) |*recorder| recorder.status() else null;
+                }
+            }
+
+            fn isRecordingOpaque(ptr: *anyopaque) bool {
+                if (comptime !build_options.vk_video) return false;
+                const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                return if (self.recorder) |*recorder| recorder.isRecording() else false;
+            }
+
+            fn releaseRecordingOpaque(ptr: *anyopaque) void {
+                if (comptime build_options.vk_video) {
+                    const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                    if (self.recorder) |*recorder| recorder.releaseResources();
+                }
+            }
+
+            fn recordingExtentOpaque(ptr: *anyopaque, output: *anyopaque) void {
+                if (comptime build_options.vk_video) {
+                    const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                    const result: *?vk.Extent2D = @ptrCast(@alignCast(output));
+                    result.* = if (self.recorder) |*recorder| if (recorder.codedExtent()) |extent|
+                        .{ .width = extent.width, .height = extent.height }
+                    else
+                        null else null;
+                }
             }
 
             fn allocateDefaultMemory(context: ?*anyopaque, _: vk.Image, requirements: vk.MemoryRequirements) anyerror!vk.DeviceMemory {
@@ -280,9 +355,23 @@ pub const RenderTarget = struct {
                     if (self.color_format != vk.format.b8g8r8a8_unorm) return error.ReadbackUnavailable;
                     try self.ensureReadbackBuffer(slot, @as(u64, self.extent.width) * self.extent.height * 4);
                 }
-                const copy_image = readback_allocator != null;
+                const wants_recording = if (comptime build_options.vk_video)
+                    if (self.recorder) |*recorder| recorder.isRecording() else false
+                else
+                    false;
+                const copy_image = readback_allocator != null or wants_recording;
                 const post_render_layout: vk.ImageLayout = if (copy_image or self.surface == 0) .transfer_src_optimal else .present_src_khr;
                 transitionImage(self.device, slot.command_buffer, image_handle, .color_attachment_optimal, post_render_layout, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit, if (post_render_layout == .transfer_src_optimal) vk.pipeline_stage.transfer_bit else vk.pipeline_stage.bottom_of_pipe_bit, if (post_render_layout == .transfer_src_optimal) vk.access.transfer_read_bit else 0);
+                var recorder_prepared = false;
+                var recorder_signal: vk.Semaphore = 0;
+                if (comptime build_options.vk_video) {
+                    if (wants_recording) {
+                        if (try self.recorder.?.prepareFrame(slot.command_buffer, image_handle, self.extent)) |prepared| {
+                            recorder_prepared = true;
+                            recorder_signal = prepared.signal_semaphore;
+                        }
+                    }
+                }
                 if (readback_allocator != null) {
                     self.device.cmdCopyImageToBuffer(slot.command_buffer, image_handle, .transfer_src_optimal, slot.readback_buffer, &.{
                         .buffer_offset = 0,
@@ -303,14 +392,17 @@ pub const RenderTarget = struct {
                         .offset = 0,
                         .size = @as(u64, self.extent.width) * self.extent.height * 4,
                     });
-                    if (self.surface != 0) transitionImage(self.device, slot.command_buffer, image_handle, .transfer_src_optimal, .present_src_khr, vk.pipeline_stage.transfer_bit, vk.access.transfer_read_bit, vk.pipeline_stage.bottom_of_pipe_bit, 0);
                 }
-                try self.device.endCommandBuffer(slot.command_buffer);
+                if (self.surface != 0 and post_render_layout == .transfer_src_optimal) transitionImage(self.device, slot.command_buffer, image_handle, .transfer_src_optimal, .present_src_khr, vk.pipeline_stage.transfer_bit, vk.access.transfer_read_bit, vk.pipeline_stage.bottom_of_pipe_bit, 0);
+                self.device.endCommandBuffer(slot.command_buffer) catch |err| {
+                    if (comptime build_options.vk_video) if (recorder_prepared) self.recorder.?.abortPrepared(err);
+                    return err;
+                };
 
                 const command_buffers = [_]vk.CommandBuffer{slot.command_buffer};
                 var wait_semaphores: [1]vk.Semaphore = undefined;
                 var wait_stages: [1]vk.PipelineStageFlags = undefined;
-                var signal_semaphores: [1]vk.Semaphore = undefined;
+                var signal_semaphores: [2]vk.Semaphore = undefined;
                 var submit_info = vk.SubmitInfo{
                     .s_type = .submit_info,
                     .p_next = null,
@@ -325,19 +417,35 @@ pub const RenderTarget = struct {
                 if (self.surface != 0) {
                     wait_semaphores[0] = slot.image_available;
                     wait_stages[0] = vk.pipeline_stage.color_attachment_output_bit;
-                    signal_semaphores[0] = slot.render_finished;
+                    // Presentation waits can outlive the graphics frame slot.
+                    // Index this semaphore by acquired swapchain image so it
+                    // is only reused after that image has been acquired again.
+                    signal_semaphores[0] = self.swapchain_render_finished[image_index];
                     submit_info.wait_semaphore_count = 1;
                     submit_info.p_wait_semaphores = wait_semaphores[0..].ptr;
                     submit_info.p_wait_dst_stage_mask = wait_stages[0..].ptr;
                     submit_info.signal_semaphore_count = 1;
                     submit_info.p_signal_semaphores = signal_semaphores[0..].ptr;
                 }
-                try self.device.resetFences(&.{slot.fence});
-                try self.device.queueSubmit(self.graphics_queue, &submit_info, slot.fence);
+                if (recorder_prepared) {
+                    const index: usize = submit_info.signal_semaphore_count;
+                    signal_semaphores[index] = recorder_signal;
+                    submit_info.signal_semaphore_count += 1;
+                    submit_info.p_signal_semaphores = signal_semaphores[0..].ptr;
+                }
+                self.device.resetFences(&.{slot.fence}) catch |err| {
+                    if (comptime build_options.vk_video) if (recorder_prepared) self.recorder.?.abortPrepared(err);
+                    return err;
+                };
+                self.device.queueSubmit(self.graphics_queue, &submit_info, slot.fence) catch |err| {
+                    if (comptime build_options.vk_video) if (recorder_prepared) self.recorder.?.abortPrepared(err);
+                    return err;
+                };
                 self.submitted = true;
                 self.setImageLayout(image_index, if (self.surface != 0) .present_src_khr else .transfer_src_optimal);
                 self.active_slot = null;
 
+                var present_error: ?anyerror = null;
                 if (self.surface != 0) {
                     const swapchains = [_]vk.SwapchainKHR{self.swapchain};
                     const indices = [_]u32{image_index};
@@ -351,14 +459,20 @@ pub const RenderTarget = struct {
                         .p_image_indices = indices[0..].ptr,
                         .p_results = null,
                     }) catch |err| switch (err) {
-                        error.OutOfDateKHR => {
+                        error.OutOfDateKHR => blk: {
                             self.recreate_pending = true;
-                            return error.FrameOutOfDate;
+                            present_error = error.FrameOutOfDate;
+                            break :blk .success;
                         },
-                        else => return err,
+                        else => blk: {
+                            present_error = err;
+                            break :blk .success;
+                        },
                     };
                     if (present == .suboptimal_khr) self.recreate_pending = true;
                 }
+                if (comptime build_options.vk_video) if (recorder_prepared) try self.recorder.?.submitPrepared();
+                if (present_error) |err| return err;
                 if (readback_allocator) |output_allocator| {
                     _ = try self.device.waitForFences(&.{slot.fence}, true, std.math.maxInt(u64));
                     const len: usize = @intCast(@as(u64, self.extent.width) * self.extent.height * 4);
@@ -431,6 +545,7 @@ pub const RenderTarget = struct {
                         });
                         self.extent = wanted;
                     } else if (self.extent.width != wanted.width or self.extent.height != wanted.height) {
+                        if (comptime build_options.vk_video) if (self.recorder) |*recorder| recorder.noticeResize(wanted);
                         try self.device.deviceWaitIdle();
                         try self.ring.?.resize(wanted);
                         self.extent = wanted;
@@ -442,6 +557,7 @@ pub const RenderTarget = struct {
                 const wanted_extent = chooseExtent(capabilities, wanted);
                 if (wanted_extent.width == 0 or wanted_extent.height == 0) return error.FrameSkipped;
                 if (self.swapchain == 0 or self.recreate_pending or self.extent.width != wanted_extent.width or self.extent.height != wanted_extent.height) {
+                    if (comptime build_options.vk_video) if (self.recorder) |*recorder| recorder.noticeResize(wanted_extent);
                     if (self.swapchain != 0) try self.device.deviceWaitIdle();
                     self.destroySwapchain();
                     try self.createSwapchain(capabilities, wanted_extent);
@@ -485,8 +601,11 @@ pub const RenderTarget = struct {
                 self.swapchain_images = try self.device.getSwapchainImagesAllocKHR(self.swapchain, self.allocator);
                 self.swapchain_views = try self.allocator.alloc(vk.ImageView, self.swapchain_images.len);
                 self.swapchain_layouts = try self.allocator.alloc(vk.ImageLayout, self.swapchain_images.len);
+                self.swapchain_render_finished = try self.allocator.alloc(vk.Semaphore, self.swapchain_images.len);
                 @memset(self.swapchain_views, 0);
                 @memset(self.swapchain_layouts, .undefined);
+                @memset(self.swapchain_render_finished, 0);
+                for (self.swapchain_render_finished) |*semaphore| semaphore.* = try self.device.createSemaphore();
                 for (self.swapchain_images, self.swapchain_views) |swap_image, *view| {
                     view.* = try self.device.createImageView(&.{
                         .s_type = .image_view_create_info,
@@ -517,13 +636,16 @@ pub const RenderTarget = struct {
 
             fn destroySwapchain(self: *StateSelf) void {
                 for (self.swapchain_views) |view| if (view != 0) self.device.destroyImageView(view);
+                for (self.swapchain_render_finished) |semaphore| if (semaphore != 0) self.device.destroySemaphore(semaphore);
                 if (self.swapchain_views.len != 0) self.allocator.free(self.swapchain_views);
                 if (self.swapchain_images.len != 0) self.allocator.free(self.swapchain_images);
                 if (self.swapchain_layouts.len != 0) self.allocator.free(self.swapchain_layouts);
+                if (self.swapchain_render_finished.len != 0) self.allocator.free(self.swapchain_render_finished);
                 if (self.swapchain != 0) self.device.destroySwapchainKHR(self.swapchain);
                 self.swapchain_views = &.{};
                 self.swapchain_images = &.{};
                 self.swapchain_layouts = &.{};
+                self.swapchain_render_finished = &.{};
                 self.swapchain = 0;
                 self.extent = .{ .width = 0, .height = 0 };
             }
@@ -544,7 +666,6 @@ pub const RenderTarget = struct {
                 for (self.slots, command_buffers) |*slot, command_buffer| {
                     slot.command_buffer = command_buffer;
                     slot.image_available = try self.device.createSemaphore();
-                    slot.render_finished = try self.device.createSemaphore();
                     slot.fence = try self.device.createFence(true);
                 }
             }
@@ -554,7 +675,6 @@ pub const RenderTarget = struct {
                     if (slot.readback_buffer != 0) self.device.destroyBuffer(slot.readback_buffer);
                     if (slot.readback_memory != 0) self.device.freeMemory(slot.readback_memory);
                     if (slot.fence != 0) self.device.destroyFence(slot.fence);
-                    if (slot.render_finished != 0) self.device.destroySemaphore(slot.render_finished);
                     if (slot.image_available != 0) self.device.destroySemaphore(slot.image_available);
                 }
                 for (self.slots) |slot| if (slot.command_buffer != null) {
@@ -597,8 +717,14 @@ pub const RenderTarget = struct {
             .color_format = options.color_format,
             .memory_allocator = if (@hasField(OptionsType, "memory_allocator")) options.memory_allocator else null,
             .frames_in_flight = options.frames_in_flight,
+            .video_device = if (comptime build_options.vk_video) if (@hasField(OptionsType, "video_device")) options.video_device else null else null,
         };
         errdefer State.deinitOpaque(@ptrCast(state));
+
+        if (comptime build_options.vk_video) if (state.video_device) |video_device| {
+            video_device.attachTarget();
+            state.video_device_attached = true;
+        };
 
         state.memory_properties = state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
         if (options.context.backendKind() != .offscreen) {
@@ -623,6 +749,12 @@ pub const RenderTarget = struct {
             .state = state,
             .deinit_fn = State.deinitOpaque,
             .acquire_fn = State.acquireOpaque,
+            .begin_recording_fn = State.beginRecordingOpaque,
+            .end_recording_fn = State.endRecordingOpaque,
+            .recording_status_fn = State.recordingStatusOpaque,
+            .is_recording_fn = State.isRecordingOpaque,
+            .release_recording_fn = State.releaseRecordingOpaque,
+            .recording_extent_fn = State.recordingExtentOpaque,
         };
     }
 
@@ -634,7 +766,63 @@ pub const RenderTarget = struct {
     pub fn acquire(self: *Self) !Frame {
         return self.acquire_fn(self.state);
     }
+
+    pub fn beginRecording(self: *Self, options: anytype) !void {
+        if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
+        const normalized = normalizeRecordingOptions(options);
+        return self.begin_recording_fn(self.state, @ptrCast(&normalized));
+    }
+
+    pub fn endRecording(self: *Self) !void {
+        if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
+        return self.end_recording_fn(self.state);
+    }
+
+    pub fn recordingStatus(self: *Self) ?Video.RecordingStatus {
+        if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
+        var result: ?Video.RecordingStatus = null;
+        self.recording_status_fn(self.state, @ptrCast(&result));
+        return result;
+    }
+
+    pub fn isRecording(self: *Self) bool {
+        if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
+        return self.is_recording_fn(self.state);
+    }
+
+    pub fn releaseRecordingResources(self: *Self) void {
+        if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
+        self.release_recording_fn(self.state);
+    }
+
+    pub fn recordingExtent(self: *Self) ?vk.Extent2D {
+        if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
+        var result: ?vk.Extent2D = null;
+        self.recording_extent_fn(self.state, @ptrCast(&result));
+        return result;
+    }
 };
+
+fn normalizeRecordingOptions(options: anytype) Video.RecordingOptions {
+    const Options = @TypeOf(options);
+    if (!@hasField(Options, "allocator") or !@hasField(Options, "io") or !@hasField(Options, "writer")) {
+        @compileError("beginRecording requires allocator, io, and writer");
+    }
+    return .{
+        .allocator = options.allocator,
+        .io = options.io,
+        .writer = options.writer,
+        .frame_rate = if (@hasField(Options, "frame_rate")) .{
+            .numerator = options.frame_rate.numerator,
+            .denominator = options.frame_rate.denominator,
+        } else .{ .numerator = 60, .denominator = 1 },
+        .bitrate = if (@hasField(Options, "bitrate")) options.bitrate else 12_000_000,
+        .gop_size = if (@hasField(Options, "gop_size")) options.gop_size else 60,
+        .quality = if (@hasField(Options, "quality")) options.quality else .balanced,
+        .resize = if (@hasField(Options, "resize")) options.resize else .scale_and_letterbox,
+        .parameter_sets = if (@hasField(Options, "parameter_sets")) options.parameter_sets else .every_idr,
+    };
+}
 
 pub const VulkanWindow = RenderTarget;
 pub const Target = RenderTarget;

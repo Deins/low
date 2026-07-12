@@ -94,11 +94,13 @@ pub const Instance = struct {
     };
 
     handle: api.InstanceHandle,
+    get_instance_proc_addr: api.PfnGetInstanceProcAddr,
     dispatch: Dispatch,
 
     fn init(loader: *const Loader, handle: api.InstanceHandle) Loader.Error!Self {
         return .{
             .handle = handle,
+            .get_instance_proc_addr = loader.get_instance_proc_addr,
             .dispatch = .{
                 .get_device_proc_addr = try loader.loadInstance(handle, api.PfnGetDeviceProcAddr, "vkGetDeviceProcAddr"),
                 .destroy_instance = try loader.loadInstance(handle, api.PfnDestroyInstance, "vkDestroyInstance"),
@@ -480,6 +482,12 @@ pub const Device = struct {
 pub fn targets() type {
     if (!build_options.vk_extras) @compileError("enable -Dvk_extras=true");
     return @import("vulkan/targets.zig");
+}
+
+/// Returns the optional Vulkan Video H.264 recording API.
+pub fn video() type {
+    if (!build_options.vk_video) @compileError("enable -Dvk_video=true");
+    return @import("vulkan/video.zig");
 }
 
 /// Creates a presentation surface for an explicit native backend handle.

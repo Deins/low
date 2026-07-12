@@ -7,7 +7,8 @@ pub fn build(b: *Build) !void {
     const linux_target = target.result.os.tag == .linux;
     const enable_x11 = b.option(bool, "x11", "Enable the X11 backend") orelse linux_target;
     const enable_wayland = b.option(bool, "wayland", "Enable the Wayland backend") orelse linux_target;
-    const enable_vk_extras = b.option(bool, "vk_extras", "Expose optional Vulkan render-target helpers") orelse false;
+    const enable_vk_video = b.option(bool, "vk_video", "Enable Vulkan Video H.264 recording") orelse false;
+    const enable_vk_extras = (b.option(bool, "vk_extras", "Expose optional Vulkan render-target helpers") orelse false) or enable_vk_video;
 
     if (linux_target and !enable_x11 and !enable_wayland) {
         @panic("low: at least one of -Dx11 and -Dwayland must be enabled");
@@ -17,6 +18,7 @@ pub fn build(b: *Build) !void {
     options.addOption(bool, "x11", enable_x11);
     options.addOption(bool, "wayland", enable_wayland);
     options.addOption(bool, "vk_extras", enable_vk_extras);
+    options.addOption(bool, "vk_video", enable_vk_video);
 
     const low = b.addModule("low", .{
         .root_source_file = b.path("src/low.zig"),
@@ -24,6 +26,9 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     });
     low.addOptions("build_options", options);
+
+    const video_binding = if (enable_vk_video) try addVulkanVideoBinding(b) else null;
+    if (video_binding) |binding| low.addImport("_vk_video", binding);
 
     if (!addPlatformSupport(b, low, target, optimize, enable_wayland)) return;
 
@@ -33,6 +38,7 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     });
     test_module.addOptions("build_options", options);
+    if (video_binding) |binding| test_module.addImport("_vk_video", binding);
     if (!addPlatformSupport(b, test_module, target, optimize, enable_wayland)) return;
 
     const tests = b.addTest(.{
@@ -45,6 +51,37 @@ pub fn build(b: *Build) !void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run low tests");
     test_step.dependOn(&run_tests.step);
+
+    addVideoShaderSteps(b);
+}
+
+fn addVideoShaderSteps(b: *Build) void {
+    const source = b.path("src/vulkan/video/shaders/bgra_to_nv12.comp");
+    const checked_in = b.path("src/vulkan/video/shaders/bgra_to_nv12.spv");
+
+    const compile = b.addSystemCommand(&.{ "glslc", "--target-env=vulkan1.3", "-O", "-o" });
+    const generated = compile.addOutputFileArg("bgra_to_nv12.spv");
+    compile.addFileArg(source);
+    const compare = b.addSystemCommand(&.{ "cmp", "--silent" });
+    compare.addFileArg(checked_in);
+    compare.addFileArg(generated);
+    const check_step = b.step("check-vk-video-shader", "Regenerate and compare the checked-in Vulkan Video shader");
+    check_step.dependOn(&compare.step);
+
+    const regenerate = b.addSystemCommand(&.{ "glslc", "--target-env=vulkan1.3", "-O", "-o", "src/vulkan/video/shaders/bgra_to_nv12.spv" });
+    regenerate.addFileArg(source);
+    const regenerate_step = b.step("regenerate-vk-video-shader", "Regenerate the checked-in Vulkan Video shader");
+    regenerate_step.dependOn(&regenerate.step);
+}
+
+fn addVulkanVideoBinding(b: *Build) !*Build.Module {
+    const headers = b.lazyDependency("vulkan_headers", .{}) orelse
+        return error.VulkanHeadersUnavailable;
+    const vulkan = b.lazyDependency("vulkan", .{
+        .registry = headers.path("registry/vk.xml"),
+        .video = headers.path("registry/video.xml"),
+    }) orelse return error.VulkanBindingUnavailable;
+    return vulkan.module("vulkan-zig");
 }
 
 fn addPlatformSupport(

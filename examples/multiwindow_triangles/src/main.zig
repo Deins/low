@@ -1,6 +1,8 @@
 const std = @import("std");
 const low = @import("low");
 const vk = @import("vulkan");
+const example_options = @import("example_options");
+const video = if (example_options.vk_video) low.vulkan.video() else struct {};
 
 const RenderTarget = low.vulkan.targets().RenderTarget;
 const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
@@ -28,6 +30,7 @@ const PushConstants = extern struct {
 const DeviceSelection = struct {
     physical_device: vk.PhysicalDevice,
     graphics_queue_family: u32,
+    encode_queue_family: ?u32 = null,
 };
 
 const Renderer = struct {
@@ -44,33 +47,73 @@ const Renderer = struct {
     pipeline_layout: vk.PipelineLayout,
     pipeline: vk.Pipeline,
     color_format: vk.Format,
+    encode_queue: vk.Queue,
+    encode_queue_family: ?u32,
+    video_device: if (example_options.vk_video) ?video.VideoDevice else void,
 
     fn init(
         gpa: std.mem.Allocator,
-        loader: *const low.vulkan.Loader,
         instance: vk.InstanceProxy,
+        low_instance_input: low.vulkan.Instance,
         presentation: bool,
+        recording: bool,
     ) !Renderer {
-        const selection = try findDevice(gpa, instance);
+        const selection = try findDevice(gpa, instance, &low_instance_input, recording);
 
         var features_13 = vk.PhysicalDeviceVulkan13Features{
             .synchronization_2 = .true,
             .dynamic_rendering = .true,
         };
+        // Surface extensions come from Context.requiredVulkanInstanceExtensions
+        // when creating the instance. VK_KHR_swapchain is separately a device
+        // extension, and is unnecessary for RenderTarget's offscreen images.
+        var extension_storage: [4][*:0]const u8 = undefined;
+        var extension_count: usize = 0;
+        if (presentation) {
+            extension_storage[extension_count] = "VK_KHR_swapchain";
+            extension_count += 1;
+        }
+        if (recording) {
+            if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
+            for (video.required_device_extensions) |extension| {
+                extension_storage[extension_count] = extension;
+                extension_count += 1;
+            }
+        }
+        const device_extensions = extension_storage[0..extension_count];
         const queue_priority = [_]f32{1.0};
-        const queue_info = vk.DeviceQueueCreateInfo{
+        var queue_infos: [2]vk.DeviceQueueCreateInfo = undefined;
+        queue_infos[0] = .{
             .queue_family_index = selection.graphics_queue_family,
             .queue_count = 1,
             .p_queue_priorities = &queue_priority,
         };
-        // Surface extensions come from Context.requiredVulkanInstanceExtensions
-        // when creating the instance. VK_KHR_swapchain is separately a device
-        // extension, and is unnecessary for RenderTarget's offscreen images.
-        const device_extensions: []const [*:0]const u8 = if (presentation) &.{"VK_KHR_swapchain"} else &.{};
+        var queue_info_count: u32 = 1;
+        if (recording) {
+            if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
+            const support = try video.queryH264Support(.{
+                .instance = &low_instance_input,
+                .physical_device = lowPhysicalDevice(selection.physical_device),
+                .extent = .{ .width = 640, .height = 480 },
+                .allocator = gpa,
+            });
+            var requirements = try support.deviceRequirements(.{
+                .allocator = gpa,
+                .graphics_queue_family = selection.graphics_queue_family,
+                .queue_priority = 1.0,
+            });
+            defer requirements.deinit(gpa);
+            queue_info_count = @intCast(requirements.queue_create_infos.len);
+            for (requirements.queue_create_infos, 0..) |requirement, index| queue_infos[index] = .{
+                .queue_family_index = requirement.queue_family_index,
+                .queue_count = 1,
+                .p_queue_priorities = &queue_priority,
+            };
+        }
         const device_info = vk.DeviceCreateInfo{
             .p_next = @ptrCast(&features_13),
-            .queue_create_info_count = 1,
-            .p_queue_create_infos = @ptrCast(&queue_info),
+            .queue_create_info_count = queue_info_count,
+            .p_queue_create_infos = &queue_infos,
             .enabled_extension_count = @intCast(device_extensions.len),
             .pp_enabled_extension_names = device_extensions.ptr,
         };
@@ -84,7 +127,7 @@ const Renderer = struct {
         if (presentation and device_wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
         const device = vk.DeviceProxy.init(device_handle, device_wrapper);
         errdefer device.destroyDevice(null);
-        const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance.handle)));
+        const low_instance = low_instance_input;
         const low_device = try low.vulkan.Device.init(&low_instance, @ptrFromInt(@intFromEnum(device_handle)));
 
         const command_pool = try device.createCommandPool(&.{
@@ -100,6 +143,8 @@ const Renderer = struct {
         const pipeline = try createPipeline(device, pipeline_layout, color_format);
         errdefer device.destroyPipeline(pipeline, null);
 
+        const graphics_queue = device.getDeviceQueue(selection.graphics_queue_family, 0);
+        const encode_queue = device.getDeviceQueue(selection.encode_queue_family orelse selection.graphics_queue_family, 0);
         return .{
             .gpa = gpa,
             .instance = instance,
@@ -108,16 +153,35 @@ const Renderer = struct {
             .device_wrapper = device_wrapper,
             .device = device,
             .low_device = low_device,
-            .graphics_queue = device.getDeviceQueue(selection.graphics_queue_family, 0),
+            .graphics_queue = graphics_queue,
             .graphics_queue_family = selection.graphics_queue_family,
             .command_pool = command_pool,
             .pipeline_layout = pipeline_layout,
             .pipeline = pipeline,
             .color_format = color_format,
+            .encode_queue = encode_queue,
+            .encode_queue_family = selection.encode_queue_family,
+            .video_device = if (comptime example_options.vk_video) null else {},
         };
     }
 
+    fn initVideo(self: *Renderer) !void {
+        if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
+        const encode_family = self.encode_queue_family orelse return error.NoH264Device;
+        self.video_device = try video.VideoDevice.init(.{
+            .allocator = self.gpa,
+            .instance = &self.low_instance,
+            .physical_device = lowPhysicalDevice(self.physical_device),
+            .device = &self.low_device,
+            .encode_queue = lowQueue(self.encode_queue),
+            .encode_queue_family = encode_family,
+            .compute_queue = lowQueue(self.graphics_queue),
+            .compute_queue_family = self.graphics_queue_family,
+        });
+    }
+
     fn deinit(self: *Renderer) void {
+        if (comptime example_options.vk_video) if (self.video_device) |*video_device| video_device.deinit();
         self.device.destroyPipeline(self.pipeline, null);
         self.device.destroyPipelineLayout(self.pipeline_layout, null);
         self.device.destroyCommandPool(self.command_pool, null);
@@ -136,7 +200,7 @@ const AppWindow = struct {
 
     fn init(
         gpa: std.mem.Allocator,
-        renderer: *const Renderer,
+        renderer: *Renderer,
         context: *low.Context,
         window: *low.Window,
         position: [2]f32,
@@ -156,6 +220,7 @@ const AppWindow = struct {
                 .command_pool = @intFromEnum(renderer.command_pool),
                 .color_format = lowFormat(renderer.color_format),
                 .frames_in_flight = 2,
+                .video_device = if (comptime example_options.vk_video) if (renderer.video_device) |*video_device| video_device else null else null,
             }),
             .position = position,
             .velocity = velocity,
@@ -169,9 +234,27 @@ const AppWindow = struct {
     }
 
     fn deinit(self: *AppWindow) void {
+        if (comptime example_options.vk_video) self.target.endRecording() catch |err| std.log.err("failed to finalize recording: {s}", .{@errorName(err)});
         self.target.deinit();
         self.window.deinit();
         self.* = undefined;
+    }
+
+    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer, fps: u32, bitrate: u32, gop_size: u32) !void {
+        if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
+        try self.target.beginRecording(.{
+            .allocator = self.target.allocator,
+            .io = io,
+            .writer = writer,
+            .frame_rate = .{ .numerator = fps, .denominator = 1 },
+            .bitrate = bitrate,
+            .gop_size = gop_size,
+        });
+    }
+
+    fn stopRecording(self: *AppWindow) !void {
+        if (comptime !example_options.vk_video) return;
+        try self.target.endRecording();
     }
 
     fn update(self: *AppWindow, dt: f32) void {
@@ -255,7 +338,30 @@ pub fn main(init: std.process.Init) !void {
     const gpa = gpa_state.allocator();
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const backend = try requestedBackend(args);
+    const app_options = try parseOptions(args);
+    const backend = app_options.backend;
+    const recording_requested = app_options.first_record_path != null or app_options.second_record_path != null;
+    if (recording_requested and !example_options.vk_video) {
+        std.log.err("recording support is not compiled; rebuild with -Dvk_video=true", .{});
+        return;
+    }
+
+    var first_record_file: ?std.Io.File = null;
+    var second_record_file: ?std.Io.File = null;
+    var first_record_buffer: [64 * 1024]u8 = undefined;
+    var second_record_buffer: [64 * 1024]u8 = undefined;
+    var first_record_writer: ?std.Io.File.Writer = null;
+    var second_record_writer: ?std.Io.File.Writer = null;
+    if (app_options.first_record_path) |path| {
+        first_record_file = try std.Io.Dir.cwd().createFile(init.io, path, .{});
+        first_record_writer = first_record_file.?.writer(init.io, &first_record_buffer);
+    }
+    defer if (first_record_file) |*file| file.close(init.io);
+    if (app_options.second_record_path) |path| {
+        second_record_file = try std.Io.Dir.cwd().createFile(init.io, path, .{});
+        second_record_writer = second_record_file.?.writer(init.io, &second_record_buffer);
+    }
+    defer if (second_record_file) |*file| file.close(init.io);
     var loader = try low.vulkan.Loader.init();
     defer loader.deinit();
     const get_instance_proc_addr: vk.PfnGetInstanceProcAddr = @ptrCast(loader.get_instance_proc_addr);
@@ -287,6 +393,16 @@ pub fn main(init: std.process.Init) !void {
     const instance = vk.InstanceProxy.init(instance_handle, &instance_wrapper);
     defer instance.destroyInstance(null);
 
+    const low_instance = try loader.loadInstanceApi(@ptrFromInt(@intFromEnum(instance.handle)));
+    var renderer = Renderer.init(gpa, instance, low_instance, context.backendKind() != .offscreen, recording_requested) catch |err| {
+        if (recording_requested) {
+            std.log.err("no device can render and encode H.264: {s}", .{@errorName(err)});
+            return;
+        }
+        return err;
+    };
+    if (recording_requested) try renderer.initVideo();
+    defer renderer.deinit();
     const first_window = try context.createWindow(.{
         .title = "low Vulkan — coral triangle",
         .size = .{ .width = 640, .height = 480 },
@@ -295,9 +411,6 @@ pub fn main(init: std.process.Init) !void {
         .title = "low Vulkan — cyan triangle",
         .size = .{ .width = 520, .height = 400 },
     });
-
-    var renderer = try Renderer.init(gpa, &loader, instance, context.backendKind() != .offscreen);
-    defer renderer.deinit();
     var first: ?AppWindow = try AppWindow.init(
         gpa,
         &renderer,
@@ -320,10 +433,17 @@ pub fn main(init: std.process.Init) !void {
     defer if (second) |*app_window| app_window.deinit();
     first.?.installCallbacks();
     second.?.installCallbacks();
+    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
+        std.log.err("first stream could not start: {s}", .{@errorName(err)});
+    };
+    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop) catch |err| {
+        std.log.err("second stream could not start: {s}", .{@errorName(err)});
+    };
 
     var previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
-    var offscreen_frames: u32 = 0;
+    var rendered_frames: u32 = 0;
     const offscreen = context.backendKind() == .offscreen;
+    const frame_limit: ?u32 = app_options.frames orelse if (offscreen) @as(u32, 10) else null;
     if (offscreen) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
     while (first != null or second != null) {
         if (offscreen) try context.nextFrame();
@@ -337,11 +457,17 @@ pub fn main(init: std.process.Init) !void {
             // until its in-flight Vulkan work can no longer reference it.
             try renderer.device.deviceWaitIdle();
             if (close_first) {
-                if (first) |*app_window| app_window.deinit();
+                if (first) |*app_window| {
+                    try app_window.stopRecording();
+                    app_window.deinit();
+                }
                 first = null;
             }
             if (close_second) {
-                if (second) |*app_window| app_window.deinit();
+                if (second) |*app_window| {
+                    try app_window.stopRecording();
+                    app_window.deinit();
+                }
                 second = null;
             }
             if (first == null and second == null) break;
@@ -353,27 +479,39 @@ pub fn main(init: std.process.Init) !void {
         if (first) |*app_window| {
             app_window.update(dt);
             var path_buffer: [64]u8 = undefined;
-            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{offscreen_frames + 1}) else null;
+            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
             try app_window.draw(&renderer, init.io, path);
         }
         if (second) |*app_window| {
             app_window.update(dt);
             var path_buffer: [64]u8 = undefined;
-            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{offscreen_frames + 1}) else null;
+            const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
             try app_window.draw(&renderer, init.io, path);
         }
-        if (offscreen) {
-            offscreen_frames += 1;
-            if (offscreen_frames == 10) {
-                if (first) |app_window| try app_window.window.injectEvent(.close);
-                if (second) |app_window| try app_window.window.injectEvent(.close);
+        rendered_frames += 1;
+        if (app_options.restart_recording_at) |restart_frame| {
+            if (rendered_frames == restart_frame) {
+                if (first_record_writer) |*writer| if (first) |*app_window| {
+                    try app_window.stopRecording();
+                    try app_window.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
+                };
+                if (second_record_writer) |*writer| if (second) |*app_window| {
+                    try app_window.stopRecording();
+                    try app_window.startRecording(init.io, &writer.interface, app_options.record_fps, app_options.record_bitrate, app_options.record_gop);
+                };
+            }
+        }
+        if (frame_limit) |limit| {
+            if (rendered_frames == limit) {
+                if (first) |app_window| app_window.window.setShouldClose(true);
+                if (second) |app_window| app_window.window.setShouldClose(true);
             }
         }
     }
     try renderer.device.deviceWaitIdle();
 }
 
-fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy) !DeviceSelection {
+fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy, low_instance: *const low.vulkan.Instance, recording: bool) !DeviceSelection {
     const physical_devices = try instance.enumeratePhysicalDevicesAlloc(gpa);
     defer gpa.free(physical_devices);
     for (physical_devices) |physical_device| {
@@ -384,6 +522,28 @@ fn findDevice(gpa: std.mem.Allocator, instance: vk.InstanceProxy) !DeviceSelecti
         defer gpa.free(families);
         for (families, 0..) |family, index| {
             if (!family.queue_flags.graphics_bit) continue;
+            if (recording) {
+                if (comptime !example_options.vk_video) return error.VideoRecordingNotCompiled;
+                const support = try video.queryH264Support(.{
+                    .instance = low_instance,
+                    .physical_device = lowPhysicalDevice(physical_device),
+                    .extent = .{ .width = 640, .height = 480 },
+                    .allocator = gpa,
+                });
+                if (!support.available) continue;
+                std.log.info("H.264 encode: profile {s}, level {s}, coded extent {d}x{d}, queue family {d}", .{
+                    @tagName(support.profile),
+                    @tagName(support.max_level),
+                    support.coded_extent.width,
+                    support.coded_extent.height,
+                    support.encode_queue_family.?,
+                });
+                return .{
+                    .physical_device = physical_device,
+                    .graphics_queue_family = @intCast(index),
+                    .encode_queue_family = support.encode_queue_family,
+                };
+            }
             return .{
                 .physical_device = physical_device,
                 .graphics_queue_family = @intCast(index),
@@ -498,21 +658,65 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
     return pipelines[0];
 }
 
-fn requestedBackend(args: []const [:0]const u8) !low.BackendRequest {
-    var selected: ?low.BackendRequest = null;
-    for (args[1..]) |arg| {
-        const backend: low.BackendRequest = if (std.mem.eql(u8, arg, "--x11"))
-            .x11
-        else if (std.mem.eql(u8, arg, "--wayland"))
-            .wayland
-        else if (std.mem.eql(u8, arg, "--offscreen"))
-            .offscreen
-        else
+const AppOptions = struct {
+    backend: low.BackendRequest = .auto,
+    first_record_path: ?[]const u8 = null,
+    second_record_path: ?[]const u8 = null,
+    record_fps: u32 = 60,
+    record_bitrate: u32 = 12_000_000,
+    record_gop: u32 = 60,
+    frames: ?u32 = null,
+    restart_recording_at: ?u32 = null,
+};
+
+fn parseOptions(args: []const [:0]const u8) !AppOptions {
+    var result: AppOptions = .{};
+    var backend_selected = false;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--x11") or std.mem.eql(u8, arg, "--wayland") or std.mem.eql(u8, arg, "--offscreen")) {
+            if (backend_selected) return error.ConflictingBackendArguments;
+            result.backend = if (std.mem.eql(u8, arg, "--x11")) .x11 else if (std.mem.eql(u8, arg, "--wayland")) .wayland else .offscreen;
+            backend_selected = true;
+        } else if (std.mem.eql(u8, arg, "--record")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.first_record_path = args[index];
+        } else if (std.mem.eql(u8, arg, "--record-second")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.second_record_path = args[index];
+        } else if (std.mem.eql(u8, arg, "--record-fps")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.record_fps = try std.fmt.parseInt(u32, args[index], 10);
+            if (result.record_fps == 0) return error.InvalidFrameRate;
+        } else if (std.mem.eql(u8, arg, "--record-bitrate")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.record_bitrate = try std.fmt.parseInt(u32, args[index], 10);
+            if (result.record_bitrate == 0) return error.InvalidBitrate;
+        } else if (std.mem.eql(u8, arg, "--record-gop")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.record_gop = try std.fmt.parseInt(u32, args[index], 10);
+            if (result.record_gop == 0 or result.record_gop > 32_768) return error.InvalidGopSize;
+        } else if (std.mem.eql(u8, arg, "--frames")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.frames = try std.fmt.parseInt(u32, args[index], 10);
+            if (result.frames.? == 0) return error.InvalidFrameCount;
+        } else if (std.mem.eql(u8, arg, "--restart-recording-at")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.restart_recording_at = try std.fmt.parseInt(u32, args[index], 10);
+            if (result.restart_recording_at.? == 0) return error.InvalidFrameCount;
+        } else {
             return error.UnknownArgument;
-        if (selected != null) return error.ConflictingBackendArguments;
-        selected = backend;
+        }
     }
-    return selected orelse .auto;
+    return result;
 }
 
 fn onMouseButton(window: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {

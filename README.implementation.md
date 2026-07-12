@@ -41,6 +41,26 @@ still owns the Vulkan instance, physical-device selection, queues, command
 pool, and rendering commands. It can use any Vulkan binding alongside low's
 binding-agnostic ABI.
 
+Vulkan Video recording is enabled separately and implies `vk_extras`:
+
+```zig
+const video = low.vulkan.video(); // build with -Dvk_video=true
+```
+
+The option lazily generates a private binding from pinned Vulkan and Vulkan
+Video registries. Capability discovery happens before device creation;
+applications merge the returned three device extensions and unique graphics /
+encode queue requirements. `VideoDevice` then coordinates one exclusively
+owned encode queue across independently admitted render-target recorders.
+
+Each recorder copies the completed target into a private image before WSI
+presentation, converts that image to BT.709 limited-range NV12 on the compute
+queue, and submits H.264 encode work through a per-frame semaphore/fence ring.
+Only feedback-selected compressed ranges are mapped and written on the CPU.
+Compatible sessions, DPB storage, pipelines, and per-flight resources stay
+cached after `endRecording`; `releaseRecordingResources` returns that memory
+early.
+
 For an offscreen target, provide `memory_allocator` callbacks to allocate and
 bind the target's images. Offscreen targets never create a surface or swapchain
 and leave the rendered image in `transfer_src_optimal` after submission.
@@ -65,6 +85,7 @@ smaller binary or a single runtime path is desired:
 zig build -Dx11=false       # Wayland-only
 zig build -Dwayland=false   # X11-only
 zig build -Dvk_extras=true  # optional Vulkan targets
+zig build -Dvk_video=true   # targets plus Vulkan Video H.264 recording
 ```
 
 The Linux runtime bindings are header-free and are loaded through `dlopen`.
@@ -82,4 +103,3 @@ used to generate the client bindings during the build. Platform implementations
 live under `src/linux` and `src/windows`; shared runtime types live under
 `src/internal`. These modules are implementation details and should not be
 imported by applications.
-

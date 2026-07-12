@@ -36,12 +36,54 @@ swapchain), reads each completed image back to the CPU, and writes
 `RenderTarget` manages the offscreen image ring, device-local allocation, and
 staging-buffer readback.
 
+## H.264 recording
+
+Build the optional recorder and write either window, or both windows, to
+independent raw Annex-B streams:
+
+```sh
+zig build run -Dvk_video=true -- --offscreen \
+  --record tmp/first.h264 \
+  --record-second tmp/second.h264
+```
+
+Recording can also be exercised through a WSI path. `--frames` makes the demo
+close itself after a fixed number of frames:
+
+```sh
+zig build run -Dvk_video=true -- --x11 --frames 300 \
+  --record tmp/first.h264
+```
+
+Additional options are:
+
+```text
+--record-fps 60
+--record-bitrate 12000000
+--record-gop 60
+--restart-recording-at 150
+```
+
+The restart option demonstrates stopping and beginning again while reusing
+compatible cached GPU resources. The example owns and closes its files;
+`RenderTarget.endRecording` only flushes the supplied writer. Inspect or remux
+the elementary stream without re-encoding, for example:
+
+```sh
+ffprobe tmp/first.h264
+ffmpeg -i tmp/first.h264 -c copy tmp/first.mp4
+```
+
 Without `VULKAN_SDK`, binding generation falls back to the lazy
 `vulkan_headers` dependency. You can also point the build at a registry:
 
 ```sh
 zig build -Dvk_registry=/path/to/registry/vk.xml
 ```
+
+For recording builds, `-Dvk_video_registry=/path/to/registry/video.xml` can be
+used as well. Both registries otherwise come from `VULKAN_SDK` or the pinned
+lazy headers dependency.
 
 `glslc` must still be available on `PATH` to compile the two GLSL shaders.
 
