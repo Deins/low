@@ -481,7 +481,6 @@ pub fn main(init: std.process.Init) !void {
             (second == null or !second.?.window.shouldRender());
         if (all_frames_blocked) {
             try context.waitEvents();
-            previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
             continue;
         }
 

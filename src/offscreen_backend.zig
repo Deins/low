@@ -210,16 +210,10 @@ pub const Backend = struct {
             .resize => |value| window.updateSize(value),
             .framebuffer_resize => |value| {
                 window.framebuffer_size = value;
-                if (window.callbacks.framebuffer_resize) |callback| callback(window, value);
             },
             .scale => |value| {
-                const old_framebuffer_size = window.framebuffer_size;
                 window.content_scale = value;
                 window.framebuffer_size = common.scaledSize(window.size, value);
-                if (window.callbacks.scale) |callback| callback(window, value);
-                if (old_framebuffer_size.width != window.framebuffer_size.width or old_framebuffer_size.height != window.framebuffer_size.height) {
-                    if (window.callbacks.framebuffer_resize) |callback| callback(window, window.framebuffer_size);
-                }
             },
             .focus => |value| window.updateFocus(value),
             .cursor_enter => |value| window.updateCursorEnter(value),

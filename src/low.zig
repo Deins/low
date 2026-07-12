@@ -160,6 +160,15 @@ test "root API exposes the supported contract" {
     _ = vulkan;
     try @import("std").testing.expect(@hasDecl(@This(), "Error"));
     try @import("std").testing.expect(@hasDecl(@This(), "WindowCallbacks"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "close"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "resize"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "framebuffer_resize"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "scale"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "focus"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "cursor_enter"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "cursor_motion"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "render_suspended"));
+    try @import("std").testing.expect(!@hasField(WindowCallbacks, "frame"));
     try @import("std").testing.expect(!@hasDecl(@This(), "State"));
     try @import("std").testing.expect(!@hasDecl(@This(), "VTable"));
 }

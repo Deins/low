@@ -273,12 +273,6 @@ pub fn main(init: std.process.Init) !void {
 
     const window = try context.createWindow(.{ .title = "low raw Vulkan setup", .size = .{ .width = 800, .height = 600 } });
     window.setCallbacks(.{
-        .close = onClose,
-        .resize = onResize,
-        .framebuffer_resize = onFramebufferResize,
-        .scale = onScale,
-        .focus = onFocus,
-        .cursor_enter = onCursorEnter,
         .mouse_button = onMouseButton,
         .scroll = onScroll,
         .key = onKey,
@@ -340,30 +334,6 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
     }
-}
-
-fn onClose(_: *low.Window) void {
-    std.log.info("window close requested", .{});
-}
-
-fn onResize(_: *low.Window, size: low.ContentSize) void {
-    std.log.info("window resized to {d}x{d}", .{ size.width, size.height });
-}
-
-fn onFramebufferResize(_: *low.Window, size: low.PixelSize) void {
-    std.log.info("framebuffer resized to {d}x{d}", .{ size.width, size.height });
-}
-
-fn onScale(_: *low.Window, scale: low.ContentScale) void {
-    std.log.info("content scale changed to {d:.2}x{d:.2}", .{ scale.x, scale.y });
-}
-
-fn onFocus(_: *low.Window, focused: bool) void {
-    std.log.info("window focus: {s}", .{if (focused) "gained" else "lost"});
-}
-
-fn onCursorEnter(_: *low.Window, entered: bool) void {
-    std.log.info("cursor {s} window", .{if (entered) "entered" else "left"});
 }
 
 fn onMouseButton(_: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {
