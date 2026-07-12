@@ -36,7 +36,7 @@ swapchain), reads each completed image back to the CPU, and writes
 `RenderTarget` manages the offscreen image ring, device-local allocation, and
 staging-buffer readback.
 
-## H.264 recording
+## H.264 and MKV recording
 
 Build the optional recorder and write either window, or both windows, to
 independent raw Annex-B streams:
@@ -45,6 +45,15 @@ independent raw Annex-B streams:
 zig build run -Dvk_video=true -- --offscreen \
   --record tmp/first.h264 \
   --record-second tmp/second.h264
+```
+
+Use a `.mkv` filename to select the streaming Matroska container. Other
+extensions retain the raw Annex-B H.264 output:
+
+```sh
+zig build run -Dvk_video=true -- --offscreen \
+  --record tmp/first.mkv \
+  --record-second tmp/second.mkv
 ```
 
 Recording can also be exercised through a WSI path. `--frames` makes the demo
@@ -64,14 +73,19 @@ Additional options are:
 --restart-recording-at 150
 ```
 
-The restart option demonstrates stopping and beginning again while reusing
-compatible cached GPU resources. The example owns and closes its files;
-`RenderTarget.endRecording` only flushes the supplied writer. Inspect or remux
+The restart option demonstrates stopping and beginning raw H.264 again while
+reusing compatible cached GPU resources. It is rejected for `.mkv` paths
+because each MKV recording starts an independent timeline and therefore needs
+a fresh writer. The example owns and closes its files;
+`RenderTarget.endRecording` only flushes the supplied writer. Matroska is
+written as a forward-only stream without Cues or a declared Segment duration,
+so seeking metadata is intentionally omitted. Inspect either format, or remux
 the elementary stream without re-encoding, for example:
 
 ```sh
 ffprobe tmp/first.h264
 ffmpeg -i tmp/first.h264 -c copy tmp/first.mp4
+ffprobe tmp/first.mkv
 ```
 
 Without `VULKAN_SDK`, binding generation falls back to the lazy

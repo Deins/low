@@ -61,6 +61,14 @@ Compatible sessions, DPB storage, pipelines, and per-flight resources stay
 cached after `endRecording`; `releaseRecordingResources` returns that memory
 early.
 
+`RecordingOptions.format` selects raw Annex-B H.264 (`.h264`, the default) or
+a forward-only Matroska container (`.mkv`). Matroska output uses an
+unknown-sized streaming Segment, AVC configuration in `CodecPrivate`, and
+fixed-rate `SimpleBlock` timestamps, so it retains the recorder's non-seeking
+`std.Io.Writer` contract. Each MKV `beginRecording` starts a new Matroska
+timeline; applications starting another MKV recording must supply a fresh
+writer rather than append it to the previous file.
+
 For an offscreen target, provide `memory_allocator` callbacks to allocate and
 bind the target's images. Offscreen targets never create a surface or swapchain
 and leave the rendered image in `transfer_src_optimal` after submission.

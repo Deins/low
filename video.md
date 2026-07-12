@@ -8,11 +8,11 @@ are converted from the render target's BGRA format to a driver-supported video
 input format, encoded by Vulkan Video, and only the compressed H.264 bytes are
 read by the CPU.
 
-The first implementation will:
+The implementation supports:
 
 - encode H.264/AVC through `VK_KHR_video_encode_h264`;
-- write a raw Annex-B H.264 elementary stream to a caller-owned
-  `std.Io.File` or a file opened from a supplied path;
+- write either raw Annex-B H.264 or streaming Matroska to a caller-owned
+  `std.Io.Writer`;
 - work with offscreen and WSI-backed `RenderTarget` instances;
 - remain optional at build time and runtime;
 - detect unsupported devices without enabling unsupported device extensions;
@@ -21,8 +21,8 @@ The first implementation will:
   the same device, subject to successful driver resource/session allocation;
 - optimize for correctness and validation-clean execution before pipelining.
 
-MP4/MKV muxing, audio, decode, streaming protocols, H.265, and AV1 are out of
-scope for the first implementation.
+MP4 muxing, audio, decode, network streaming protocols, H.265, and AV1 remain
+out of scope. Matroska support is deliberately forward-only and video-only.
 
 ## Why this is separate from readback
 
@@ -322,8 +322,8 @@ destruction always releases the cache. Capability/resource admission is still
 performed on every begin; a cached session for one target does not guarantee a
 new concurrent session for another target.
 
-Encoded data leaves the recorder as one continuous Annex-B elementary stream
-through a caller-provided `std.Io.Writer`:
+Encoded data leaves the recorder through a caller-provided `std.Io.Writer` in
+the selected recording format:
 
 ```zig
 .writer = output_writer,
@@ -335,19 +335,24 @@ closes a caller-owned writer, does not require seeking, and flushes it during
 `endRecording`. Writer errors become sticky recording-local errors and are
 returned by `endRecording`.
 
-Do not introduce packet callbacks, timestamp metadata, or a muxer in the first
-API. If a container is added later, it can be a separate component consuming a
-future packet-oriented encoder API without complicating raw H.264 recording.
+Raw mode writes one continuous Annex-B elementary stream. Matroska mode writes
+an unknown-sized Segment, AVC configuration in `CodecPrivate`, and one
+fixed-rate H.264 picture per `SimpleBlock`. Each Matroska recording starts an
+independent timeline and therefore needs a fresh writer rather than appending
+to an earlier MKV recording. Packet callbacks and application timestamps remain
+out of scope.
 
-### Why not MPEG/MP4 initially
+### Container scope
 
 H.264 is the encoded video codec. Names such as MPEG-TS, MPEG-PS, MP4, and MKV
 refer to containers or transport formats around encoded packets. A container
 can store timestamps and additional streams, but requires muxing tables,
 packetization, finalization, and often seeking. It does not simplify Vulkan
-Video encoding. Raw Annex-B H.264 is therefore the smallest useful first
-output and can be played by tools such as `ffplay` or remuxed later without
-re-encoding.
+Video encoding. Raw Annex-B remains the smallest output and can be played by
+tools such as `ffplay` or remuxed later without re-encoding. The built-in MKV
+path adds fixed-rate timestamps and standard AVC framing without seeking,
+audio, Cues, or general-purpose muxing machinery. MP4 still requires a
+seekable/finalizable muxing design and remains out of scope.
 
 ### Recording options
 
@@ -365,12 +370,14 @@ pub const RecordingOptions = struct {
     quality: Quality = .balanced,
     resize: ResizePolicy = .scale_and_letterbox,
     parameter_sets: ParameterSetPolicy = .every_idr,
+    format: RecordingFormat = .h264,
 };
 
 pub const Quality = enum { low_latency, balanced, high_quality };
 pub const Rational = struct { numerator: u32, denominator: u32 };
 pub const ResizePolicy = enum { scale_and_letterbox, stop_recording };
 pub const ParameterSetPolicy = enum { stream_start, every_idr };
+pub const RecordingFormat = enum { h264, mkv };
 ```
 
 Avoid exposing raw codec structures in the basic API. An advanced options
@@ -386,6 +393,7 @@ src/vulkan/video/capabilities.zig
 src/vulkan/video/encoder.zig     session, DPB, encode commands, feedback
 src/vulkan/video/conversion.zig  BGRA-to-YCbCr resources and compute dispatch
 src/vulkan/video/h264.zig        SPS/PPS/session-parameter construction
+src/vulkan/video/matroska.zig    forward-only EBML/Matroska muxing
 src/vulkan/video/shaders/*.comp
 src/vulkan/video/shaders/*.spv
 ```
@@ -490,7 +498,8 @@ At recording start:
 2. Create video session parameters.
 3. Retrieve encoded session parameters with
    `vkGetEncodedVideoSessionParametersKHR` when supported/required.
-4. Write SPS/PPS to the elementary stream in Annex-B form.
+4. Write SPS/PPS as Annex-B headers in raw mode or as an
+   AVCDecoderConfigurationRecord in Matroska `CodecPrivate`.
 
 For frames:
 
@@ -504,16 +513,17 @@ For frames:
 - repeat SPS/PPS before IDR frames only if needed for robust standalone
   playback; make the final policy explicit.
 
-Raw `.h264` has no timestamps or audio. The configured frame rate is signaled
+Raw `.h264` has no timestamps or audio. Its configured frame rate is signaled
 through SPS/VUI and rate control, while playback timing depends on that
-metadata/player behavior.
+metadata/player behavior. Matroska additionally writes fixed-rate presentation
+timestamps derived from the same rational frame rate.
 
-The first implementation has no timestamp input and performs no cadence
-correction. Each successfully submitted rendered frame produces exactly one
+The recorder has no timestamp input and performs no cadence correction. Each
+successfully submitted rendered frame produces exactly one
 encoded frame in the same order. If the application submits faster or slower
 than `RecordingOptions.frame_rate`, playback duration follows the configured
-rate rather than elapsed wall-clock time. Exact variable timing requires a
-container and is intentionally out of scope.
+rate rather than elapsed wall-clock time in both formats. Exact variable timing
+and caller-provided timestamps remain out of scope.
 
 ## Frame submission and synchronization
 
@@ -669,6 +679,8 @@ successful recorder unless the CLI requests all-or-nothing behavior.
 - GOP/IDR/reference-slot state transitions;
 - encode feedback offset/range bounds checks;
 - Annex-B start-code/session-header assembly;
+- EBML size encoding, AVC configuration, Annex-B-to-length-prefix conversion,
+  and fractional Matroska timestamps;
 - recorder state machine (`idle -> recording -> draining -> idle/failed`);
 - resize-to-fixed-coded-extent transform calculations.
 
@@ -745,16 +757,18 @@ recording works before a valid stream can be produced.
    Resize-stop is a normal stop reason rather than an encode error;
    `recordingStatus` exposes `.stopped_resize` and `endRecording` finalizes it
    successfully.
-3. The recorder writes one continuous Annex-B H.264 stream to a caller-provided
-   `std.Io.Writer`, including a file writer. It does not own or close it.
+3. The recorder writes raw Annex-B H.264 or forward-only Matroska to a
+   caller-provided `std.Io.Writer`, including a file writer. It does not own or
+   close it. Each MKV recording requires a fresh writer.
 4. `endRecording` is idempotent and `isRecording`/`recordingStatus` expose state.
 5. Capability helpers expose rate-control and quality support. Explicitly
    unsupported settings fail instead of silently falling back.
 6. SPS/PPS policy is configurable as stream-start-only or every-IDR, defaulting
    to every IDR.
 7. Every submitted frame is encoded in submission order at the fixed frame rate
-   configured by `RecordingOptions.frame_rate`. Exact wall-clock timestamps and
-   variable-rate muxing are out of scope for the raw elementary stream.
+   configured by `RecordingOptions.frame_rate`. Matroska derives block
+   timestamps from that rate. Exact wall-clock timestamps and variable-rate
+   muxing are out of scope.
 8. GLSL and generated SPIR-V live together in the source tree. SPIR-V is
    checked in and loaded with `@embedFile`; downstream builds do not run shader
    generation. Regeneration is a documented maintainer command, not part of the
@@ -762,8 +776,8 @@ recording works before a valid stream can be produced.
 
 ## Remaining decisions
 
-None currently. The plan deliberately keeps the first output API to a fixed-rate
-Annex-B H.264 stream through `std.Io.Writer`.
+None currently. Both outputs remain fixed-rate and preserve the forward-only
+`std.Io.Writer` contract.
 
 ## References
 
@@ -773,6 +787,10 @@ Annex-B H.264 stream through `std.Io.Writer`.
   <https://docs.vulkan.org/features/latest/features/proposals/VK_KHR_video_encode_queue.html>
 - `VK_KHR_video_encode_h264` proposal:
   <https://docs.vulkan.org/features/latest/features/proposals/VK_KHR_video_encode_h264.html>
+- Matroska container specification:
+  <https://www.rfc-editor.org/rfc/rfc9559.html>
+- Matroska codec mapping for `V_MPEG4/ISO/AVC`:
+  <https://datatracker.ietf.org/doc/draft-ietf-cellar-codec/>
 - Small MIT-licensed reference implementation used to validate the resource
   inventory and BGRA-to-YCbCr requirement:
   <https://github.com/clemy/vulkan-video-encode-simple>
