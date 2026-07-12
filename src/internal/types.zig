@@ -177,8 +177,8 @@ pub const Clipboard = struct {
 
 pub fn scaledSize(size: Size, scale: ContentScale) Size {
     return .{
-        .width = @intFromFloat(@max(1.0, @as(f64, @floatFromInt(size.width)) * @as(f64, scale.x))),
-        .height = @intFromFloat(@max(1.0, @as(f64, @floatFromInt(size.height)) * @as(f64, scale.y))),
+        .width = if (size.width == 0) 0 else @intFromFloat(@max(1.0, @as(f64, @floatFromInt(size.width)) * @as(f64, scale.x))),
+        .height = if (size.height == 0) 0 else @intFromFloat(@max(1.0, @as(f64, @floatFromInt(size.height)) * @as(f64, scale.y))),
     };
 }
 
@@ -205,6 +205,12 @@ test "scaledSize" {
     const size = scaledSize(.{ .width = 100, .height = 50 }, .{ .x = 1.5, .y = 2.0 });
     try std.testing.expectEqual(@as(i32, 150), size.width);
     try std.testing.expectEqual(@as(i32, 100), size.height);
+}
+
+test "scaledSize preserves a zero extent" {
+    const size = scaledSize(.{ .width = 0, .height = 0 }, .{ .x = 1.5, .y = 2.0 });
+    try std.testing.expectEqual(@as(i32, 0), size.width);
+    try std.testing.expectEqual(@as(i32, 0), size.height);
 }
 
 test "clipboard owns its text and returns an independent copy" {

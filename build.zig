@@ -27,10 +27,10 @@ pub fn build(b: *Build) !void {
     });
     low.addOptions("build_options", options);
 
-    const video_binding = if (enable_vk_video) try addVulkanVideoBinding(b) else null;
+    const video_binding = if (enable_vk_video) addVulkanVideoBinding(b) else null;
     if (video_binding) |binding| low.addImport("_vk_video", binding);
 
-    if (!addPlatformSupport(b, low, target, optimize, enable_wayland)) return;
+    const low_platform_ready = addPlatformSupport(b, low, target, optimize, enable_wayland);
 
     const test_module = b.addModule("low_tests", .{
         .root_source_file = b.path("src/low.zig"),
@@ -39,7 +39,9 @@ pub fn build(b: *Build) !void {
     });
     test_module.addOptions("build_options", options);
     if (video_binding) |binding| test_module.addImport("_vk_video", binding);
-    if (!addPlatformSupport(b, test_module, target, optimize, enable_wayland)) return;
+    const test_platform_ready = addPlatformSupport(b, test_module, target, optimize, enable_wayland);
+
+    if ((enable_vk_video and video_binding == null) or !low_platform_ready or !test_platform_ready) return;
 
     const tests = b.addTest(.{
         .root_module = test_module,
@@ -74,13 +76,12 @@ fn addVideoShaderSteps(b: *Build) void {
     regenerate_step.dependOn(&regenerate.step);
 }
 
-fn addVulkanVideoBinding(b: *Build) !*Build.Module {
-    const headers = b.lazyDependency("vulkan_headers", .{}) orelse
-        return error.VulkanHeadersUnavailable;
+fn addVulkanVideoBinding(b: *Build) ?*Build.Module {
+    const headers = b.lazyDependency("vulkan_headers", .{}) orelse return null;
     const vulkan = b.lazyDependency("vulkan", .{
         .registry = headers.path("registry/vk.xml"),
         .video = headers.path("registry/video.xml"),
-    }) orelse return error.VulkanBindingUnavailable;
+    }) orelse return null;
     return vulkan.module("vulkan-zig");
 }
 
