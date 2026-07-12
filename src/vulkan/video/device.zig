@@ -19,7 +19,18 @@ pub const VideoDevice = struct {
     memory_properties: vk.PhysicalDeviceMemoryProperties,
     attached_targets: usize = 0,
 
-    pub fn init(options: anytype) !VideoDevice {
+    pub const Options = struct {
+        allocator: std.mem.Allocator,
+        instance: *const Vulkan.Instance,
+        physical_device: low_vk.PhysicalDevice,
+        device: *const Vulkan.Device,
+        encode_queue: low_vk.Queue,
+        encode_queue_family: u32,
+        compute_queue: low_vk.Queue,
+        compute_queue_family: u32,
+    };
+
+    pub fn init(options: Options) !VideoDevice {
         const low_instance: *const Vulkan.Instance = options.instance;
         const low_device: *const Vulkan.Device = options.device;
         const instance_handle = toInstance(low_instance.handle);

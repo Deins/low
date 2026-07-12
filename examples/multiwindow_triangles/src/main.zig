@@ -207,7 +207,6 @@ const AppWindow = struct {
     fn init(
         gpa: std.mem.Allocator,
         renderer: *Renderer,
-        context: *low.Context,
         window: *low.Window,
         position: [2]f32,
         velocity: [2]f32,
@@ -216,7 +215,6 @@ const AppWindow = struct {
         return .{
             .window = window,
             .target = try RenderTarget.init(gpa, .{
-                .context = context,
                 .window = window,
                 .instance = &renderer.low_instance,
                 .physical_device = lowPhysicalDevice(renderer.physical_device),
@@ -417,7 +415,6 @@ pub fn main(init: std.process.Init) !void {
     var first: ?AppWindow = try AppWindow.init(
         gpa,
         &renderer,
-        &context,
         first_window,
         .{ -0.3, 0.1 },
         .{ 0.73, 0.52 },
@@ -427,7 +424,6 @@ pub fn main(init: std.process.Init) !void {
     var second: ?AppWindow = try AppWindow.init(
         gpa,
         &renderer,
-        &context,
         second_window,
         .{ 0.25, -0.2 },
         .{ -0.61, 0.67 },

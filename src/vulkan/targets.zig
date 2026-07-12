@@ -5,10 +5,12 @@
 const std = @import("std");
 const vk = @import("api.zig");
 const Vulkan = @import("../vulkan.zig");
+const runtime = @import("../internal/runtime.zig");
 const build_options = @import("build_options");
 const Video = if (build_options.vk_video) @import("video.zig") else struct {
     pub const VideoDevice = opaque {};
     pub const VideoRecorder = struct {};
+    pub const RecordingOptions = void;
     pub const RecordingStatus = void;
 };
 
@@ -21,6 +23,21 @@ pub const MemoryAllocator = struct {
 /// A Vulkan render target associated with one low window.
 pub const RenderTarget = struct {
     const Self = @This();
+    pub const Window = runtime.Window;
+
+    pub const Options = struct {
+        window: *Window,
+        instance: *const Vulkan.Instance,
+        physical_device: vk.PhysicalDevice,
+        device: *const Vulkan.Device,
+        graphics_queue: vk.Queue,
+        graphics_queue_family: u32,
+        command_pool: vk.CommandPool,
+        color_format: vk.Format,
+        frames_in_flight: u32,
+        memory_allocator: ?MemoryAllocator = null,
+        video_device: ?*Video.VideoDevice = null,
+    };
 
     pub const Error = error{
         InvalidFramesInFlight,
@@ -130,14 +147,9 @@ pub const RenderTarget = struct {
     release_recording_fn: *const fn (*anyopaque) void,
     recording_extent_fn: *const fn (*anyopaque, *anyopaque) void,
 
-    pub fn init(allocator: std.mem.Allocator, options: anytype) !Self {
-        const OptionsType = @TypeOf(options);
-        if (!@hasField(OptionsType, "context") or !@hasField(OptionsType, "window")) {
-            @compileError("RenderTarget.init requires context and window");
-        }
+    pub fn init(allocator: std.mem.Allocator, options: Options) !Self {
         if (options.frames_in_flight == 0) return error.InvalidFramesInFlight;
 
-        const Window = @TypeOf(options.window);
         const State = struct {
             const StateSelf = @This();
             const Slot = struct {
@@ -150,7 +162,7 @@ pub const RenderTarget = struct {
             };
 
             allocator: std.mem.Allocator,
-            window: Window,
+            window: *Window,
             instance: *const Vulkan.Instance,
             physical_device: vk.PhysicalDevice,
             device: *const Vulkan.Device,
@@ -732,9 +744,9 @@ pub const RenderTarget = struct {
             .graphics_queue_family = options.graphics_queue_family,
             .command_pool = options.command_pool,
             .color_format = options.color_format,
-            .memory_allocator = if (@hasField(OptionsType, "memory_allocator")) options.memory_allocator else null,
+            .memory_allocator = options.memory_allocator,
             .frames_in_flight = options.frames_in_flight,
-            .video_device = if (comptime build_options.vk_video) if (@hasField(OptionsType, "video_device")) options.video_device else null else null,
+            .video_device = if (comptime build_options.vk_video) options.video_device else null,
         };
         errdefer State.deinitOpaque(@ptrCast(state));
 
@@ -744,10 +756,10 @@ pub const RenderTarget = struct {
         };
 
         state.memory_properties = state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
-        if (options.context.backendKind() != .offscreen) {
+        if (options.window.ctx.backendKind() != .offscreen) {
             state.surface = try Vulkan.createSurface(
                 state.instance,
-                options.context.backendKind(),
+                options.window.ctx.backendKind(),
                 options.window.nativeDisplay(),
                 options.window.nativeSurface(),
             );
@@ -760,7 +772,7 @@ pub const RenderTarget = struct {
             };
         }
         try state.createSync();
-        if (options.context.backendKind() == .offscreen) try state.ensureTarget();
+        if (options.window.ctx.backendKind() == .offscreen) try state.ensureTarget();
         return .{
             .allocator = allocator,
             .state = state,
@@ -784,10 +796,9 @@ pub const RenderTarget = struct {
         return self.acquire_fn(self.state);
     }
 
-    pub fn beginRecording(self: *Self, options: anytype) !void {
+    pub fn beginRecording(self: *Self, options: Video.RecordingOptions) !void {
         if (comptime !build_options.vk_video) @compileError("enable -Dvk_video=true");
-        const normalized = normalizeRecordingOptions(options);
-        return self.begin_recording_fn(self.state, @ptrCast(&normalized));
+        return self.begin_recording_fn(self.state, @ptrCast(&options));
     }
 
     pub fn endRecording(self: *Self) !void {
@@ -819,29 +830,6 @@ pub const RenderTarget = struct {
         return result;
     }
 };
-
-fn normalizeRecordingOptions(options: anytype) Video.RecordingOptions {
-    const Options = @TypeOf(options);
-    if (!@hasField(Options, "allocator") or !@hasField(Options, "io") or !@hasField(Options, "writer")) {
-        @compileError("beginRecording requires allocator, io, and writer");
-    }
-    return .{
-        .allocator = options.allocator,
-        .io = options.io,
-        .writer = options.writer,
-        .frame_rate = if (@hasField(Options, "frame_rate")) .{
-            .numerator = options.frame_rate.numerator,
-            .denominator = options.frame_rate.denominator,
-        } else .{ .numerator = 60, .denominator = 1 },
-        .bitrate = if (@hasField(Options, "bitrate")) options.bitrate else 12_000_000,
-        .gop_size = if (@hasField(Options, "gop_size")) options.gop_size else 60,
-        .quality = if (@hasField(Options, "quality")) options.quality else .balanced,
-        .resize = if (@hasField(Options, "resize")) options.resize else .scale_and_letterbox,
-        .parameter_sets = if (@hasField(Options, "parameter_sets")) options.parameter_sets else .every_idr,
-        .format = if (@hasField(Options, "format")) options.format else .mkv,
-        .timestamp_mode = if (@hasField(Options, "timestamp_mode")) options.timestamp_mode else .fixed_rate,
-    };
-}
 
 pub const VulkanWindow = RenderTarget;
 pub const Target = RenderTarget;
