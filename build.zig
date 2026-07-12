@@ -32,6 +32,11 @@ pub fn build(b: *Build) !void {
 
     const low_platform_ready = addPlatformSupport(b, low, target, optimize, enable_wayland);
 
+    const docs = b.addObject(.{
+        .name = "docs",
+        .root_module = low,
+    });
+
     const test_module = b.addModule("low_tests", .{
         .root_source_file = b.path("src/low.zig"),
         .target = target,
@@ -42,6 +47,14 @@ pub fn build(b: *Build) !void {
     const test_platform_ready = addPlatformSupport(b, test_module, target, optimize, enable_wayland);
 
     if ((enable_vk_video and video_binding == null) or !low_platform_ready or !test_platform_ready) return;
+
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate documentation source");
+    docs_step.dependOn(&install_docs.step);
 
     const tests = b.addTest(.{
         .root_module = test_module,
