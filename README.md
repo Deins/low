@@ -22,16 +22,16 @@ Optionally provides vulkan swapchain management and useful window content featur
 - On Linux, the selected backend’s runtime libraries:
   - Wayland: `libwayland-client` and `libxkbcommon`
   - X11: `libX11`
-- For GNU/Linux targets, glibc at least as new as the version specified by `-Dtarget`
+- For GNU/Linux targets, `glibc` at least as new as the version specified by `-Dtarget`
   (for example, `x86_64-linux-gnu.2.17` requires glibc 2.17+).
+- On windows: win32, dwmapi
 #### Build-time
 See [build.zig.zon](./build.zig.zon). Dependencies are resolved according to
-the enabled configuration:
-- [zig-wayland](https://codeberg.org/ifreund/zig-wayland) for generating wayland api
+the enabled configuration in minimum case - none. 
+For additional functionality:
 - With `-Dvk_video=true`:
   - [vulkan-zig](https://github.com/Snektron/vulkan-zig)
-  - Vulkan-Headers, which provide the Vulkan and video registries; a `VULKAN_SDK`
-    is not required.
+  - Vulkan-Headers if vulkan registries can't be found and are not provided
 
 ## Build and examples
 
