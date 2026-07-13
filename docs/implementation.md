@@ -42,6 +42,13 @@ selection, queues, command pool, and rendering commands. Use
 `targets().RenderContext` to share those low Vulkan resources across multiple
 targets. It can use any Vulkan binding alongside low's binding-agnostic ABI.
 
+`RenderTarget.Options.color_formats` is an ordered preference slice. WSI
+targets choose the first requested surface format, while offscreen targets
+check image-format features; `targets().default_color_formats` tries packed
+10-bit UNORM formats before BGRA8. `chooseSurfaceFormat` and
+`chooseOffscreenFormat` are available when an application must choose its
+pipeline format before creating a target.
+
 `Context.createVulkanSurface()` is a convenience for applications that need a
 surface before device or queue-family selection. `low.vulkan` also exposes
 handle conversion helpers for bridging generated Vulkan bindings to its ABI.

@@ -7,12 +7,58 @@ const vk = @import("api.zig");
 const Vulkan = @import("../vulkan.zig");
 const runtime = @import("../internal/runtime.zig");
 const build_options = @import("build_options");
+const log = std.log.scoped(.low);
 const Video = if (build_options.vk_video) @import("video.zig") else struct {
     pub const VideoDevice = opaque {};
     pub const VideoRecorder = struct {};
     pub const RecordingOptions = void;
     pub const RecordingStatus = void;
 };
+
+/// Preferred render-target formats, ordered from highest precision to widest
+/// presentation support.
+pub const default_color_formats: []const vk.Format = &.{
+    vk.format.a2b10g10r10_unorm_pack32,
+    vk.format.a2r10g10b10_unorm_pack32,
+    vk.format.b8g8r8a8_unorm,
+};
+
+fn formatName(format: vk.Format) []const u8 {
+    return switch (format) {
+        vk.format.a2b10g10r10_unorm_pack32 => "a2b10g10r10_unorm_pack32",
+        vk.format.a2r10g10b10_unorm_pack32 => "a2r10g10b10_unorm_pack32",
+        vk.format.b8g8r8a8_unorm => "b8g8r8a8_unorm",
+        else => "unknown",
+    };
+}
+
+/// Selects the first requested format advertised by a presentation surface.
+/// A surface advertising VK_FORMAT_UNDEFINED accepts the first requested
+/// format, using the color space supplied by that surface entry.
+pub fn chooseSurfaceFormat(available: []const vk.SurfaceFormatKHR, desired: []const vk.Format) ?vk.SurfaceFormatKHR {
+    for (desired) |wanted| {
+        for (available) |candidate| {
+            if (candidate.format == wanted) return candidate;
+        }
+    }
+    for (available) |candidate| {
+        if (candidate.format == vk.format.undefined and desired.len != 0) {
+            return .{ .format = desired[0], .color_space = candidate.color_space };
+        }
+    }
+    return null;
+}
+
+/// Selects the first requested format that supports this target's offscreen
+/// image usage.
+pub fn chooseOffscreenFormat(instance: *const Vulkan.Instance, physical_device: vk.PhysicalDevice, desired: []const vk.Format) ?vk.Format {
+    const required = vk.format_feature.color_attachment_bit | vk.format_feature.transfer_src_bit;
+    for (desired) |wanted| {
+        const properties = instance.getPhysicalDeviceFormatProperties(physical_device, wanted);
+        if (properties.optimal_tiling_features & required == required) return wanted;
+    }
+    return null;
+}
 
 pub const MemoryAllocator = struct {
     context: ?*anyopaque = null,
@@ -42,11 +88,9 @@ pub const RenderTarget = struct {
     pub const Options = struct {
         window: *Window,
         context: *const RenderContext,
-        /// Exact render-target format. A WSI target selects the first surface
-        /// format with this VkFormat; it does not silently substitute another
-        /// format. Packed 10-bit formats are therefore usable when the
-        /// application supplies one advertised by the surface.
-        color_format: vk.Format,
+        /// Render-target formats in preference order. The first format
+        /// supported by the surface or offscreen device is selected.
+        color_formats: []const vk.Format = default_color_formats,
         frames_in_flight: u32 = 2,
         memory_allocator: ?MemoryAllocator = null,
     };
@@ -183,6 +227,7 @@ pub const RenderTarget = struct {
             graphics_queue_family: u32,
             command_pool: vk.CommandPool,
             color_format: vk.Format,
+            color_formats: []vk.Format,
             memory_allocator: ?MemoryAllocator,
             memory_properties: vk.PhysicalDeviceMemoryProperties = undefined,
             frames_in_flight: u32,
@@ -217,6 +262,7 @@ pub const RenderTarget = struct {
                     self.instance.destroySurfaceKHR(self.surface);
                     self.surface = 0;
                 }
+                self.allocator.free(self.color_formats);
                 self.allocator.destroy(self);
             }
 
@@ -613,14 +659,8 @@ pub const RenderTarget = struct {
             fn createSwapchain(self: *StateSelf, capabilities: vk.SurfaceCapabilitiesKHR, wanted_extent: vk.Extent2D) anyerror!void {
                 const formats = try self.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(self.physical_device, self.surface, self.allocator);
                 defer self.allocator.free(formats);
-                var format: ?vk.SurfaceFormatKHR = null;
-                for (formats) |candidate| {
-                    if (candidate.format == self.color_format) {
-                        format = candidate;
-                        break;
-                    }
-                }
-                const selected_format = format orelse return error.UnsupportedSurfaceFormat;
+                const selected_format = chooseSurfaceFormat(formats, self.color_formats) orelse return error.UnsupportedSurfaceFormat;
+                self.color_format = selected_format.format;
                 if (capabilities.supported_usage_flags & vk.image_usage.transfer_src_bit == 0) {
                     return error.UnsupportedSurfaceUsage;
                 }
@@ -763,7 +803,8 @@ pub const RenderTarget = struct {
             .graphics_queue = options.context.graphics_queue,
             .graphics_queue_family = options.context.graphics_queue_family,
             .command_pool = options.context.command_pool,
-            .color_format = options.color_format,
+            .color_format = 0,
+            .color_formats = try allocator.dupe(vk.Format, options.color_formats),
             .memory_allocator = options.memory_allocator,
             .frames_in_flight = options.frames_in_flight,
             .video_device = if (comptime build_options.vk_video) options.context.video_device else null,
@@ -784,13 +825,24 @@ pub const RenderTarget = struct {
                 options.window.nativeSurface(),
             );
             if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, options.context.graphics_queue_family, state.surface) != vk.TRUE) return error.QueueFamilyCannotPresent;
+            const formats = try state.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(state.physical_device, state.surface, allocator);
+            defer allocator.free(formats);
+            state.color_format = (chooseSurfaceFormat(formats, state.color_formats) orelse return error.UnsupportedSurfaceFormat).format;
         } else {
+            state.color_format = chooseOffscreenFormat(state.instance, state.physical_device, state.color_formats) orelse return error.UnsupportedSurfaceFormat;
             if (state.memory_allocator == null) state.memory_allocator = .{
                 .context = state,
                 .allocate_and_bind = State.allocateDefaultMemory,
                 .free = State.freeDefaultMemory,
             };
         }
+        const physical_device_id: usize = if (state.physical_device) |physical_device| @intFromPtr(physical_device) else 0;
+        log.debug("selected Vulkan target: device=0x{x}, backend={s}, queue_family={d}, format={s}", .{
+            physical_device_id,
+            @tagName(options.window.ctx.backendKind()),
+            options.context.graphics_queue_family,
+            formatName(state.color_format),
+        });
         try state.createSync();
         if (options.window.ctx.backendKind() == .offscreen) try state.ensureTarget();
         return .{

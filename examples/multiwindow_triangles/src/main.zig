@@ -2,6 +2,7 @@ const std = @import("std");
 const low = @import("low");
 const vk = @import("vulkan");
 const video = low.vulkan.video();
+const log = std.log.scoped(.low);
 
 const Targets = low.vulkan.targets();
 const RenderTarget = Targets.RenderTarget;
@@ -9,20 +10,6 @@ const RenderContext = Targets.RenderContext;
 const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
 const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
 const triangle_half_size_px: f32 = 70.0;
-
-const ColorFormat = enum {
-    bgra8,
-    a2b10g10r10,
-    a2r10g10b10,
-
-    fn vkFormat(self: ColorFormat) vk.Format {
-        return switch (self) {
-            .bgra8 => .b8g8r8a8_unorm,
-            .a2b10g10r10 => .a2b10g10r10_unorm_pack32,
-            .a2r10g10b10 => .a2r10g10b10_unorm_pack32,
-        };
-    }
-};
 
 const PushConstants = extern struct {
     offset: [2]f32,
@@ -50,6 +37,7 @@ const Renderer = struct {
     pipeline_layout: vk.PipelineLayout,
     pipeline: vk.Pipeline,
     color_format: vk.Format,
+    color_formats: []const low.vulkan.api.Format,
     encode_queue: vk.Queue,
     encode_queue_family: ?u32,
     video_device: ?video.VideoDevice,
@@ -60,10 +48,20 @@ const Renderer = struct {
         instance: vk.InstanceProxy,
         low_instance_input: low.vulkan.Instance,
         presentation_surface: ?vk.SurfaceKHR,
-        color_format: vk.Format,
+        color_formats: []const low.vulkan.api.Format,
         recording_codec: ?video.Codec,
     ) !Renderer {
         const selection = try findDevice(gpa, instance, &low_instance_input, presentation_surface, recording_codec);
+        const color_format = try chooseColorFormat(gpa, &low_instance_input, low.vulkan.toPhysicalDevice(selection.physical_device), presentation_surface, color_formats);
+        const properties = instance.getPhysicalDeviceProperties(selection.physical_device);
+        const version: vk.Version = @bitCast(properties.api_version);
+        log.debug("selected Vulkan device: {s}, API {d}.{d}.{d}, graphics queue family {d}", .{
+            std.mem.sliceTo(&properties.device_name, 0),
+            version.major,
+            version.minor,
+            version.patch,
+            selection.graphics_queue_family,
+        });
 
         var features_13 = vk.PhysicalDeviceVulkan13Features{
             .synchronization_2 = .true,
@@ -165,6 +163,7 @@ const Renderer = struct {
             .pipeline_layout = pipeline_layout,
             .pipeline = pipeline,
             .color_format = color_format,
+            .color_formats = color_formats,
             .encode_queue = encode_queue,
             .encode_queue_family = selection.encode_queue_family,
             .video_device = null,
@@ -219,7 +218,7 @@ const AppWindow = struct {
             .target = try RenderTarget.init(gpa, .{
                 .window = window,
                 .context = &renderer.render_context,
-                .color_format = low.vulkan.toFormat(renderer.color_format),
+                .color_formats = renderer.color_formats,
             }),
             .position = position,
             .velocity = velocity,
@@ -366,7 +365,7 @@ pub fn main(init: std.process.Init) !void {
         .offscreen = .{ .frame_mode = .{ .continuous = .{} } },
     });
     defer context.deinit();
-    std.log.info("using {s} backend", .{@tagName(context.backendKind())});
+    log.debug("using {s} backend", .{@tagName(context.backendKind())});
     const extensions = context.requiredVulkanInstanceExtensions();
 
     const app_info = vk.ApplicationInfo{
@@ -402,7 +401,7 @@ pub fn main(init: std.process.Init) !void {
         instance,
         low_instance,
         selection_surface,
-        app_options.color_format.vkFormat(),
+        Targets.default_color_formats,
         if (recording_requested) app_options.record_codec else null,
     ) catch |err| {
         if (recording_requested) {
@@ -521,6 +520,27 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+fn chooseColorFormat(
+    allocator: std.mem.Allocator,
+    instance: *const low.vulkan.Instance,
+    physical_device: low.vulkan.api.PhysicalDevice,
+    presentation_surface: ?vk.SurfaceKHR,
+    desired: []const low.vulkan.api.Format,
+) !vk.Format {
+    const selected = if (presentation_surface) |surface| blk: {
+        const available = try instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
+            physical_device,
+            @intCast(@intFromEnum(surface)),
+            allocator,
+        );
+        defer allocator.free(available);
+        break :blk (Targets.chooseSurfaceFormat(available, desired) orelse return error.UnsupportedSurfaceFormat).format;
+    } else blk: {
+        break :blk Targets.chooseOffscreenFormat(instance, physical_device, desired) orelse return error.UnsupportedSurfaceFormat;
+    };
+    return @enumFromInt(selected);
+}
+
 fn findDevice(
     gpa: std.mem.Allocator,
     instance: vk.InstanceProxy,
@@ -559,7 +579,7 @@ fn findDevice(
                 }, &.{codec}) orelse continue;
                 if (!videoCodecFeaturesSupported(instance, physical_device, selected.codec())) continue;
                 const coded_extent = selected.codedExtent();
-                std.log.info("{s} encode: coded extent {d}x{d}, queue family {d}", .{
+                log.debug("{s} encode: coded extent {d}x{d}, queue family {d}", .{
                     @tagName(selected.codec()),
                     coded_extent.width,
                     coded_extent.height,
@@ -721,7 +741,6 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
 
 const AppOptions = struct {
     backend: low.BackendRequest = .auto,
-    color_format: ColorFormat = .bgra8,
     record: bool = false,
     dump: bool = false,
     record_codec: video.Codec = .av1,
@@ -739,9 +758,6 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
             const name = arg["--desktop=".len..];
             result.backend = std.meta.stringToEnum(low.BackendRequest, name) orelse return error.InvalidDesktop;
             desktop_selected = true;
-        } else if (std.mem.startsWith(u8, arg, "--color-format=")) {
-            const name = arg["--color-format=".len..];
-            result.color_format = std.meta.stringToEnum(ColorFormat, name) orelse return error.InvalidColorFormat;
         } else if (std.mem.eql(u8, arg, "--record")) {
             result.record = true;
         } else if (std.mem.eql(u8, arg, "--dump")) {

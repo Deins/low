@@ -89,6 +89,18 @@ pub const format = struct {
     pub const a2b10g10r10_unorm_pack32: Format = 64;
 };
 
+pub const FormatFeatureFlags = u32;
+pub const format_feature = struct {
+    pub const color_attachment_bit: FormatFeatureFlags = 1 << 6;
+    pub const transfer_src_bit: FormatFeatureFlags = 1 << 14;
+};
+
+pub const FormatProperties = extern struct {
+    linear_tiling_features: FormatFeatureFlags,
+    optimal_tiling_features: FormatFeatureFlags,
+    buffer_features: FormatFeatureFlags,
+};
+
 pub const ColorSpaceKHR = i32;
 pub const color_space = struct {
     pub const srgb_nonlinear_khr: ColorSpaceKHR = 0;
@@ -524,6 +536,7 @@ pub const PfnDestroySurfaceKHR = *const fn (InstanceHandle, SurfaceKHR, ?*const 
 pub const PfnGetPhysicalDeviceSurfaceSupportKHR = *const fn (PhysicalDevice, u32, SurfaceKHR, *Bool32) callconv(call_conv) Result;
 pub const PfnGetPhysicalDeviceSurfaceCapabilitiesKHR = *const fn (PhysicalDevice, SurfaceKHR, *SurfaceCapabilitiesKHR) callconv(call_conv) Result;
 pub const PfnGetPhysicalDeviceSurfaceFormatsKHR = *const fn (PhysicalDevice, SurfaceKHR, *u32, ?[*]SurfaceFormatKHR) callconv(call_conv) Result;
+pub const PfnGetPhysicalDeviceFormatProperties = *const fn (PhysicalDevice, Format, *FormatProperties) callconv(call_conv) void;
 pub const PfnGetPhysicalDeviceMemoryProperties = *const fn (PhysicalDevice, *PhysicalDeviceMemoryProperties) callconv(call_conv) void;
 pub const PfnCreateWin32SurfaceKHR = *const fn (InstanceHandle, *const Win32SurfaceCreateInfoKHR, ?*const anyopaque, *SurfaceKHR) callconv(call_conv) Result;
 pub const PfnCreateWaylandSurfaceKHR = *const fn (InstanceHandle, *const WaylandSurfaceCreateInfoKHR, ?*const anyopaque, *SurfaceKHR) callconv(call_conv) Result;

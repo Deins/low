@@ -23,15 +23,11 @@ zig build run
 zig build run -- --desktop=x11
 ```
 
-The render format defaults to 8-bit BGRA. Select a packed 10-bit UNORM
-surface format explicitly when the window system advertises it:
-
-```sh
-zig build run -- --color-format=a2b10g10r10
-```
-
-`a2r10g10b10` is also accepted. The selection is exact; the example reports
-an unsupported-surface-format error instead of silently falling back.
+The render format prefers packed 10-bit UNORM targets and falls back to 8-bit
+BGRA when the surface or device does not advertise a supported 10-bit format.
+The preference list is supplied to `low`'s `RenderTarget` API, and selection
+is reported as an unsupported-surface-format error when none of the requested
+formats is available.
 
 For offscreen or desktop screenshot output, pass `--dump`. This writes each
 rendered frame as `tmp/first-0001.bmp`, `tmp/second-0001.bmp`, and so on. BMP

@@ -83,6 +83,7 @@ pub const Instance = struct {
     pub const Dispatch = struct {
         get_device_proc_addr: api.PfnGetDeviceProcAddr,
         destroy_instance: api.PfnDestroyInstance,
+        get_physical_device_format_properties: api.PfnGetPhysicalDeviceFormatProperties,
         get_physical_device_memory_properties: api.PfnGetPhysicalDeviceMemoryProperties,
         destroy_surface_khr: ?api.PfnDestroySurfaceKHR,
         get_physical_device_surface_support_khr: ?api.PfnGetPhysicalDeviceSurfaceSupportKHR,
@@ -104,6 +105,7 @@ pub const Instance = struct {
             .dispatch = .{
                 .get_device_proc_addr = try loader.loadInstance(handle, api.PfnGetDeviceProcAddr, "vkGetDeviceProcAddr"),
                 .destroy_instance = try loader.loadInstance(handle, api.PfnDestroyInstance, "vkDestroyInstance"),
+                .get_physical_device_format_properties = try loader.loadInstance(handle, api.PfnGetPhysicalDeviceFormatProperties, "vkGetPhysicalDeviceFormatProperties"),
                 .get_physical_device_memory_properties = try loader.loadInstance(handle, api.PfnGetPhysicalDeviceMemoryProperties, "vkGetPhysicalDeviceMemoryProperties"),
                 .destroy_surface_khr = loadOptionalInstance(loader, handle, api.PfnDestroySurfaceKHR, "vkDestroySurfaceKHR"),
                 .get_physical_device_surface_support_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceSupportKHR, "vkGetPhysicalDeviceSurfaceSupportKHR"),
@@ -119,6 +121,12 @@ pub const Instance = struct {
     pub fn getPhysicalDeviceMemoryProperties(self: *const Self, physical_device: api.PhysicalDevice) api.PhysicalDeviceMemoryProperties {
         var properties: api.PhysicalDeviceMemoryProperties = undefined;
         self.dispatch.get_physical_device_memory_properties(physical_device, &properties);
+        return properties;
+    }
+
+    pub fn getPhysicalDeviceFormatProperties(self: *const Self, physical_device: api.PhysicalDevice, format: api.Format) api.FormatProperties {
+        var properties: api.FormatProperties = undefined;
+        self.dispatch.get_physical_device_format_properties(physical_device, format, &properties);
         return properties;
     }
 
