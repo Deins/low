@@ -383,7 +383,7 @@ pub const RenderTarget = struct {
 
                 var image_index: u32 = slot_index;
                 if (self.surface != 0) {
-                    const acquired = self.device.acquireNextImageKHR(
+                    const acquired = (self.device.acquireNextImageKHR(
                         self.swapchain,
                         std.math.maxInt(u64),
                         slot.image_available,
@@ -394,8 +394,7 @@ pub const RenderTarget = struct {
                             return error.FrameOutOfDate;
                         },
                         else => return err,
-                    };
-                    if (acquired.result == .timeout or acquired.result == .not_ready) return error.FrameSkipped;
+                    }) orelse return error.FrameSkipped;
                     image_index = acquired.image_index;
                     if (acquired.result == .suboptimal_khr) self.recreate_pending = true;
                 }

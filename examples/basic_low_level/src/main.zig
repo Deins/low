@@ -169,6 +169,7 @@ const RawTarget = struct {
             self.image_available,
             .null_handle,
         );
+        // Neither status acquires an image, so image_index is invalid here.
         if (acquired.result == .timeout or acquired.result == .not_ready) return;
 
         try self.device.resetCommandBuffer(self.command_buffer, .{});

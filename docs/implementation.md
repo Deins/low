@@ -53,6 +53,11 @@ pipeline format before creating a target.
 surface before device or queue-family selection. `low.vulkan` also exposes
 handle conversion helpers for bridging generated Vulkan bindings to its ABI.
 
+`Device.acquireNextImageKHR()` returns `null` for `VK_NOT_READY` and
+`VK_TIMEOUT`; neither outcome acquires an image or supplies an image index.
+`RenderTarget.acquire()` translates those normal WSI outcomes to
+`error.FrameSkipped`.
+
 Vulkan Video recording is enabled separately and implies `vk_extras`:
 
 ```zig

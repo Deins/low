@@ -13,37 +13,42 @@ pub const Loader = struct {
     const Self = @This();
     pub const Error = error{ VulkanLoaderUnavailable, VulkanFunctionUnavailable };
 
-    library: ?*anyopaque,
+    const Library = if (builtin.target.os.tag == .windows) *anyopaque else std.DynLib;
+
+    library: ?Library,
     get_instance_proc_addr: api.PfnGetInstanceProcAddr,
 
     /// Opens the system Vulkan loader and resolves vkGetInstanceProcAddr.
     pub fn init() Error!Self {
         var self: Self = undefined;
-        self.library = switch (builtin.target.os.tag) {
-            .linux => @ptrCast(std.c.dlopen("libvulkan.so.1", .{ .LAZY = true }) orelse
-                return error.VulkanLoaderUnavailable),
-            .windows => @ptrCast(LoadLibraryExW(
+        if (builtin.target.os.tag == .linux) {
+            self.library = std.DynLib.open("libvulkan.so.1") catch return error.VulkanLoaderUnavailable;
+            self.get_instance_proc_addr = self.library.?.lookup(api.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse {
+                self.deinit();
+                return error.VulkanLoaderUnavailable;
+            };
+        } else if (builtin.target.os.tag == .windows) {
+            self.library = LoadLibraryExW(
                 std.unicode.utf8ToUtf16LeStringLiteral("vulkan-1.dll"),
                 null,
                 0,
-            ) orelse return error.VulkanLoaderUnavailable),
-            else => return error.VulkanLoaderUnavailable,
-        };
-        self.get_instance_proc_addr = rawLookup(api.PfnGetInstanceProcAddr, self.library.?, "vkGetInstanceProcAddr") orelse {
-            self.deinit();
-            return error.VulkanLoaderUnavailable;
-        };
+            ) orelse return error.VulkanLoaderUnavailable;
+            self.get_instance_proc_addr = rawLookup(api.PfnGetInstanceProcAddr, self.library.?, "vkGetInstanceProcAddr") orelse {
+                self.deinit();
+                return error.VulkanLoaderUnavailable;
+            };
+        } else return error.VulkanLoaderUnavailable;
         return self;
     }
 
     /// Releases the loader. All Vulkan objects created from it must already
     /// have been destroyed.
     pub fn deinit(self: *Self) void {
-        const library = self.library orelse return;
-        switch (builtin.target.os.tag) {
-            .linux => _ = std.c.dlclose(library),
-            .windows => _ = FreeLibrary(@ptrCast(library)),
-            else => {},
+        if (builtin.target.os.tag == .windows) {
+            _ = FreeLibrary(self.library orelse return);
+        } else {
+            var library = self.library orelse return;
+            library.close();
         }
         self.library = null;
     }
@@ -57,12 +62,8 @@ pub const Loader = struct {
     }
 
     fn rawLookup(comptime T: type, library: *anyopaque, name: [:0]const u8) ?T {
-        const raw: ?*const anyopaque = switch (builtin.target.os.tag) {
-            .linux => @ptrCast(std.c.dlsym(library, name) orelse return null),
-            .windows => @ptrCast(GetProcAddress(@ptrCast(library), name.ptr) orelse return null),
-            else => return null,
-        };
-        return if (raw) |value| @ptrCast(@alignCast(value)) else null;
+        const raw = GetProcAddress(@ptrCast(library), name.ptr) orelse return null;
+        return @ptrCast(@alignCast(raw));
     }
 
     extern "kernel32" fn LoadLibraryExW(
@@ -290,22 +291,40 @@ pub const Device = struct {
         try check(self.dispatch.reset_fences(self.handle, @intCast(fences.len), fences.ptr));
     }
 
+    /// An acquired image. `result` is either `VK_SUCCESS` or
+    /// `VK_SUBOPTIMAL_KHR`.
     pub const AcquireResult = struct {
         result: api.Result,
         image_index: u32,
     };
 
-    pub fn acquireNextImageKHR(self: *const Self, swapchain: api.SwapchainKHR, timeout: u64, semaphore: api.Semaphore, fence: api.Fence) !AcquireResult {
-        var image_index: u32 = 0;
+    /// Acquires the next presentable image. Returns `null` for `VK_NOT_READY`
+    /// and `VK_TIMEOUT`, when no image index is available.
+    pub fn acquireNextImageKHR(self: *const Self, swapchain: api.SwapchainKHR, timeout: u64, semaphore: api.Semaphore, fence: api.Fence) !?AcquireResult {
+        var image_index: u32 = undefined;
         const function = self.dispatch.acquire_next_image_khr orelse return error.VulkanFunctionUnavailable;
-        const result = try allowStatus(function(self.handle, swapchain, timeout, semaphore, fence, &image_index));
-        return .{ .result = result, .image_index = image_index };
+        const result = function(self.handle, swapchain, timeout, semaphore, fence, &image_index);
+        return switch (result) {
+            .success, .suboptimal_khr => .{ .result = result, .image_index = image_index },
+            .not_ready, .timeout => null,
+            else => {
+                try check(result);
+                return error.VulkanError;
+            },
+        };
     }
 
     pub fn resetCommandBuffer(self: *const Self, command_buffer: api.CommandBuffer) !void {
         try check(self.dispatch.reset_command_buffer(command_buffer, 0));
     }
 
+    /// Begins recording using caller-provided Vulkan begin information.
+    /// Secondary command buffers require a valid `p_inheritance_info`.
+    pub fn beginCommandBufferWithInfo(self: *const Self, command_buffer: api.CommandBuffer, info: *const api.CommandBufferBeginInfo) !void {
+        try check(self.dispatch.begin_command_buffer(command_buffer, info));
+    }
+
+    /// Begins a primary command buffer for one-time submission.
     pub fn beginCommandBuffer(self: *const Self, command_buffer: api.CommandBuffer) !void {
         const info = api.CommandBufferBeginInfo{
             .s_type = .command_buffer_begin_info,
@@ -313,7 +332,7 @@ pub const Device = struct {
             .flags = api.command_buffer_usage.one_time_submit_bit,
             .p_inheritance_info = null,
         };
-        try check(self.dispatch.begin_command_buffer(command_buffer, &info));
+        try self.beginCommandBufferWithInfo(command_buffer, &info);
     }
 
     pub fn endCommandBuffer(self: *const Self, command_buffer: api.CommandBuffer) !void {
@@ -373,6 +392,7 @@ pub const Device = struct {
     }
 
     pub fn allocateCommandBuffers(self: *const Self, info: *const api.CommandBufferAllocateInfo, buffers: []api.CommandBuffer) !void {
+        if (builtin.mode == .Debug) std.debug.assert(buffers.len == @as(usize, info.command_buffer_count));
         try check(self.dispatch.allocate_command_buffers(self.handle, info, buffers.ptr));
     }
 
@@ -544,6 +564,11 @@ pub fn video() type {
 /// instance; this helper only creates the surface itself.
 pub fn createSurface(instance: *const Instance, backend_kind: types.BackendKind, native_display: *anyopaque, native_surface: usize) !api.SurfaceKHR {
     if (builtin.target.os.tag == .windows) {
+        switch (backend_kind) {
+            .windows => {},
+            .offscreen => return error.OffscreenSurfaceUnavailable,
+            .wayland, .x11 => return error.UnsupportedPlatform,
+        }
         const info = api.Win32SurfaceCreateInfoKHR{
             .s_type = .win32_surface_create_info_khr,
             .p_next = null,
@@ -621,4 +646,93 @@ fn check(result: api.Result) !void {
         .error_unknown => error.VulkanError,
         else => error.VulkanError,
     };
+}
+
+const VulkanTestStubs = struct {
+    fn noImage(_: api.DeviceHandle, _: api.SwapchainKHR, _: u64, _: api.Semaphore, _: api.Fence, image_index: *u32) callconv(api.call_conv) api.Result {
+        image_index.* = 99;
+        return .timeout;
+    }
+
+    fn notReady(_: api.DeviceHandle, _: api.SwapchainKHR, _: u64, _: api.Semaphore, _: api.Fence, image_index: *u32) callconv(api.call_conv) api.Result {
+        image_index.* = 99;
+        return .not_ready;
+    }
+
+    fn acquired(_: api.DeviceHandle, _: api.SwapchainKHR, _: u64, _: api.Semaphore, _: api.Fence, image_index: *u32) callconv(api.call_conv) api.Result {
+        image_index.* = 7;
+        return .suboptimal_khr;
+    }
+
+    fn beginWithInheritance(_: api.CommandBuffer, info: *const api.CommandBufferBeginInfo) callconv(api.call_conv) api.Result {
+        std.debug.assert(info.p_inheritance_info != null);
+        std.debug.assert(info.p_inheritance_info.?.s_type == .command_buffer_inheritance_info);
+        return .success;
+    }
+
+    fn createWin32Surface(_: api.InstanceHandle, _: *const api.Win32SurfaceCreateInfoKHR, _: ?*const anyopaque, surface: *api.SurfaceKHR) callconv(api.call_conv) api.Result {
+        surface.* = 1;
+        return .success;
+    }
+};
+
+fn testDevice(acquire: api.PfnAcquireNextImageKHR) Device {
+    var dispatch: Device.Dispatch = undefined;
+    dispatch.acquire_next_image_khr = acquire;
+    return .{ .handle = null, .dispatch = dispatch };
+}
+
+test "acquireNextImageKHR omits the index when no image is acquired" {
+    const device = testDevice(VulkanTestStubs.noImage);
+    const acquired = try device.acquireNextImageKHR(0, 0, 0, 0);
+    try std.testing.expect(acquired == null);
+
+    const not_ready_device = testDevice(VulkanTestStubs.notReady);
+    const not_ready = try not_ready_device.acquireNextImageKHR(0, 0, 0, 0);
+    try std.testing.expect(not_ready == null);
+}
+
+test "acquireNextImageKHR returns an index only after acquisition" {
+    const device = testDevice(VulkanTestStubs.acquired);
+    const acquired = (try device.acquireNextImageKHR(0, 0, 0, 0)).?;
+    try std.testing.expectEqual(api.Result.suboptimal_khr, acquired.result);
+    try std.testing.expectEqual(@as(u32, 7), acquired.image_index);
+}
+
+test "beginCommandBufferWithInfo accepts secondary inheritance" {
+    var dispatch: Device.Dispatch = undefined;
+    dispatch.begin_command_buffer = VulkanTestStubs.beginWithInheritance;
+    const device = Device{ .handle = null, .dispatch = dispatch };
+    const inheritance = api.CommandBufferInheritanceInfo{
+        .s_type = .command_buffer_inheritance_info,
+        .p_next = null,
+        .render_pass = 0,
+        .subpass = 0,
+        .framebuffer = 0,
+        .occlusion_query_enable = api.FALSE,
+        .query_flags = 0,
+        .pipeline_statistics = 0,
+    };
+    try device.beginCommandBufferWithInfo(null, &.{
+        .s_type = .command_buffer_begin_info,
+        .p_next = null,
+        .flags = api.command_buffer_usage.render_pass_continue_bit,
+        .p_inheritance_info = &inheritance,
+    });
+}
+
+test "createSurface rejects an offscreen backend" {
+    if (builtin.target.os.tag != .linux and builtin.target.os.tag != .windows) return;
+
+    var dispatch: Instance.Dispatch = undefined;
+    dispatch.create_win32_surface_khr = VulkanTestStubs.createWin32Surface;
+    const instance = Instance{
+        .handle = null,
+        .get_instance_proc_addr = undefined,
+        .dispatch = dispatch,
+    };
+    try std.testing.expectError(
+        error.OffscreenSurfaceUnavailable,
+        createSurface(&instance, .offscreen, @ptrFromInt(1), 0),
+    );
 }

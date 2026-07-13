@@ -28,6 +28,8 @@ pub const Semaphore = u64;
 pub const Fence = u64;
 pub const CommandPool = u64;
 pub const Buffer = u64;
+pub const RenderPass = u64;
+pub const Framebuffer = u64;
 
 pub const Result = enum(i32) {
     success = 0,
@@ -70,6 +72,7 @@ pub const StructureType = enum(i32) {
     image_view_create_info = 15,
     command_pool_create_info = 39,
     command_buffer_allocate_info = 40,
+    command_buffer_inheritance_info = 41,
     command_buffer_begin_info = 42,
     buffer_memory_barrier = 44,
     image_memory_barrier = 45,
@@ -91,7 +94,7 @@ pub const format = struct {
 
 pub const FormatFeatureFlags = u32;
 pub const format_feature = struct {
-    pub const color_attachment_bit: FormatFeatureFlags = 1 << 6;
+    pub const color_attachment_bit: FormatFeatureFlags = 1 << 7;
     pub const transfer_src_bit: FormatFeatureFlags = 1 << 14;
 };
 
@@ -175,6 +178,8 @@ pub const XlibSurfaceCreateFlagsKHR = u32;
 pub const SurfaceTransformFlagsKHR = u32;
 pub const CompositeAlphaFlagsKHR = u32;
 pub const QueueFlags = u32;
+pub const QueryControlFlags = u32;
+pub const QueryPipelineStatisticFlags = u32;
 pub const MemoryPropertyFlags = u32;
 pub const MemoryHeapFlags = u32;
 
@@ -210,6 +215,8 @@ pub const access = struct {
 
 pub const command_buffer_usage = struct {
     pub const one_time_submit_bit: CommandBufferUsageFlags = 1 << 0;
+    pub const render_pass_continue_bit: CommandBufferUsageFlags = 1 << 1;
+    pub const simultaneous_use_bit: CommandBufferUsageFlags = 1 << 2;
 };
 
 pub const command_pool_create = struct {
@@ -442,11 +449,22 @@ pub const FenceCreateInfo = extern struct {
     flags: FenceCreateFlags,
 };
 
+pub const CommandBufferInheritanceInfo = extern struct {
+    s_type: StructureType,
+    p_next: ?*const anyopaque,
+    render_pass: RenderPass,
+    subpass: u32,
+    framebuffer: Framebuffer,
+    occlusion_query_enable: Bool32,
+    query_flags: QueryControlFlags,
+    pipeline_statistics: QueryPipelineStatisticFlags,
+};
+
 pub const CommandBufferBeginInfo = extern struct {
     s_type: StructureType,
     p_next: ?*const anyopaque,
     flags: CommandBufferUsageFlags,
-    p_inheritance_info: ?*const anyopaque,
+    p_inheritance_info: ?*const CommandBufferInheritanceInfo,
 };
 
 pub const SubmitInfo = extern struct {

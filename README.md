@@ -59,4 +59,7 @@ platform and Vulkan-layer internals, including the Vulkan Video implementation
 invariants and validation guidance, see the [implementation notes](docs/implementation.md).
 
 ### Deployment & cross-compilation
-Zig builds & optimizes for specific hostmachine. For portable deployments or cross-compilation specify target such as `-Dtarget=x86_64-windows-gnu` or `-Dtarget=x86_64-linux-gnu`.
+For portable deployments or cross-compilation, specify a target such as :
+- `-Dtarget=x86_64-windows-gnu`
+- `-Dtarget=x86_64-linux-gnu.2.17`   
+    For GNU/Linux targets, the version suffix specifies the minimum supported glibc version. For example, gnu.2.17 targets glibc 2.17 or newer. Choose the version according to the compatibility requirements of your deployment.
