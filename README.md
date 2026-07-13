@@ -26,9 +26,8 @@ Optionally provides vulkan swapchain management and useful window content featur
   (for example, `x86_64-linux-gnu.2.17` requires glibc 2.17+).
 - On windows: win32, dwmapi
 #### Build-time
-See [build.zig.zon](./build.zig.zon). Dependencies are resolved according to
-the enabled configuration in minimum case - none. 
-For additional functionality:
+See [build.zig.zon](./build.zig.zon). Depends on configuration.
+For full additional functionality:
 - With `-Dvk_video=true`:
   - [vulkan-zig](https://github.com/Snektron/vulkan-zig)
   - Vulkan-Headers if vulkan registries can't be found and are not provided

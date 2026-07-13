@@ -225,10 +225,10 @@ fn setFullscreen(window: *Window) void {
 
     var rect: win32.RECT = undefined;
     _ = win32.GetWindowRect(native.handle, &rect);
-    const style: win32.WINDOW_STYLE = @bitCast(win32.GetWindowLongPtrW(native.handle, ._STYLE));
+    const style: win32.WINDOW_STYLE = @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(native.handle, ._STYLE))))));
     native.windowed = .{ .style = style, .rect = rect };
 
-    _ = win32.SetWindowLongPtrW(native.handle, ._STYLE, @bitCast(win32.WS_POPUP));
+    _ = win32.SetWindowLongPtrW(native.handle, ._STYLE, @intCast(@as(u32, @bitCast(win32.WS_POPUP))));
     var monitor_info: win32.MONITORINFO = .{
         .cbSize = @sizeOf(win32.MONITORINFO),
         .rcMonitor = undefined,
@@ -276,7 +276,7 @@ fn setResizable(window: *Window, resizable: bool) void {
     var style: win32.WINDOW_STYLE = if (native.windowed) |saved|
         saved.style
     else
-        @bitCast(win32.GetWindowLongPtrW(native.handle, ._STYLE));
+        @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(native.handle, ._STYLE))))));
     if (!window.decorated) return;
     style.THICKFRAME = @intFromBool(resizable);
     // MAXIMIZEBOX shares bit 16 with TABSTOP in the generated bindings.
@@ -284,7 +284,7 @@ fn setResizable(window: *Window, resizable: bool) void {
     if (native.windowed) |*saved| {
         saved.style = style;
     } else {
-        _ = win32.SetWindowLongPtrW(native.handle, ._STYLE, @bitCast(style));
+        _ = win32.SetWindowLongPtrW(native.handle, ._STYLE, @intCast(@as(u32, @bitCast(style))));
         refreshWindowFrame(window);
     }
 }
@@ -326,8 +326,8 @@ fn adjustedOuterSize(client: runtime.Size, style: win32.WINDOW_STYLE, ex_style: 
 
 fn currentOuterSizeForContent(window: *Window, content: runtime.Size) runtime.Size {
     const hwnd = windowHandle(window);
-    const style: win32.WINDOW_STYLE = @bitCast(win32.GetWindowLongPtrW(hwnd, ._STYLE));
-    const ex_style: win32.WINDOW_EX_STYLE = @bitCast(win32.GetWindowLongPtrW(hwnd, ._EXSTYLE));
+    const style: win32.WINDOW_STYLE = @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(hwnd, ._STYLE))))));
+    const ex_style: win32.WINDOW_EX_STYLE = @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(hwnd, ._EXSTYLE))))));
     return adjustedOuterSize(types.scaledSize(content, window.content_scale), style, ex_style, win32.GetDpiForWindow(hwnd));
 }
 
@@ -345,7 +345,7 @@ fn refreshWindowFrame(window: *Window) void {
 fn restoreWindowedState(window: *Window) void {
     const native = windowData(window);
     const saved = native.windowed orelse return;
-    _ = win32.SetWindowLongPtrW(native.handle, ._STYLE, @bitCast(saved.style));
+    _ = win32.SetWindowLongPtrW(native.handle, ._STYLE, @intCast(@as(u32, @bitCast(saved.style))));
     _ = win32.SetWindowPos(
         native.handle,
         null,
