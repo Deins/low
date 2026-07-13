@@ -51,7 +51,9 @@ pub const RecordingTiming = union(enum) {
 /// `Recorder.end`) before closing the writer so pending GPU work is drained
 /// and the container is finalized.
 ///
-/// The recorder encodes BGRA8 render-target frames. It does not capture audio.
+/// The recorder accepts BGRA8 and packed 10-bit UNORM render-target frames.
+/// Packed 10-bit sources are converted to the recorder's 8-bit 4:2:0 encode
+/// input; it does not capture audio.
 pub const RecordingOptions = struct {
     /// Used for temporary encoder state and capability queries. It must remain
     /// valid until recording has ended and resources have been released.
@@ -157,7 +159,7 @@ pub const Recorder = struct {
         if (self.run != null) return error.RecordingAlreadyActive;
         if (self.cache_poisoned) self.releaseResources();
         if (self.frames_in_flight == 0) return error.InvalidFramesInFlight;
-        if (self.color_format != low_vk.format.b8g8r8a8_unorm) return error.UnsupportedSourceFormat;
+        if (!sourceFormatSupported(self.color_format)) return error.UnsupportedSourceFormat;
         try validateRecordingCodec(options.codec);
         try options.timing.frameRate().validate();
         if (options.bitrate == 0) return error.InvalidBitrate;
@@ -1680,6 +1682,12 @@ fn validateRecordingCodec(codec: capabilities.Codec) !void {
     _ = codec;
 }
 
+fn sourceFormatSupported(format: low_vk.Format) bool {
+    return format == low_vk.format.b8g8r8a8_unorm or
+        format == low_vk.format.a2b10g10r10_unorm_pack32 or
+        format == low_vk.format.a2r10g10b10_unorm_pack32;
+}
+
 fn isSharedError(err: anyerror) bool {
     return err == error.DeviceLost or err == error.OutOfDeviceMemory or err == error.OutOfHostMemory;
 }
@@ -1779,6 +1787,13 @@ test "recorder accepts every advertised recording codec" {
     try validateRecordingCodec(.h264);
     try validateRecordingCodec(.h265);
     try validateRecordingCodec(.av1);
+}
+
+test "recorder accepts packed 10-bit UNORM source formats" {
+    try std.testing.expect(sourceFormatSupported(low_vk.format.b8g8r8a8_unorm));
+    try std.testing.expect(sourceFormatSupported(low_vk.format.a2b10g10r10_unorm_pack32));
+    try std.testing.expect(sourceFormatSupported(low_vk.format.a2r10g10b10_unorm_pack32));
+    try std.testing.expect(!sourceFormatSupported(.undefined));
 }
 
 test "recorder status transitions are non-consuming" {

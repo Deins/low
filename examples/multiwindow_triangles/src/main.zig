@@ -339,9 +339,6 @@ pub fn main(init: std.process.Init) !void {
 
     const app_options = try parseOptions(args);
     const recording_requested = app_options.record;
-    if (recording_requested and app_options.color_format != .bgra8) {
-        return error.VideoRecordingRequiresBgra8;
-    }
 
     var first_record_file: ?std.Io.File = null;
     var second_record_file: ?std.Io.File = null;
@@ -448,7 +445,7 @@ pub fn main(init: std.process.Init) !void {
 
     var previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
     var rendered_frames: u32 = 0;
-    if (offscreen) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
+    if (app_options.dump) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
     while (first != null or second != null) {
         if (offscreen) try context.nextFrame();
         context.pollEvents();
@@ -499,7 +496,7 @@ pub fn main(init: std.process.Init) !void {
             if (app_window.window.shouldRender()) {
                 app_window.update(dt);
                 var path_buffer: [64]u8 = undefined;
-                const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
+                const path = if (app_options.dump) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
                 try app_window.draw(&renderer, init.io, path);
                 rendered = true;
             }
@@ -508,7 +505,7 @@ pub fn main(init: std.process.Init) !void {
             if (app_window.window.shouldRender()) {
                 app_window.update(dt);
                 var path_buffer: [64]u8 = undefined;
-                const path = if (offscreen) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
+                const path = if (app_options.dump) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
                 try app_window.draw(&renderer, init.io, path);
                 rendered = true;
             }
@@ -726,6 +723,7 @@ const AppOptions = struct {
     backend: low.BackendRequest = .auto,
     color_format: ColorFormat = .bgra8,
     record: bool = false,
+    dump: bool = false,
     record_codec: video.Codec = .av1,
     frames: ?u32 = null,
 };
@@ -746,6 +744,8 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
             result.color_format = std.meta.stringToEnum(ColorFormat, name) orelse return error.InvalidColorFormat;
         } else if (std.mem.eql(u8, arg, "--record")) {
             result.record = true;
+        } else if (std.mem.eql(u8, arg, "--dump")) {
+            result.dump = true;
         } else if (std.mem.startsWith(u8, arg, "--record-codec=")) {
             const name = arg["--record-codec=".len..];
             result.record_codec = std.meta.stringToEnum(video.Codec, name) orelse return error.InvalidRecordingCodec;

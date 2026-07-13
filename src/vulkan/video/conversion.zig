@@ -1,6 +1,10 @@
 const std = @import("std");
 const vk = @import("_vk_video");
 
+// Every render-target format is normalized into the RGBA8 `source` image by
+// recordCopy before this shader reads it. In particular, packed 10-bit UNORM
+// targets are down-converted there, keeping the existing 8-bit NV12 encoder
+// profiles and storage-image views valid.
 const shader_spv align(@alignOf(u32)) = @embedFile("shaders/bgra_to_nv12.spv").*;
 
 pub const ImageSet = struct {
