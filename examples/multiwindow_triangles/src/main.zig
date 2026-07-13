@@ -203,7 +203,12 @@ const AppWindow = struct {
     position: [2]f32,
     velocity: [2]f32,
     color: [3]f32,
+    dump_prefix: []const u8,
+    recording_path: []const u8,
     recording_codec: ?video.Codec,
+    record_file: ?std.Io.File = null,
+    record_buffer: [64 * 1024]u8 = undefined,
+    record_writer: ?std.Io.File.Writer = null,
 
     fn init(
         gpa: std.mem.Allocator,
@@ -212,6 +217,8 @@ const AppWindow = struct {
         position: [2]f32,
         velocity: [2]f32,
         color: [3]f32,
+        dump_prefix: []const u8,
+        recording_path: []const u8,
     ) !AppWindow {
         return .{
             .window = window,
@@ -223,6 +230,8 @@ const AppWindow = struct {
             .position = position,
             .velocity = velocity,
             .color = color,
+            .dump_prefix = dump_prefix,
+            .recording_path = recording_path,
             .recording_codec = renderer.video_codec,
         };
     }
@@ -234,25 +243,33 @@ const AppWindow = struct {
         });
     }
 
-    fn deinit(self: *AppWindow) void {
+    fn deinit(self: *AppWindow, io: std.Io) void {
         self.target.endRecording() catch |err| std.log.err("failed to finalize recording: {s}", .{@errorName(err)});
         self.target.deinit();
         self.window.deinit();
+        if (self.record_file) |*file| file.close(io);
         self.* = undefined;
     }
 
-    fn startRecording(self: *AppWindow, io: std.Io, writer: *std.Io.Writer) !void {
-        try self.target.beginRecording(.{
+    fn startRecording(self: *AppWindow, io: std.Io) !void {
+        self.record_file = try std.Io.Dir.cwd().createFile(io, self.recording_path, .{});
+        errdefer {
+            self.record_file.?.close(io);
+            self.record_file = null;
+        }
+        self.record_writer = self.record_file.?.writer(io, &self.record_buffer);
+        errdefer self.record_writer = null;
+        if (self.record_writer) |*writer| try self.target.beginRecording(.{
             .allocator = self.target.allocator,
             .io = io,
-            .writer = writer,
+            .writer = &writer.interface,
             .codec = self.recording_codec orelse return error.VideoEncodeUnsupported,
             .resize = .change_resolution,
         });
     }
 
-    fn stopRecording(self: *AppWindow) !void {
-        try self.target.endRecording();
+    fn dumpPath(self: *const AppWindow, buffer: []u8, frame: u32) ![]const u8 {
+        return std.fmt.bufPrint(buffer, "tmp/{s}-{d:0>4}.bmp", .{ self.dump_prefix, frame });
     }
 
     fn update(self: *AppWindow, dt: f32) void {
@@ -339,21 +356,6 @@ pub fn main(init: std.process.Init) !void {
     const app_options = try parseOptions(args);
     const recording_requested = app_options.record;
 
-    var first_record_file: ?std.Io.File = null;
-    var second_record_file: ?std.Io.File = null;
-    var first_record_buffer: [64 * 1024]u8 = undefined;
-    var second_record_buffer: [64 * 1024]u8 = undefined;
-    var first_record_writer: ?std.Io.File.Writer = null;
-    var second_record_writer: ?std.Io.File.Writer = null;
-    if (recording_requested) {
-        try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
-        first_record_file = try std.Io.Dir.cwd().createFile(init.io, "tmp/first.mkv", .{});
-        first_record_writer = first_record_file.?.writer(init.io, &first_record_buffer);
-        second_record_file = try std.Io.Dir.cwd().createFile(init.io, "tmp/second.mkv", .{});
-        second_record_writer = second_record_file.?.writer(init.io, &second_record_buffer);
-    }
-    defer if (first_record_file) |*file| file.close(init.io);
-    defer if (second_record_file) |*file| file.close(init.io);
     var loader = try low.vulkan.Loader.init();
     defer loader.deinit();
     const get_instance_proc_addr: vk.PfnGetInstanceProcAddr = @ptrCast(loader.get_instance_proc_addr);
@@ -422,8 +424,10 @@ pub fn main(init: std.process.Init) !void {
         .{ -0.3, 0.1 },
         .{ 0.73, 0.52 },
         .{ 1.0, 0.30, 0.20 },
+        "first",
+        "tmp/first.mkv",
     );
-    defer if (first) |*app_window| app_window.deinit();
+    defer if (first) |*app_window| app_window.deinit(init.io);
     var second: ?AppWindow = try AppWindow.init(
         gpa,
         &renderer,
@@ -431,16 +435,21 @@ pub fn main(init: std.process.Init) !void {
         .{ 0.25, -0.2 },
         .{ -0.61, 0.67 },
         .{ 0.18, 0.90, 0.95 },
+        "second",
+        "tmp/second.mkv",
     );
-    defer if (second) |*app_window| app_window.deinit();
+    defer if (second) |*app_window| app_window.deinit(init.io);
+    const windows = [_]*?AppWindow{ &first, &second };
     first.?.installCallbacks();
     second.?.installCallbacks();
-    if (first_record_writer) |*writer| first.?.startRecording(init.io, &writer.interface) catch |err| {
-        std.log.err("first stream could not start: {s}", .{@errorName(err)});
-    };
-    if (second_record_writer) |*writer| second.?.startRecording(init.io, &writer.interface) catch |err| {
-        std.log.err("second stream could not start: {s}", .{@errorName(err)});
-    };
+    if (recording_requested) {
+        try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
+        for (windows) |window_slot| {
+            if (window_slot.*) |*app_window| app_window.startRecording(init.io) catch |err| {
+                std.log.err("{s} stream could not start: {s}", .{ app_window.dump_prefix, @errorName(err) });
+            };
+        }
+    }
 
     var previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
     var rendered_frames: u32 = 0;
@@ -449,25 +458,15 @@ pub fn main(init: std.process.Init) !void {
         if (offscreen) try context.nextFrame();
         context.pollEvents();
 
-        const close_first = if (first) |app_window| app_window.window.shouldClose() else false;
-        const close_second = if (second) |app_window| app_window.window.shouldClose() else false;
-        if (close_first or close_second) {
-            if (close_first) {
-                if (first) |*app_window| {
-                    try app_window.stopRecording();
-                    app_window.deinit();
+        for (windows) |window_slot| {
+            if (window_slot.*) |*app_window| {
+                if (app_window.window.shouldClose()) {
+                    app_window.deinit(init.io);
+                    window_slot.* = null;
                 }
-                first = null;
             }
-            if (close_second) {
-                if (second) |*app_window| {
-                    try app_window.stopRecording();
-                    app_window.deinit();
-                }
-                second = null;
-            }
-            if (first == null and second == null) break;
         }
+        if (first == null and second == null) break;
 
         const all_frames_blocked = !offscreen and
             (first == null or !first.?.window.shouldRender()) and
@@ -475,13 +474,11 @@ pub fn main(init: std.process.Init) !void {
         if (all_frames_blocked) {
             var render_windows: [2]*low.Window = undefined;
             var render_window_count: usize = 0;
-            if (first) |app_window| {
-                render_windows[render_window_count] = app_window.window;
-                render_window_count += 1;
-            }
-            if (second) |app_window| {
-                render_windows[render_window_count] = app_window.window;
-                render_window_count += 1;
+            for (windows) |window_slot| {
+                if (window_slot.*) |app_window| {
+                    render_windows[render_window_count] = app_window.window;
+                    render_window_count += 1;
+                }
             }
             try context.waitForAnyRender(render_windows[0..render_window_count]);
             continue;
@@ -491,20 +488,12 @@ pub fn main(init: std.process.Init) !void {
         const dt: f32 = @min(0.05, @as(f32, @floatFromInt(now.nanoseconds - previous.nanoseconds)) / 1_000_000_000);
         previous = now;
         var rendered = false;
-        if (first) |*app_window| {
-            if (app_window.window.shouldRender()) {
+        for (windows) |window_slot| {
+            if (window_slot.*) |*app_window| {
+                if (!app_window.window.shouldRender()) continue;
                 app_window.update(dt);
                 var path_buffer: [64]u8 = undefined;
-                const path = if (app_options.dump) try std.fmt.bufPrint(&path_buffer, "tmp/first-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
-                try app_window.draw(&renderer, init.io, path);
-                rendered = true;
-            }
-        }
-        if (second) |*app_window| {
-            if (app_window.window.shouldRender()) {
-                app_window.update(dt);
-                var path_buffer: [64]u8 = undefined;
-                const path = if (app_options.dump) try std.fmt.bufPrint(&path_buffer, "tmp/second-{d:0>4}.bmp", .{rendered_frames + 1}) else null;
+                const path = if (app_options.dump) try app_window.dumpPath(&path_buffer, rendered_frames + 1) else null;
                 try app_window.draw(&renderer, init.io, path);
                 rendered = true;
             }
@@ -513,8 +502,9 @@ pub fn main(init: std.process.Init) !void {
         rendered_frames += 1;
         if (app_options.frames) |limit| {
             if (rendered_frames == limit) {
-                if (first) |app_window| app_window.window.setShouldClose(true);
-                if (second) |app_window| app_window.window.setShouldClose(true);
+                for (windows) |window_slot| {
+                    if (window_slot.*) |app_window| app_window.window.setShouldClose(true);
+                }
             }
         }
     }

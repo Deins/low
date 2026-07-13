@@ -11,6 +11,7 @@ const RawTarget = struct {
     allocator: std.mem.Allocator,
     device: vk.DeviceProxy,
     graphics_queue: vk.Queue,
+    window: *low.Window,
     swapchain: vk.SwapchainKHR,
     extent: vk.Extent2D,
     images: []vk.Image,
@@ -38,6 +39,7 @@ const RawTarget = struct {
             .allocator = allocator,
             .device = device,
             .graphics_queue = graphics_queue,
+            .window = window,
             .swapchain = .null_handle,
             .extent = .{ .width = 0, .height = 0 },
             .images = &.{},
@@ -129,7 +131,6 @@ const RawTarget = struct {
         physical_device: vk.PhysicalDevice,
         queue_family: u32,
         surface: vk.SurfaceKHR,
-        window: *low.Window,
     ) !void {
         // Some surface implementations require the old swapchain to be
         // destroyed before another one can be created for the same window.
@@ -138,11 +139,13 @@ const RawTarget = struct {
         const allocator = self.allocator;
         const device = self.device;
         const graphics_queue = self.graphics_queue;
+        const window = self.window;
         self.deinit();
         self.* = .{
             .allocator = allocator,
             .device = device,
             .graphics_queue = graphics_queue,
+            .window = window,
             .swapchain = .null_handle,
             .extent = .{ .width = 0, .height = 0 },
             .images = &.{},
@@ -161,7 +164,7 @@ const RawTarget = struct {
         );
     }
 
-    fn draw(self: *RawTarget, window: *low.Window) !void {
+    fn draw(self: *RawTarget) !void {
         _ = try self.device.waitForFences(&.{self.in_flight}, .true, std.math.maxInt(u64));
         const acquired = try self.device.acquireNextImageKHR(
             self.swapchain,
@@ -228,7 +231,7 @@ const RawTarget = struct {
         const indices = [_]u32{acquired.image_index};
         // This must precede the Wayland surface commit performed by WSI
         // presentation, otherwise the callback applies to a later frame.
-        window.requestFrame();
+        self.window.requestFrame();
         const present = self.device.queuePresentKHR(self.graphics_queue, &.{
             .wait_semaphore_count = signal_semaphores.len,
             .p_wait_semaphores = &signal_semaphores,
@@ -236,7 +239,7 @@ const RawTarget = struct {
             .p_swapchains = &swapchains,
             .p_image_indices = &indices,
         }) catch |err| {
-            window.cancelFrameRequest();
+            self.window.cancelFrameRequest();
             return err;
         };
         if (acquired.result == .suboptimal_khr or present == .suboptimal_khr) return error.SwapchainSuboptimal;
@@ -321,11 +324,11 @@ pub fn main(init: std.process.Init) !void {
         const framebuffer_size = window.getFramebufferSize();
         if (framebuffer_size.width == 0 or framebuffer_size.height == 0) continue;
         if (target.extent.width != framebuffer_size.width or target.extent.height != framebuffer_size.height) {
-            try target.recreate(instance, selection.physical_device, selection.queue_family, surface, window);
+            try target.recreate(instance, selection.physical_device, selection.queue_family, surface);
             continue;
         }
-        target.draw(window) catch |err| switch (err) {
-            error.OutOfDateKHR, error.SwapchainSuboptimal => try target.recreate(instance, selection.physical_device, selection.queue_family, surface, window),
+        target.draw() catch |err| switch (err) {
+            error.OutOfDateKHR, error.SwapchainSuboptimal => try target.recreate(instance, selection.physical_device, selection.queue_family, surface),
             error.SurfaceLostKHR => break,
             else => return err,
         };
