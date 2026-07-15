@@ -456,7 +456,7 @@ pub const Window = struct {
         self.text_input_rect = rect;
     }
 
-    pub fn updateScale(self: *Window, scale: f32) void {
+    fn updateScale(self: *Window, scale: f32) void {
         const new_scale: ContentScale = .{ .x = scale, .y = scale };
         if (new_scale.x == self.content_scale.x and new_scale.y == self.content_scale.y) return;
         self.content_scale = new_scale;
@@ -464,38 +464,38 @@ pub const Window = struct {
         self.framebuffer_size = types.scaledSize(self.size, self.content_scale);
     }
 
-    pub fn updateSize(self: *Window, size: ContentSize) void {
+    fn updateSize(self: *Window, size: ContentSize) void {
         self.size = size;
         self.framebuffer_size = types.scaledSize(size, self.content_scale);
     }
 
-    pub fn updateCursorEnter(self: *Window, entered: bool) void {
+    fn updateCursorEnter(self: *Window, entered: bool) void {
         self.hovered = entered;
     }
 
-    pub fn updateFocus(self: *Window, focused: bool) void {
+    fn updateFocus(self: *Window, focused: bool) void {
         self.focused = focused;
     }
 
-    pub fn updateRenderSuspended(self: *Window, suspended: bool) void {
+    fn updateRenderSuspended(self: *Window, suspended: bool) void {
         if (self.render_suspended == suspended) return;
         self.render_suspended = suspended;
     }
 
-    pub fn updateFrameReady(self: *Window, time_ms: u32) void {
+    fn updateFrameReady(self: *Window, time_ms: u32) void {
         _ = time_ms;
         self.frame_ready = true;
     }
 
-    pub fn updateClose(self: *Window) void {
+    fn updateClose(self: *Window) void {
         self.should_close = true;
     }
 
-    pub fn updateCursorMotion(self: *Window, x: f64, y: f64) void {
+    fn updateCursorMotion(self: *Window, x: f64, y: f64) void {
         self.cursor_pos = .{ .x = x, .y = y };
     }
 
-    pub fn updateMouseButton(self: *Window, button: MouseButton, action: Action, mods: Modifiers) void {
+    fn updateMouseButton(self: *Window, button: MouseButton, action: Action, mods: Modifiers) void {
         switch (action) {
             .press => _ = self.pressed_buttons.insert(button),
             .release => _ = self.pressed_buttons.remove(button),
@@ -504,11 +504,11 @@ pub const Window = struct {
         if (self.callbacks.mouse_button) |cb| cb(self, button, action, mods);
     }
 
-    pub fn updateScroll(self: *Window, x: f64, y: f64) void {
+    fn updateScroll(self: *Window, x: f64, y: f64) void {
         if (self.callbacks.scroll) |cb| cb(self, x, y);
     }
 
-    pub fn updateKey(self: *Window, key: Key, raw_keycode: u32, action: Action, mods: Modifiers) void {
+    fn updateKey(self: *Window, key: Key, raw_keycode: u32, action: Action, mods: Modifiers) void {
         switch (action) {
             .press => _ = self.pressed_keys.insert(key),
             .release => _ = self.pressed_keys.remove(key),
@@ -517,10 +517,48 @@ pub const Window = struct {
         if (self.callbacks.key) |cb| cb(self, key, raw_keycode, action, mods);
     }
 
-    pub fn updateText(self: *Window, bytes: []const u8) void {
+    fn updateText(self: *Window, bytes: []const u8) void {
         if (self.callbacks.text) |cb| cb(self, bytes);
     }
 };
+
+// Backend event adapters live outside the public Window method surface.
+pub fn windowUpdateScale(window: *Window, scale: f32) void {
+    window.updateScale(scale);
+}
+pub fn windowUpdateSize(window: *Window, size: ContentSize) void {
+    window.updateSize(size);
+}
+pub fn windowUpdateCursorEnter(window: *Window, entered: bool) void {
+    window.updateCursorEnter(entered);
+}
+pub fn windowUpdateFocus(window: *Window, focused: bool) void {
+    window.updateFocus(focused);
+}
+pub fn windowUpdateRenderSuspended(window: *Window, suspended: bool) void {
+    window.updateRenderSuspended(suspended);
+}
+pub fn windowUpdateFrameReady(window: *Window, time_ms: u32) void {
+    window.updateFrameReady(time_ms);
+}
+pub fn windowUpdateClose(window: *Window) void {
+    window.updateClose();
+}
+pub fn windowUpdateCursorMotion(window: *Window, x: f64, y: f64) void {
+    window.updateCursorMotion(x, y);
+}
+pub fn windowUpdateMouseButton(window: *Window, button: MouseButton, action: Action, mods: Modifiers) void {
+    window.updateMouseButton(button, action, mods);
+}
+pub fn windowUpdateScroll(window: *Window, x: f64, y: f64) void {
+    window.updateScroll(x, y);
+}
+pub fn windowUpdateKey(window: *Window, key: Key, raw_keycode: u32, action: Action, mods: Modifiers) void {
+    window.updateKey(key, raw_keycode, action, mods);
+}
+pub fn windowUpdateText(window: *Window, bytes: []const u8) void {
+    window.updateText(bytes);
+}
 
 /// The active backend behind a public context. Every variant uses the shared
 /// runtime state, but the tag makes the selected backend explicit without a

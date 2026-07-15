@@ -42,6 +42,15 @@ pub const Context = struct {
         return Vulkan.createSurface(instance, self.backendKind(), self.nativeDisplay(), window.nativeSurface());
     }
 
+    /// Creates an owned Vulkan presentation surface for a low window.
+    ///
+    /// The returned surface may be borrowed by `vulkan.targets().RenderTarget`
+    /// through `RenderTarget.Options.surface`. Destroy the render target before
+    /// calling `PresentationSurface.deinit`.
+    pub fn createVulkanPresentationSurface(self: *const @This(), instance: *const Vulkan.Instance, window: *Window) !Vulkan.PresentationSurface {
+        return Vulkan.PresentationSurface.init(instance, self.backendKind(), self.nativeDisplay(), window.nativeSurface());
+    }
+
     pub fn backendKind(self: *const @This()) BackendKind {
         return self.state.get().backendKind();
     }
@@ -149,6 +158,7 @@ test "root API exposes the supported contract" {
     _ = Context.waitForRender;
     _ = Context.waitForAnyRender;
     _ = Context.createVulkanSurface;
+    _ = Context.createVulkanPresentationSurface;
     _ = Window.requestFrame;
     _ = Window.cancelFrameRequest;
     _ = Window.deinit;
@@ -193,4 +203,10 @@ test "root API exposes the supported contract" {
     try @import("std").testing.expect(!@hasField(WindowCallbacks, "frame"));
     try @import("std").testing.expect(!@hasDecl(@This(), "State"));
     try @import("std").testing.expect(!@hasDecl(@This(), "VTable"));
+    try @import("std").testing.expect(!@hasDecl(Window, "updateScale"));
+    try @import("std").testing.expect(!@hasDecl(Window, "updateSize"));
+    try @import("std").testing.expect(!@hasDecl(Window, "updateFrameReady"));
+    try @import("std").testing.expect(!@hasDecl(Window, "updateClose"));
+    try @import("std").testing.expect(!@hasDecl(Window, "updateKey"));
+    try @import("std").testing.expect(!@hasDecl(Window, "updateText"));
 }

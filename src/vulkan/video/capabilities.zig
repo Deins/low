@@ -3,31 +3,41 @@ const vk = @import("_vk_video");
 const Vulkan = @import("../../vulkan.zig");
 const low_vk = @import("../api.zig");
 
-const base_device_extensions = [_][*:0]const u8{
-    "VK_KHR_video_queue",
-    "VK_KHR_video_encode_queue",
-};
-
 /// Video codec operation selected for device discovery. The codec extension is
 /// deliberately selected per codec: requiring every codec would make a
 /// perfectly usable H.264 device appear unsupported.
 pub const Codec = enum { h264, h265, av1 };
 
-const h264_device_extensions = [_][*:0]const u8{
-    base_device_extensions[0],
-    base_device_extensions[1],
-    "VK_KHR_video_encode_h264",
+/// Default codec preference for an automatic recording request. Newer, more
+/// efficient codecs are preferred while H.264 remains the broad fallback.
+pub const default_codec_preferences = [_]Codec{ .av1, .h265, .h264 };
+
+/// Device-selection request for optional recording support.
+///
+/// `.on` considers every codec in `default_codec_preferences`. Use `.codec`
+/// to require one codec or `.preferred` for a custom ordered preference.
+pub const RecordingRequest = union(enum) {
+    off,
+    on,
+    codec: Codec,
+    preferred: []const Codec,
+
+    pub fn enabled(self: RecordingRequest) bool {
+        return switch (self) {
+            .off => false,
+            .on, .codec, .preferred => true,
+        };
+    }
 };
-const h265_device_extensions = [_][*:0]const u8{
-    base_device_extensions[0],
-    base_device_extensions[1],
-    "VK_KHR_video_encode_h265",
+
+const base_device_extensions = [_][*:0]const u8{
+    "VK_KHR_video_queue",
+    "VK_KHR_video_encode_queue",
 };
-const av1_device_extensions = [_][*:0]const u8{
-    base_device_extensions[0],
-    base_device_extensions[1],
-    "VK_KHR_video_encode_av1",
-};
+
+const h264_device_extensions = base_device_extensions ++ [_][*:0]const u8{"VK_KHR_video_encode_h264"};
+const h265_device_extensions = base_device_extensions ++ [_][*:0]const u8{"VK_KHR_video_encode_h265"};
+const av1_device_extensions = base_device_extensions ++ [_][*:0]const u8{"VK_KHR_video_encode_av1"};
 
 /// Extensions needed to create a device for `codec`.
 pub fn requiredDeviceExtensions(codec: Codec) []const [*:0]const u8 {
@@ -47,6 +57,7 @@ pub const UnsupportedReason = enum {
     no_h264_encode_queue,
     no_h265_encode_queue,
     no_av1_encode_queue,
+    missing_av1_feature,
     unsupported_profile,
     unsupported_extent,
     no_encode_input_format,
@@ -239,6 +250,10 @@ pub const SelectedVideoFormat = union(Codec) {
         };
     }
 
+    pub fn deviceExtensions(self: SelectedVideoFormat) []const [*:0]const u8 {
+        return requiredDeviceExtensions(self.codec());
+    }
+
     pub fn encodeQueueFamily(self: SelectedVideoFormat) ?u32 {
         return switch (self) {
             inline else => |support| support.encode_queue_family,
@@ -252,12 +267,19 @@ pub const SelectedVideoFormat = union(Codec) {
     }
 };
 
-/// Selects the first desired codec that is fully usable for `options.extent`.
-/// The desired slice is ordered by preference, for example
-/// `&.{ .av1, .h265, .h264 }`. An empty result means none of the requested
-/// codecs has a compatible extension, queue, profile, image format, and rate
-/// control mode on the physical device.
-pub fn selectVideoFormat(options: SelectVideoFormatOptions, desired: []const Codec) !?SelectedVideoFormat {
+/// Selects the first requested codec that is fully usable for `options.extent`.
+/// `.on` considers all standard codecs in the default preference order. A null
+/// result means recording was disabled or no requested codec is usable.
+pub fn selectVideoFormat(options: SelectVideoFormatOptions, request: RecordingRequest) !?SelectedVideoFormat {
+    return switch (request) {
+        .off => null,
+        .on => selectPreferredVideoFormat(options, &default_codec_preferences),
+        .codec => |codec| selectPreferredVideoFormat(options, &.{codec}),
+        .preferred => |preferred| selectPreferredVideoFormat(options, preferred),
+    };
+}
+
+fn selectPreferredVideoFormat(options: SelectVideoFormatOptions, desired: []const Codec) !?SelectedVideoFormat {
     for (desired) |codec| {
         switch (codec) {
             .h264 => {
@@ -303,7 +325,7 @@ pub const DeviceRequirements = struct {
         return .{ .queue_create_infos = infos, .priorities = priorities, .allocator = allocator };
     }
 
-    pub fn deinit(self: *DeviceRequirements, _: std.mem.Allocator) void {
+    pub fn deinit(self: *DeviceRequirements) void {
         self.allocator.free(self.queue_create_infos);
         self.allocator.free(self.priorities);
         self.* = undefined;
@@ -481,6 +503,17 @@ pub fn queryAV1Support(options: QueryAV1SupportOptions) !AV1Support {
     defer options.allocator.free(extensions);
     if (!hasRequiredDeviceExtensions(extensions, support.required_device_extensions)) {
         support.reason = .missing_device_extension;
+        return support;
+    }
+    if (instance.dispatch.vkGetPhysicalDeviceFeatures2 == null and instance.dispatch.vkGetPhysicalDeviceFeatures2KHR == null) {
+        support.reason = .missing_av1_feature;
+        return support;
+    }
+    var av1_features = vk.PhysicalDeviceVideoEncodeAV1FeaturesKHR{};
+    var features = vk.PhysicalDeviceFeatures2{ .p_next = @ptrCast(&av1_features), .features = .{} };
+    instance.getPhysicalDeviceFeatures2(physical_device, &features);
+    if (av1_features.video_encode_av1 != .true) {
+        support.reason = .missing_av1_feature;
         return support;
     }
     if (instance.dispatch.vkGetPhysicalDeviceQueueFamilyProperties2 == null or
@@ -863,13 +896,13 @@ test "coded extents combine both video granularities" {
 test "device requirements merge duplicate queue families" {
     const support = H264Support{ .available = true, .encode_queue_family = 4 };
     var same = try support.deviceRequirements(.{ .allocator = std.testing.allocator, .graphics_queue_family = 4, .queue_priority = 0.75 });
-    defer same.deinit(std.testing.allocator);
+    defer same.deinit();
     try std.testing.expectEqual(@as(usize, 1), same.queue_create_infos.len);
     try std.testing.expectEqual(@as(u32, 4), same.queue_create_infos[0].queue_family_index);
     try std.testing.expectEqual(@as(f32, 0.75), same.queue_create_infos[0].p_queue_priorities[0]);
 
     var separate = try support.deviceRequirements(.{ .allocator = std.testing.allocator, .graphics_queue_family = 2 });
-    defer separate.deinit(std.testing.allocator);
+    defer separate.deinit();
     try std.testing.expectEqual(@as(usize, 2), separate.queue_create_infos.len);
     try std.testing.expectEqual(@as(u32, 2), separate.queue_create_infos[0].queue_family_index);
     try std.testing.expectEqual(@as(u32, 4), separate.queue_create_infos[1].queue_family_index);
@@ -900,6 +933,12 @@ test "each codec requests only its own device extension" {
     try std.testing.expect(std.mem.eql(u8, std.mem.span(requiredDeviceExtensions(.av1)[2]), "VK_KHR_video_encode_av1"));
 }
 
+test "recording request defaults cover every codec" {
+    try std.testing.expect(!RecordingRequest.off.enabled());
+    try std.testing.expect(RecordingRequest.on.enabled());
+    try std.testing.expectEqualSlices(Codec, &.{ .av1, .h265, .h264 }, &default_codec_preferences);
+}
+
 test "HEVC and AV1 profile chains select their codec operation" {
     var h265: H265ProfileChain = undefined;
     h265.init(.main, .default_khr);
@@ -917,6 +956,6 @@ test "selected format retains the codec and queue requirements" {
     try std.testing.expectEqual(Codec.h264, selected.codec());
     try std.testing.expectEqual(@as(?u32, 3), selected.encodeQueueFamily());
     var requirements = try selected.deviceRequirements(.{ .allocator = std.testing.allocator, .graphics_queue_family = 3 });
-    defer requirements.deinit(std.testing.allocator);
+    defer requirements.deinit();
     try std.testing.expectEqual(@as(usize, 1), requirements.queue_create_infos.len);
 }

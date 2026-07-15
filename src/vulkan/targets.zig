@@ -9,11 +9,13 @@ const runtime = @import("../internal/runtime.zig");
 const build_options = @import("build_options");
 const log = std.log.scoped(.low);
 const Video = if (build_options.vk_video) @import("video.zig") else struct {
+    pub const SelectedVideoFormat = opaque {};
     pub const VideoDevice = opaque {};
     pub const VideoRecorder = struct {};
     pub const RecordingOptions = void;
     pub const RecordingStatus = void;
 };
+const Window = runtime.Window;
 
 /// Preferred render-target formats, ordered from highest precision to widest
 /// presentation support.
@@ -21,6 +23,234 @@ pub const default_color_formats: []const vk.Format = &.{
     vk.format.a2b10g10r10_unorm_pack32,
     vk.format.a2r10g10b10_unorm_pack32,
     vk.format.b8g8r8a8_unorm,
+};
+
+/// The result of selecting a physical device with the caller's Vulkan binding.
+///
+/// `Vk` is intentionally supplied by the caller: low does not impose a
+/// particular generated Vulkan binding on applications.
+pub fn DeviceSelection(comptime Vk: type) type {
+    return struct {
+        physical_device: Vk.PhysicalDevice,
+        graphics_queue_family: u32,
+        encode_queue_family: ?u32 = null,
+        selected_video_format: ?Video.SelectedVideoFormat = null,
+    };
+}
+
+/// Owns an instance and the generated binding's dispatch wrapper.
+pub fn InstanceResources(comptime Vk: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+        handle: Vk.Instance,
+        wrapper: *Vk.InstanceWrapper,
+        instance: Vk.InstanceProxy,
+
+        pub fn deinit(self: *Self) void {
+            self.instance.destroyInstance(null);
+            self.allocator.destroy(self.wrapper);
+            self.* = undefined;
+        }
+    };
+}
+
+/// Creates an instance and loads the caller's generated dispatch wrapper.
+/// The loader remains owned by the caller and must outlive the returned
+/// resources.
+pub fn createInstance(
+    comptime Vk: type,
+    allocator: std.mem.Allocator,
+    base: anytype,
+    get_instance_proc_addr: anytype,
+    application_info: anytype,
+    extensions: []const [*:0]const u8,
+) !InstanceResources(Vk) {
+    const instance_info = Vk.InstanceCreateInfo{
+        .p_application_info = &application_info,
+        .enabled_extension_count = @intCast(extensions.len),
+        .pp_enabled_extension_names = extensions.ptr,
+    };
+    const handle = try base.createInstance(&instance_info, null);
+    const wrapper = try allocator.create(Vk.InstanceWrapper);
+    errdefer allocator.destroy(wrapper);
+    wrapper.* = Vk.InstanceWrapper.load(handle, get_instance_proc_addr);
+    return .{
+        .allocator = allocator,
+        .handle = handle,
+        .wrapper = wrapper,
+        .instance = Vk.InstanceProxy.init(handle, wrapper),
+    };
+}
+
+/// Owns a logical device, its generated dispatch wrapper, and low's ABI
+/// device view. Queue requirements from Vulkan Video are translated into the
+/// caller's generated binding so bindings remain interchangeable.
+pub fn DeviceResources(comptime Vk: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+        wrapper: *Vk.DeviceWrapper,
+        device: Vk.DeviceProxy,
+        low_device: Vulkan.Device,
+        graphics_queue: Vk.Queue,
+        encode_queue: Vk.Queue,
+
+        pub fn deinit(self: *Self) void {
+            self.device.destroyDevice(null);
+            self.allocator.destroy(self.wrapper);
+            self.* = undefined;
+        }
+    };
+}
+
+/// Creates a logical device for a previous `findDevice` result.
+pub fn createDevice(
+    comptime Vk: type,
+    allocator: std.mem.Allocator,
+    instance: anytype,
+    low_instance: *const Vulkan.Instance,
+    selection: DeviceSelection(Vk),
+    features: anytype,
+    extensions: []const [*:0]const u8,
+) !DeviceResources(Vk) {
+    const queue_priority = [_]f32{1.0};
+    var queue_infos: [2]Vk.DeviceQueueCreateInfo = undefined;
+    queue_infos[0] = .{
+        .queue_family_index = selection.graphics_queue_family,
+        .queue_count = 1,
+        .p_queue_priorities = &queue_priority,
+    };
+    var queue_info_count: u32 = 1;
+    if (build_options.vk_video) {
+        if (selection.selected_video_format) |selected| {
+            var requirements = try selected.deviceRequirements(.{
+                .allocator = allocator,
+                .graphics_queue_family = selection.graphics_queue_family,
+                .queue_priority = 1.0,
+            });
+            defer requirements.deinit();
+            queue_info_count = @intCast(requirements.queue_create_infos.len);
+            for (requirements.queue_create_infos, 0..) |requirement, index| {
+                queue_infos[index] = .{
+                    .queue_family_index = requirement.queue_family_index,
+                    .queue_count = 1,
+                    .p_queue_priorities = &queue_priority,
+                };
+            }
+        }
+    }
+
+    const device_info = Vk.DeviceCreateInfo{
+        .p_next = @ptrCast(features),
+        .queue_create_info_count = queue_info_count,
+        .p_queue_create_infos = &queue_infos,
+        .enabled_extension_count = @intCast(extensions.len),
+        .pp_enabled_extension_names = extensions.ptr,
+    };
+    const handle = try instance.createDevice(selection.physical_device, &device_info, null);
+    const wrapper = try allocator.create(Vk.DeviceWrapper);
+    errdefer allocator.destroy(wrapper);
+    wrapper.* = Vk.DeviceWrapper.load(handle, instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+    const device = Vk.DeviceProxy.init(handle, wrapper);
+    errdefer device.destroyDevice(null);
+    const low_device = try Vulkan.Device.init(low_instance, Vulkan.toDevice(handle));
+    return .{
+        .allocator = allocator,
+        .wrapper = wrapper,
+        .device = device,
+        .low_device = low_device,
+        .graphics_queue = device.getDeviceQueue(selection.graphics_queue_family, 0),
+        .encode_queue = device.getDeviceQueue(selection.encode_queue_family orelse selection.graphics_queue_family, 0),
+    };
+}
+
+/// Selects a Vulkan 1.3 physical device with a graphics queue and, when a
+/// surface is supplied, presentation support. If video recording is enabled,
+/// the first device supporting the requested codec policy is selected too.
+///
+/// The generated Vulkan binding is passed as `Vk` so the returned handles and
+/// structures remain native to the application's binding.
+pub fn findDevice(
+    comptime Vk: type,
+    allocator: std.mem.Allocator,
+    instance: anytype,
+    low_instance: *const Vulkan.Instance,
+    presentation_surface: ?vk.SurfaceKHR,
+    recording: anytype,
+) !DeviceSelection(Vk) {
+    const physical_devices = try instance.enumeratePhysicalDevicesAlloc(allocator);
+    defer allocator.free(physical_devices);
+
+    for (physical_devices) |physical_device| {
+        const version: Vk.Version = @bitCast(instance.getPhysicalDeviceProperties(physical_device).api_version);
+        if (version.major < 1 or (version.major == 1 and version.minor < 3)) continue;
+
+        var features_13 = Vk.PhysicalDeviceVulkan13Features{};
+        var features_2 = Vk.PhysicalDeviceFeatures2{ .p_next = @ptrCast(&features_13), .features = .{} };
+        instance.getPhysicalDeviceFeatures2(physical_device, &features_2);
+        if (features_13.synchronization_2 != .true or features_13.dynamic_rendering != .true) continue;
+
+        const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, allocator);
+        defer allocator.free(families);
+
+        var graphics_queue_family: ?u32 = null;
+        for (families, 0..) |family, index| {
+            if (!family.queue_flags.graphics_bit) continue;
+            if (presentation_surface) |surface| {
+                if (try low_instance.getPhysicalDeviceSurfaceSupportKHR(
+                    Vulkan.toPhysicalDevice(physical_device),
+                    @intCast(index),
+                    surface,
+                ) != vk.TRUE) continue;
+            }
+            graphics_queue_family = @intCast(index);
+            break;
+        }
+        const graphics_family = graphics_queue_family orelse continue;
+
+        var selection = DeviceSelection(Vk){
+            .physical_device = physical_device,
+            .graphics_queue_family = graphics_family,
+        };
+        if (build_options.vk_video) {
+            if (recording.enabled()) {
+                const selected = try Video.selectVideoFormat(.{
+                    .instance = low_instance,
+                    .physical_device = Vulkan.toPhysicalDevice(physical_device),
+                    .extent = .{ .width = 640, .height = 480 },
+                    .allocator = allocator,
+                }, recording) orelse continue;
+                selection.encode_queue_family = selected.encodeQueueFamily();
+                selection.selected_video_format = selected;
+            }
+        }
+        return selection;
+    }
+    return error.NoVulkan13PresentDevice;
+}
+
+/// Presentation preferences used by the three standard vsync policies.
+const vsync_on_present_modes: []const vk.PresentModeKHR = &[_]vk.PresentModeKHR{
+    vk.present_mode.fifo_khr,
+};
+const vsync_off_present_modes: []const vk.PresentModeKHR = &[_]vk.PresentModeKHR{
+    vk.present_mode.immediate_khr,
+    vk.present_mode.mailbox_khr,
+    vk.present_mode.fifo_relaxed_khr,
+    vk.present_mode.fifo_khr,
+};
+const relaxed_vsync_present_modes: []const vk.PresentModeKHR = &[_]vk.PresentModeKHR{
+    vk.present_mode.fifo_relaxed_khr,
+    vk.present_mode.fifo_khr,
+};
+
+pub const VSync = enum {
+    on,
+    off,
+    relaxed,
 };
 
 fn formatName(format: vk.Format) []const u8 {
@@ -49,10 +279,41 @@ pub fn chooseSurfaceFormat(available: []const vk.SurfaceFormatKHR, desired: []co
     return null;
 }
 
+/// Queries and selects a surface format in one step.
+fn chooseSurfaceFormatAlloc(
+    instance: *const Vulkan.Instance,
+    physical_device: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR,
+    allocator: std.mem.Allocator,
+    desired: []const vk.Format,
+) !vk.SurfaceFormatKHR {
+    const available = try instance.getPhysicalDeviceSurfaceFormatsAllocKHR(physical_device, surface, allocator);
+    defer allocator.free(available);
+    return chooseSurfaceFormat(available, desired) orelse error.UnsupportedSurfaceFormat;
+}
+
+/// Selects a render format for a presentation or offscreen target before the
+/// target is created, which is useful when creating a format-specialized
+/// graphics pipeline.
+pub fn chooseColorFormat(
+    instance: *const Vulkan.Instance,
+    physical_device: vk.PhysicalDevice,
+    surface: ?vk.SurfaceKHR,
+    allocator: std.mem.Allocator,
+    desired: []const vk.Format,
+) !vk.Format {
+    if (surface) |handle| return (try chooseSurfaceFormatAlloc(instance, physical_device, handle, allocator, desired)).format;
+    return chooseOffscreenFormat(instance, physical_device, desired) orelse error.UnsupportedSurfaceFormat;
+}
+
 /// Selects the first requested format that supports this target's offscreen
 /// image usage.
 pub fn chooseOffscreenFormat(instance: *const Vulkan.Instance, physical_device: vk.PhysicalDevice, desired: []const vk.Format) ?vk.Format {
-    const required = vk.format_feature.color_attachment_bit | vk.format_feature.transfer_src_bit;
+    return chooseOffscreenFormatForUsage(instance, physical_device, desired, true);
+}
+
+fn chooseOffscreenFormatForUsage(instance: *const Vulkan.Instance, physical_device: vk.PhysicalDevice, desired: []const vk.Format, transfer_source: bool) ?vk.Format {
+    const required = vk.format_feature.color_attachment_bit | if (transfer_source) vk.format_feature.transfer_src_bit else 0;
     for (desired) |wanted| {
         const properties = instance.getPhysicalDeviceFormatProperties(physical_device, wanted);
         if (properties.optimal_tiling_features & required == required) return wanted;
@@ -66,6 +327,13 @@ pub const MemoryAllocator = struct {
     free: *const fn (?*anyopaque, vk.DeviceMemory) void,
 };
 
+/// Optional queue used when presentation is not supported by the graphics
+/// queue family.
+pub const PresentQueue = struct {
+    queue: vk.Queue,
+    family: u32,
+};
+
 /// Vulkan resources shared by one or more render targets.
 ///
 /// The context must remain at a stable address, and all of its fields must
@@ -76,21 +344,55 @@ pub const RenderContext = struct {
     device: Vulkan.Device,
     graphics_queue: vk.Queue,
     graphics_queue_family: u32,
+    present_queue: ?PresentQueue = null,
     command_pool: vk.CommandPool,
     video_device: ?*Video.VideoDevice = null,
+
+    pub fn init(
+        instance: Vulkan.Instance,
+        physical_device: vk.PhysicalDevice,
+        device: Vulkan.Device,
+        graphics_queue: vk.Queue,
+        graphics_queue_family: u32,
+        command_pool: vk.CommandPool,
+    ) @This() {
+        return .{
+            .instance = instance,
+            .physical_device = physical_device,
+            .device = device,
+            .graphics_queue = graphics_queue,
+            .graphics_queue_family = graphics_queue_family,
+            .command_pool = command_pool,
+        };
+    }
 };
 
 /// A Vulkan render target associated with one low window.
 pub const RenderTarget = struct {
     const Self = @This();
-    pub const Window = runtime.Window;
 
     pub const Options = struct {
         window: *Window,
         context: *const RenderContext,
+        /// An existing surface owned by the caller. When omitted, the target
+        /// creates and owns a surface from the low window handles.
+        surface: ?vk.SurfaceKHR = null,
+        /// An already-created low surface whose ownership moves to this
+        /// target. This supports device selection before target creation
+        /// without leaving surface lifetime management to the application.
+        presentation_surface: ?Vulkan.PresentationSurface = null,
         /// Render-target formats in preference order. The first format
         /// supported by the surface or offscreen device is selected.
         color_formats: []const vk.Format = default_color_formats,
+        /// Use `.off` for unsynchronized presentation or `.relaxed` to allow
+        /// tearing only when late. FIFO is the final fallback. Vsync defaults
+        /// to on.
+        vsync: VSync = .on,
+        /// Advanced override for the presentation-mode preference order.
+        present_modes: ?[]const vk.PresentModeKHR = null,
+        /// Enable transfer-source usage for screenshot readback. Recording
+        /// enables the required usage independently when Vulkan Video is built.
+        readback: bool = false,
         frames_in_flight: u32 = 2,
         memory_allocator: ?MemoryAllocator = null,
     };
@@ -100,11 +402,14 @@ pub const RenderTarget = struct {
         InvalidImageCount,
         UnsupportedSurfaceFormat,
         UnsupportedSurfaceUsage,
+        UnsupportedPresentMode,
         QueueFamilyCannotPresent,
         FrameAlreadyAcquired,
         FrameAlreadyFinished,
         FrameSkipped,
         FrameOutOfDate,
+        ConflictingSurfaceOwnership,
+        PresentationSurfaceUnsupported,
         ReadbackUnavailable,
         VideoDeviceUnavailable,
     };
@@ -155,6 +460,18 @@ pub const RenderTarget = struct {
         abort_fn: *const fn (?*anyopaque) void,
         state: ?*anyopaque,
 
+        /// Converts this frame's low ABI command-buffer handle to the
+        /// application's generated Vulkan binding type.
+        pub inline fn commandBuffer(self: *const Frame, comptime CommandBuffer: type) CommandBuffer {
+            return Vulkan.fromCommandBuffer(CommandBuffer, self.command_buffer);
+        }
+
+        /// Converts this frame's low ABI image-view handle to the
+        /// application's generated Vulkan binding type.
+        pub inline fn imageView(self: *const Frame, comptime ImageView: type) ImageView {
+            return Vulkan.fromImageView(ImageView, self.view);
+        }
+
         pub fn submitAndPresent(self: *Frame) !void {
             const state = self.state orelse return error.FrameAlreadyFinished;
             try self.submit_fn(state, null);
@@ -197,6 +514,9 @@ pub const RenderTarget = struct {
     state: *anyopaque,
     deinit_fn: *const fn (*anyopaque) void,
     acquire_fn: *const fn (*anyopaque) anyerror!Frame,
+    frame_command_buffer_fn: *const fn (*anyopaque) vk.CommandBuffer,
+    color_format_fn: *const fn (*anyopaque) vk.Format,
+    set_present_modes_fn: *const fn (*anyopaque, []const vk.PresentModeKHR) anyerror!void,
     begin_recording_fn: *const fn (*anyopaque, *const anyopaque) anyerror!void,
     end_recording_fn: *const fn (*anyopaque) anyerror!void,
     recording_status_fn: *const fn (*anyopaque, *anyopaque) void,
@@ -225,14 +545,19 @@ pub const RenderTarget = struct {
             device: *const Vulkan.Device,
             graphics_queue: vk.Queue,
             graphics_queue_family: u32,
+            present_queue: vk.Queue,
+            present_queue_family: u32,
             command_pool: vk.CommandPool,
             color_format: vk.Format,
             color_formats: []vk.Format,
+            present_modes: []vk.PresentModeKHR,
+            readback_enabled: bool,
             memory_allocator: ?MemoryAllocator,
             memory_properties: vk.PhysicalDeviceMemoryProperties = undefined,
             frames_in_flight: u32,
             slots: []Slot = &.{},
             surface: vk.SurfaceKHR = 0,
+            owned_surface: ?Vulkan.PresentationSurface = null,
             swapchain: vk.SwapchainKHR = 0,
             swapchain_images: []vk.Image = &.{},
             swapchain_views: []vk.ImageView = &.{},
@@ -244,6 +569,7 @@ pub const RenderTarget = struct {
             next_slot: u32 = 0,
             active_slot: ?u32 = null,
             active_image: ?u32 = null,
+            has_acquired: bool = false,
             submitted: bool = false,
             video_device: ?*Video.VideoDevice = null,
             video_device_attached: bool = false,
@@ -258,17 +584,36 @@ pub const RenderTarget = struct {
                 }
                 self.destroyTarget();
                 self.destroySync();
-                if (self.surface != 0) {
-                    self.instance.destroySurfaceKHR(self.surface);
-                    self.surface = 0;
-                }
-                self.allocator.free(self.color_formats);
+                if (self.owned_surface) |*surface| surface.deinit();
+                if (self.color_formats.len != 0) self.allocator.free(self.color_formats);
+                if (self.present_modes.len != 0) self.allocator.free(self.present_modes);
                 self.allocator.destroy(self);
             }
 
             fn acquireOpaque(ptr: *anyopaque) anyerror!Frame {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr));
                 return self.acquireFrame(ptr);
+            }
+
+            fn frameCommandBufferOpaque(ptr: *anyopaque) vk.CommandBuffer {
+                const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                std.debug.assert(!self.has_acquired);
+                return self.slots[0].command_buffer;
+            }
+
+            fn colorFormatOpaque(ptr: *anyopaque) vk.Format {
+                const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                return self.color_format;
+            }
+
+            fn setPresentModesOpaque(ptr: *anyopaque, modes: []const vk.PresentModeKHR) anyerror!void {
+                const self: *StateSelf = @ptrCast(@alignCast(ptr));
+                if (self.surface == 0) return;
+                if (self.active_slot != null) return error.FrameAlreadyAcquired;
+                const replacement = try self.allocator.dupe(vk.PresentModeKHR, modes);
+                self.allocator.free(self.present_modes);
+                self.present_modes = replacement;
+                self.recreate_pending = true;
             }
 
             fn submitOpaque(ptr: ?*anyopaque, timestamp_ns: ?u64) anyerror!void {
@@ -419,6 +764,7 @@ pub const RenderTarget = struct {
 
                 self.active_slot = slot_index;
                 self.active_image = image_index;
+                self.has_acquired = true;
                 self.submitted = false;
                 return .{
                     .index = image_index,
@@ -439,6 +785,7 @@ pub const RenderTarget = struct {
                 const slot = &self.slots[slot_index];
                 const image_handle = self.image(image_index);
                 if (readback_allocator != null) {
+                    if (!self.readback_enabled) return error.ReadbackUnavailable;
                     if (!readbackFormatSupported(self.color_format)) return error.ReadbackUnavailable;
                     try self.ensureReadbackBuffer(slot, @as(u64, self.extent.width) * self.extent.height * 4);
                 }
@@ -447,7 +794,7 @@ pub const RenderTarget = struct {
                 else
                     false;
                 const copy_image = readback_allocator != null or wants_recording;
-                const post_render_layout: vk.ImageLayout = if (copy_image or self.surface == 0) .transfer_src_optimal else .present_src_khr;
+                const post_render_layout: vk.ImageLayout = if (copy_image) .transfer_src_optimal else if (self.surface == 0) .color_attachment_optimal else .present_src_khr;
                 transitionImage(self.device, slot.command_buffer, image_handle, .color_attachment_optimal, post_render_layout, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit, if (post_render_layout == .transfer_src_optimal) vk.pipeline_stage.transfer_bit else vk.pipeline_stage.bottom_of_pipe_bit, if (post_render_layout == .transfer_src_optimal) vk.access.transfer_read_bit else 0);
                 var recorder_prepared = false;
                 var recorder_signal: vk.Semaphore = 0;
@@ -529,7 +876,7 @@ pub const RenderTarget = struct {
                     return err;
                 };
                 self.submitted = true;
-                self.setImageLayout(image_index, if (self.surface != 0) .present_src_khr else .transfer_src_optimal);
+                self.setImageLayout(image_index, if (self.surface != 0) .present_src_khr else post_render_layout);
                 self.active_slot = null;
 
                 var present_error: ?anyerror = null;
@@ -537,7 +884,7 @@ pub const RenderTarget = struct {
                     self.window.requestFrame();
                     const swapchains = [_]vk.SwapchainKHR{self.swapchain};
                     const indices = [_]u32{image_index};
-                    const present = self.device.queuePresentKHR(self.graphics_queue, &.{
+                    const present = self.device.queuePresentKHR(self.present_queue, &.{
                         .s_type = .present_info_khr,
                         .p_next = null,
                         .wait_semaphore_count = 1,
@@ -633,6 +980,7 @@ pub const RenderTarget = struct {
                             .extent = wanted,
                             .format = self.color_format,
                             .image_count = self.frames_in_flight,
+                            .usage = vk.image_usage.color_attachment_bit | if (self.transferSourceRequired()) vk.image_usage.transfer_src_bit else 0,
                         });
                         self.extent = wanted;
                     } else if (self.extent.width != wanted.width or self.extent.height != wanted.height) {
@@ -660,11 +1008,17 @@ pub const RenderTarget = struct {
                 defer self.allocator.free(formats);
                 const selected_format = chooseSurfaceFormat(formats, self.color_formats) orelse return error.UnsupportedSurfaceFormat;
                 self.color_format = selected_format.format;
-                if (capabilities.supported_usage_flags & vk.image_usage.transfer_src_bit == 0) {
+                const transfer_src_required = self.transferSourceRequired();
+                if (transfer_src_required and capabilities.supported_usage_flags & vk.image_usage.transfer_src_bit == 0) {
                     return error.UnsupportedSurfaceUsage;
                 }
+                const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.physical_device, self.surface, self.allocator);
+                defer self.allocator.free(present_modes);
+                const present_mode = choosePresentMode(present_modes, self.present_modes) orelse return error.UnsupportedPresentMode;
                 var image_count = capabilities.min_image_count + 1;
                 if (capabilities.max_image_count != 0) image_count = @min(image_count, capabilities.max_image_count);
+                const concurrent = self.present_queue_family != self.graphics_queue_family;
+                const queue_family_indices = [_]u32{ self.graphics_queue_family, self.present_queue_family };
                 self.swapchain = try self.device.createSwapchainKHR(&.{
                     .s_type = .swapchain_create_info_khr,
                     .p_next = null,
@@ -675,13 +1029,13 @@ pub const RenderTarget = struct {
                     .image_color_space = selected_format.color_space,
                     .image_extent = wanted_extent,
                     .image_array_layers = 1,
-                    .image_usage = vk.image_usage.color_attachment_bit | vk.image_usage.transfer_src_bit,
-                    .image_sharing_mode = .exclusive,
-                    .queue_family_index_count = 0,
-                    .p_queue_family_indices = null,
+                    .image_usage = vk.image_usage.color_attachment_bit | if (transfer_src_required) vk.image_usage.transfer_src_bit else 0,
+                    .image_sharing_mode = if (concurrent) .concurrent else .exclusive,
+                    .queue_family_index_count = if (concurrent) 2 else 0,
+                    .p_queue_family_indices = if (concurrent) queue_family_indices[0..].ptr else null,
                     .pre_transform = capabilities.current_transform,
                     .composite_alpha = chooseCompositeAlpha(capabilities.supported_composite_alpha),
-                    .present_mode = vk.present_mode.fifo_khr,
+                    .present_mode = present_mode,
                     .clipped = vk.TRUE,
                     .old_swapchain = 0,
                 });
@@ -714,6 +1068,10 @@ pub const RenderTarget = struct {
                 }
                 self.extent = wanted_extent;
                 self.recreate_pending = false;
+            }
+
+            fn transferSourceRequired(self: *const StateSelf) bool {
+                return self.readback_enabled or self.video_device != null;
             }
 
             fn destroyTarget(self: *StateSelf) void {
@@ -792,7 +1150,15 @@ pub const RenderTarget = struct {
             }
         };
 
+        const backend_kind = options.window.ctx.backendKind();
+        if (options.surface != null and options.presentation_surface != null) unreachable;
+        if (backend_kind == .offscreen and options.presentation_surface != null) unreachable;
+
         const state = try allocator.create(State);
+        const present_queue = options.context.present_queue orelse PresentQueue{
+            .queue = options.context.graphics_queue,
+            .family = options.context.graphics_queue_family,
+        };
         state.* = .{
             .allocator = allocator,
             .window = options.window,
@@ -801,14 +1167,27 @@ pub const RenderTarget = struct {
             .device = &options.context.device,
             .graphics_queue = options.context.graphics_queue,
             .graphics_queue_family = options.context.graphics_queue_family,
+            .present_queue = present_queue.queue,
+            .present_queue_family = present_queue.family,
             .command_pool = options.context.command_pool,
             .color_format = 0,
-            .color_formats = try allocator.dupe(vk.Format, options.color_formats),
+            .color_formats = &.{},
+            .present_modes = &.{},
+            .readback_enabled = options.readback,
             .memory_allocator = options.memory_allocator,
             .frames_in_flight = options.frames_in_flight,
             .video_device = if (comptime build_options.vk_video) options.context.video_device else null,
         };
         errdefer State.deinitOpaque(@ptrCast(state));
+        state.color_formats = try allocator.dupe(vk.Format, options.color_formats);
+        if (backend_kind != .offscreen) {
+            const present_modes = options.present_modes orelse switch (options.vsync) {
+                .on => vsync_on_present_modes,
+                .off => vsync_off_present_modes,
+                .relaxed => relaxed_vsync_present_modes,
+            };
+            state.present_modes = try allocator.dupe(vk.PresentModeKHR, present_modes);
+        }
 
         if (comptime build_options.vk_video) if (state.video_device) |video_device| {
             video_device.attachTarget();
@@ -816,19 +1195,27 @@ pub const RenderTarget = struct {
         };
 
         state.memory_properties = state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
-        if (options.window.ctx.backendKind() != .offscreen) {
-            state.surface = try Vulkan.createSurface(
-                state.instance,
-                options.window.ctx.backendKind(),
-                options.window.nativeDisplay(),
-                options.window.nativeSurface(),
-            );
-            if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, options.context.graphics_queue_family, state.surface) != vk.TRUE) return error.QueueFamilyCannotPresent;
+        if (backend_kind != .offscreen) {
+            if (options.presentation_surface) |surface| {
+                state.owned_surface = surface;
+                state.surface = surface.handle;
+            } else if (options.surface) |surface| {
+                state.surface = surface;
+            } else {
+                state.owned_surface = try Vulkan.PresentationSurface.init(
+                    state.instance,
+                    options.window.ctx.backendKind(),
+                    options.window.nativeDisplay(),
+                    options.window.nativeSurface(),
+                );
+                state.surface = state.owned_surface.?.handle;
+            }
+            if (try state.instance.getPhysicalDeviceSurfaceSupportKHR(state.physical_device, state.present_queue_family, state.surface) != vk.TRUE) return error.QueueFamilyCannotPresent;
             const formats = try state.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(state.physical_device, state.surface, allocator);
             defer allocator.free(formats);
             state.color_format = (chooseSurfaceFormat(formats, state.color_formats) orelse return error.UnsupportedSurfaceFormat).format;
         } else {
-            state.color_format = chooseOffscreenFormat(state.instance, state.physical_device, state.color_formats) orelse return error.UnsupportedSurfaceFormat;
+            state.color_format = chooseOffscreenFormatForUsage(state.instance, state.physical_device, state.color_formats, state.transferSourceRequired()) orelse return error.UnsupportedSurfaceFormat;
             if (state.memory_allocator == null) state.memory_allocator = .{
                 .context = state,
                 .allocate_and_bind = State.allocateDefaultMemory,
@@ -838,17 +1225,20 @@ pub const RenderTarget = struct {
         const physical_device_id: usize = if (state.physical_device) |physical_device| @intFromPtr(physical_device) else 0;
         log.debug("selected Vulkan target: device=0x{x}, backend={s}, queue_family={d}, format={s}", .{
             physical_device_id,
-            @tagName(options.window.ctx.backendKind()),
+            @tagName(backend_kind),
             options.context.graphics_queue_family,
             formatName(state.color_format),
         });
         try state.createSync();
-        if (options.window.ctx.backendKind() == .offscreen) try state.ensureTarget();
+        if (backend_kind == .offscreen) try state.ensureTarget();
         return .{
             .allocator = allocator,
             .state = state,
             .deinit_fn = State.deinitOpaque,
             .acquire_fn = State.acquireOpaque,
+            .frame_command_buffer_fn = State.frameCommandBufferOpaque,
+            .color_format_fn = State.colorFormatOpaque,
+            .set_present_modes_fn = State.setPresentModesOpaque,
             .begin_recording_fn = State.beginRecordingOpaque,
             .end_recording_fn = State.endRecordingOpaque,
             .recording_status_fn = State.recordingStatusOpaque,
@@ -867,10 +1257,42 @@ pub const RenderTarget = struct {
         return self.acquire_fn(self.state);
     }
 
+    /// Returns a reusable frame command buffer before the first acquisition.
+    /// This is useful for setup APIs such as GPU profilers that need a command
+    /// buffer at initialization.
+    pub fn frameCommandBuffer(self: *const Self) vk.CommandBuffer {
+        return self.frame_command_buffer_fn(self.state);
+    }
+
+    /// Converts the setup command buffer to the application's generated
+    /// Vulkan binding type.
+    pub inline fn frameCommandBufferAs(self: *const Self, comptime CommandBuffer: type) CommandBuffer {
+        return Vulkan.fromCommandBuffer(CommandBuffer, self.frameCommandBuffer());
+    }
+
+    pub fn colorFormat(self: *const Self) vk.Format {
+        return self.color_format_fn(self.state);
+    }
+
+    /// Selects one of low's standard presentation policies. This is a no-op
+    /// for offscreen targets.
+    pub fn setVSync(self: *Self, vsync: VSync) !void {
+        return self.setPresentModes(switch (vsync) {
+            .on => vsync_on_present_modes,
+            .off => vsync_off_present_modes,
+            .relaxed => relaxed_vsync_present_modes,
+        });
+    }
+
+    /// Updates preferred presentation modes. This is a no-op for offscreen targets.
+    pub fn setPresentModes(self: *Self, modes: []const vk.PresentModeKHR) !void {
+        return self.set_present_modes_fn(self.state, modes);
+    }
+
     /// Starts encoding subsequent submitted frames.
     ///
-    /// The simplest form is `try target.beginRecording(.{ .allocator = gpa,
-    /// .io = io, .writer = writer });`. Use `.format = .mkv` for variable-rate
+    /// The simplest form is `try target.beginRecording(.{ .io = io,
+    /// .writer = writer });`. Use `.format = .mkv` for variable-rate
     /// timing or resize handling. Finish with `endRecording` before closing
     /// the writer; use `recordingStatus` to observe asynchronous failures.
     pub fn beginRecording(self: *Self, options: Video.RecordingOptions) !void {
@@ -913,10 +1335,7 @@ pub const RenderTarget = struct {
     }
 };
 
-pub const VulkanWindow = RenderTarget;
-pub const Target = RenderTarget;
-
-pub const OffscreenImageRing = struct {
+const OffscreenImageRing = struct {
     const Self = @This();
     pub const Options = struct {
         allocator: std.mem.Allocator,
@@ -1101,6 +1520,46 @@ fn chooseCompositeAlpha(supported: vk.CompositeAlphaFlagsKHR) vk.CompositeAlphaF
     if (supported & vk.composite_alpha.pre_multiplied_bit_khr != 0) return vk.composite_alpha.pre_multiplied_bit_khr;
     if (supported & vk.composite_alpha.post_multiplied_bit_khr != 0) return vk.composite_alpha.post_multiplied_bit_khr;
     return vk.composite_alpha.inherit_bit_khr;
+}
+
+fn choosePresentMode(available: []const vk.PresentModeKHR, desired: []const vk.PresentModeKHR) ?vk.PresentModeKHR {
+    for (desired) |wanted| {
+        for (available) |candidate| {
+            if (candidate == wanted) return candidate;
+        }
+    }
+    for (available) |candidate| {
+        if (candidate == vk.present_mode.fifo_khr) return candidate;
+    }
+    return if (available.len != 0) available[0] else null;
+}
+
+test "present mode selection honors preference and fifo fallback" {
+    const available = [_]vk.PresentModeKHR{
+        vk.present_mode.fifo_khr,
+        vk.present_mode.mailbox_khr,
+    };
+    try std.testing.expectEqual(
+        vk.present_mode.mailbox_khr,
+        choosePresentMode(&available, &.{ vk.present_mode.immediate_khr, vk.present_mode.mailbox_khr }),
+    );
+    try std.testing.expectEqual(
+        vk.present_mode.fifo_khr,
+        choosePresentMode(&available, &.{vk.present_mode.immediate_khr}),
+    );
+    try std.testing.expectEqual(@as(?vk.PresentModeKHR, null), choosePresentMode(&.{}, &.{vk.present_mode.fifo_khr}));
+}
+
+test "standard vsync policies preserve their intent" {
+    const available = [_]vk.PresentModeKHR{
+        vk.present_mode.fifo_khr,
+        vk.present_mode.fifo_relaxed_khr,
+        vk.present_mode.mailbox_khr,
+        vk.present_mode.immediate_khr,
+    };
+    try std.testing.expectEqual(vk.present_mode.fifo_khr, choosePresentMode(&available, vsync_on_present_modes));
+    try std.testing.expectEqual(vk.present_mode.fifo_relaxed_khr, choosePresentMode(&available, relaxed_vsync_present_modes));
+    try std.testing.expectEqual(vk.present_mode.immediate_khr, choosePresentMode(&available, vsync_off_present_modes));
 }
 
 fn transitionImage(

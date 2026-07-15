@@ -62,6 +62,12 @@ and writes streaming Matroska by default (or raw Annex-B H.264 when selected)
 through a caller-owned `std.Io.Writer`. Vulkan Video dependencies are not
 resolved by normal builds.
 
+Request recording support with `video.selectVideoFormat(..., .on)` during
+device selection; Low tries AV1, H.265, then H.264. Once the selected
+`VideoDevice` is attached, a target starts with only
+`beginRecording(.{ .io = io, .writer = writer })`. Explicit codec preferences,
+timing, quality, resize behavior, and container settings remain optional.
+
 See the [Vulkan Video recording guide](docs/recording.md) for device setup,
 recording lifecycle, timing, output formats, and quality tradeoffs. For
 platform and Vulkan-layer internals, including the Vulkan Video implementation

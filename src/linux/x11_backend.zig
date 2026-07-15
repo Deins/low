@@ -267,17 +267,17 @@ fn handlePendingEvents(data: *Data) void {
 fn handleEvent(data: *Data, event: *x11.XEvent) void {
     switch (event.type) {
         x11.ClientMessage => if (event.xclient.message_type == data.atoms.wm_protocols and @as(x11.Atom, @intCast(event.xclient.data.l[0])) == data.atoms.wm_delete_window) {
-            if (findWindow(data, event.xclient.window)) |w| w.updateClose();
+            if (findWindow(data, event.xclient.window)) |w| api.windowUpdateClose(w);
         },
-        x11.ConfigureNotify => if (findWindow(data, event.xconfigure.window)) |w| w.updateSize(.{ .width = event.xconfigure.width, .height = event.xconfigure.height }),
-        x11.FocusIn => if (findWindow(data, event.xfocus.window)) |w| w.updateFocus(true),
-        x11.FocusOut => if (findWindow(data, event.xfocus.window)) |w| w.updateFocus(false),
+        x11.ConfigureNotify => if (findWindow(data, event.xconfigure.window)) |w| api.windowUpdateSize(w, .{ .width = event.xconfigure.width, .height = event.xconfigure.height }),
+        x11.FocusIn => if (findWindow(data, event.xfocus.window)) |w| api.windowUpdateFocus(w, true),
+        x11.FocusOut => if (findWindow(data, event.xfocus.window)) |w| api.windowUpdateFocus(w, false),
         x11.EnterNotify => if (findWindow(data, event.xcrossing.window)) |w| {
-            w.updateCursorEnter(true);
+            api.windowUpdateCursorEnter(w, true);
             applyCursor(w);
         },
-        x11.LeaveNotify => if (findWindow(data, event.xcrossing.window)) |w| w.updateCursorEnter(false),
-        x11.MotionNotify => if (findWindow(data, event.xmotion.window)) |w| w.updateCursorMotion(@floatFromInt(event.xmotion.x), @floatFromInt(event.xmotion.y)),
+        x11.LeaveNotify => if (findWindow(data, event.xcrossing.window)) |w| api.windowUpdateCursorEnter(w, false),
+        x11.MotionNotify => if (findWindow(data, event.xmotion.window)) |w| api.windowUpdateCursorMotion(w, @floatFromInt(event.xmotion.x), @floatFromInt(event.xmotion.y)),
         x11.ButtonPress => handleButton(data, event.xbutton, true),
         x11.ButtonRelease => handleButton(data, event.xbutton, false),
         x11.KeyPress => handleKey(data, event.xkey, true),
@@ -285,15 +285,15 @@ fn handleEvent(data: *Data, event: *x11.XEvent) void {
         x11.MapNotify => if (findWindow(data, event.xmap.window)) |w| {
             w.visible = true;
             w.minimized = false;
-            w.updateRenderSuspended(false);
+            api.windowUpdateRenderSuspended(w, false);
         },
         x11.UnmapNotify => if (findWindow(data, event.xunmap.window)) |w| {
             w.visible = false;
             w.minimized = true;
-            w.updateRenderSuspended(true);
+            api.windowUpdateRenderSuspended(w, true);
         },
         x11.VisibilityNotify => if (findWindow(data, event.xvisibility.window)) |w| {
-            w.updateRenderSuspended(event.xvisibility.state == x11.VisibilityFullyObscured);
+            api.windowUpdateRenderSuspended(w, event.xvisibility.state == x11.VisibilityFullyObscured);
         },
         else => {},
     }
@@ -303,10 +303,10 @@ fn handleButton(data: *Data, event: x11.XButtonEvent, pressed: bool) void {
     const window = findWindow(data, event.window) orelse return;
     const mods = modifiers(event.state);
     switch (event.button) {
-        4 => if (pressed) window.updateScroll(0, 1),
-        5 => if (pressed) window.updateScroll(0, -1),
-        6 => if (pressed) window.updateScroll(-1, 0),
-        7 => if (pressed) window.updateScroll(1, 0),
+        4 => if (pressed) api.windowUpdateScroll(window, 0, 1),
+        5 => if (pressed) api.windowUpdateScroll(window, 0, -1),
+        6 => if (pressed) api.windowUpdateScroll(window, -1, 0),
+        7 => if (pressed) api.windowUpdateScroll(window, 1, 0),
         else => {
             const button: api.MouseButton = switch (event.button) {
                 1 => .left,
@@ -319,7 +319,7 @@ fn handleButton(data: *Data, event: x11.XButtonEvent, pressed: bool) void {
                 12 => .eight,
                 else => return,
             };
-            window.updateMouseButton(button, if (pressed) .press else .release, mods);
+            api.windowUpdateMouseButton(window, button, if (pressed) .press else .release, mods);
         },
     }
 }
@@ -332,10 +332,10 @@ fn handleKey(data: *Data, event: x11.XKeyEvent, pressed: bool) void {
     const key = mapKeysym(keysym);
     const action: api.Action = if (pressed and window.pressed_keys.contains(key)) .repeat else if (pressed) .press else .release;
     const mods = modifiers(event.state);
-    window.updateKey(key, @intCast(event.keycode), action, mods);
+    api.windowUpdateKey(window, key, @intCast(event.keycode), action, mods);
     if (pressed and !mods.control and len > 0) {
         const text = bytes[0..@intCast(len)];
-        if (input.isPrintableText(text)) window.updateText(text);
+        if (input.isPrintableText(text)) api.windowUpdateText(window, text);
     }
 }
 

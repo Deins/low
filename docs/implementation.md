@@ -40,18 +40,59 @@ synchronization, resize recreation, layout transitions, and presentation frame
 pacing. The application still owns the Vulkan instance, physical-device
 selection, queues, command pool, and rendering commands. Use
 `targets().RenderContext` to share those low Vulkan resources across multiple
-targets. It can use any Vulkan binding alongside low's binding-agnostic ABI.
+targets. Set its optional `present_queue` when presentation uses a queue family
+different from graphics; the target configures concurrent
+swapchain sharing in that case. It can use any Vulkan binding alongside low's
+binding-agnostic ABI.
+
+The normal per-window setup uses only the window and shared render context:
+
+```zig
+var target = try RenderTarget.init(allocator, .{
+    .window = window,
+    .context = &render_context,
+});
+defer target.deinit();
+```
+
+Onscreen targets create a surface from the low window handles by default. Set
+`RenderTarget.Options.surface` to supply an existing surface instead; the
+caller retains ownership and must destroy it after the target is deinitialized.
+When a surface must exist for device selection before the target is created,
+pass `Context.createVulkanPresentationSurface()` through
+`RenderTarget.Options.presentation_surface`; ownership transfers to the target.
 
 `RenderTarget.Options.color_formats` is an ordered preference slice. WSI
 targets choose the first requested surface format, while offscreen targets
 check image-format features; `targets().default_color_formats` tries packed
-10-bit UNORM formats before BGRA8. `chooseSurfaceFormat` and
-`chooseOffscreenFormat` are available when an application must choose its
-pipeline format before creating a target.
+10-bit UNORM formats before BGRA8. `chooseColorFormat` is available when an
+application must choose its pipeline format before creating a target;
+`chooseSurfaceFormat` and `chooseOffscreenFormat` remain available for more
+specific selection. `RenderTarget.colorFormat()` reports the selected format
+after initialization. Presentation defaults to `.vsync = .on`, which uses
+FIFO. `.relaxed` prefers FIFO-relaxed and falls back to FIFO. `.off` prefers
+immediate, then mailbox, FIFO-relaxed, and finally FIFO. `Options.present_modes`
+can replace the standard policy with a custom ordered preference;
+`setVSync` changes standard policy at runtime, while advanced `setPresentModes`
+replaces it with a raw preference list for a later swapchain recreation. Screenshot
+readback is disabled by default; set `Options.readback` when it is needed. A
+configured Vulkan Video device enables the required transfer usage independently.
 
-`Context.createVulkanSurface()` is a convenience for applications that need a
-surface before device or queue-family selection. `low.vulkan` also exposes
-handle conversion helpers for bridging generated Vulkan bindings to its ABI.
+`Context.createVulkanSurface()` is the raw-handle convenience for applications
+that need a surface before device or queue-family selection.
+`Context.createVulkanPresentationSurface()` adds ownership and a `deinit`
+method for that explicit pre-target workflow. `Instance.findPresentQueueFamilyKHR()`
+scans the surface support bits when an application chooses a separate present queue.
+`low.vulkan` also exposes handle conversion helpers for bridging generated
+Vulkan bindings to its ABI.
+
+For projects using a generated Vulkan binding, `targets()` also provides
+binding-aware bootstrap helpers. `createInstance` loads an owned instance
+wrapper, `findDevice` selects a compatible physical device, and `createDevice`
+creates the logical device, required queues, generated dispatch wrapper, and
+low ABI device view. Pass the generated binding as the `Vk` comptime argument;
+the helpers do not impose a specific binding on the application. Use
+`RenderContext.init` to assemble the low render context from those resources.
 
 `Device.acquireNextImageKHR()` returns `null` for `VK_NOT_READY` and
 `VK_TIMEOUT`; neither outcome acquires an image or supplies an image index.
@@ -65,10 +106,13 @@ const video = low.vulkan.video(); // build with -Dvk_video=true
 ```
 
 The option lazily generates a private binding from pinned Vulkan and Vulkan
-Video registries. Capability discovery happens before device creation;
-applications merge the returned three device extensions and unique graphics /
-encode queue requirements. `VideoDevice` then coordinates one exclusively
-owned encode queue across independently admitted render-target recorders.
+Video registries. Capability discovery happens before device creation. A
+`.on` `RecordingRequest` tries AV1, H.265, and H.264 automatically; `.codec`
+and `.preferred` provide explicit control. Applications merge the selected
+codec's device extensions and unique graphics / encode queue requirements.
+`VideoDevice` then retains that codec as the default and coordinates one
+exclusively owned encode queue across independently admitted render-target
+recorders.
 
 Each recorder copies the completed target into a private image before WSI
 presentation, converts that image to BT.709 limited-range NV12 on the compute
@@ -87,8 +131,10 @@ applications starting another MKV recording must supply a fresh writer rather
 than append it to the previous file.
 
 For an offscreen target, provide `memory_allocator` callbacks to allocate and
-bind the target's images. Offscreen targets never create a surface or swapchain
-and leave the rendered image in `transfer_src_optimal` after submission.
+bind the target's images. Offscreen targets never create a surface or swapchain.
+When readback or recording copies the rendered image, it is left in
+`transfer_src_optimal` after submission; otherwise it remains in
+`color_attachment_optimal`.
 
 ### Vulkan Video implementation invariants
 

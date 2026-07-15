@@ -2,6 +2,7 @@ const std = @import("std");
 const vk = @import("_vk_video");
 const Vulkan = @import("../../vulkan.zig");
 const low_vk = @import("../api.zig");
+const capabilities = @import("capabilities.zig");
 
 pub const VideoDevice = struct {
     allocator: std.mem.Allocator,
@@ -16,6 +17,7 @@ pub const VideoDevice = struct {
     encode_queue_family: u32,
     compute_queue: vk.Queue,
     compute_queue_family: u32,
+    codec: capabilities.Codec,
     memory_properties: vk.PhysicalDeviceMemoryProperties,
     attached_targets: usize = 0,
 
@@ -28,6 +30,9 @@ pub const VideoDevice = struct {
         encode_queue_family: u32,
         compute_queue: low_vk.Queue,
         compute_queue_family: u32,
+        /// Codec selected while creating the Vulkan device and used by its
+        /// recorders.
+        codec: capabilities.Codec,
     };
 
     pub fn init(options: Options) !VideoDevice {
@@ -54,6 +59,7 @@ pub const VideoDevice = struct {
             .encode_queue_family = options.encode_queue_family,
             .compute_queue = toQueue(options.compute_queue),
             .compute_queue_family = options.compute_queue_family,
+            .codec = options.codec,
             .memory_properties = instance_wrapper.getPhysicalDeviceMemoryProperties(physical_device),
         };
     }

@@ -459,18 +459,18 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             return 0;
         },
         win32.WM_CLOSE => {
-            window.updateClose();
+            runtime.windowUpdateClose(window);
             return 0;
         },
         win32.WM_SETFOCUS => {
-            window.updateFocus(true);
+            runtime.windowUpdateFocus(window, true);
         },
         win32.WM_KILLFOCUS => {
-            window.updateFocus(false);
+            runtime.windowUpdateFocus(window, false);
         },
         win32.WM_MOUSEMOVE => {
             const p = Point{ .x = @floatFromInt(win32.xFromLparam(lparam)), .y = @floatFromInt(win32.yFromLparam(lparam)) };
-            window.updateCursorMotion(p.x, p.y);
+            runtime.windowUpdateCursorMotion(window, p.x, p.y);
         },
         win32.WM_SETCURSOR => {
             if (win32.loword(lparam) == win32.HTCLIENT) {
@@ -490,12 +490,12 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
                 win32.WM_LBUTTONDOWN, win32.WM_RBUTTONDOWN, win32.WM_MBUTTONDOWN, win32.WM_XBUTTONDOWN => .press,
                 else => .release,
             };
-            window.updateMouseButton(button, action, modifiers());
+            runtime.windowUpdateMouseButton(window, button, action, modifiers());
             return 0;
         },
         win32.WM_MOUSEWHEEL, win32.WM_MOUSEHWHEEL => {
             const delta: i16 = @bitCast(win32.hiword(wparam));
-            window.updateScroll(if (message == win32.WM_MOUSEHWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0, if (message == win32.WM_MOUSEWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0);
+            runtime.windowUpdateScroll(window, if (message == win32.WM_MOUSEHWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0, if (message == win32.WM_MOUSEWHEEL) @as(f64, @floatFromInt(delta)) / 120.0 else 0);
             return 0;
         },
         win32.WM_SIZE => {
@@ -505,10 +505,10 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             var rect: win32.RECT = undefined;
             _ = win32.GetClientRect(hwnd, &rect);
             const size = window.pixelToContentSize(.{ .width = rect.right, .height = rect.bottom });
-            window.updateSize(size);
+            runtime.windowUpdateSize(window, size);
         },
         win32.WM_DPICHANGED => {
-            window.updateScale(dpiScale(win32.loword(wparam)).x);
+            runtime.windowUpdateScale(window, dpiScale(win32.loword(wparam)).x);
             const suggested: *const win32.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
             _ = win32.SetWindowPos(
                 hwnd,
@@ -521,7 +521,7 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             );
             var rect: win32.RECT = undefined;
             _ = win32.GetClientRect(hwnd, &rect);
-            window.updateSize(window.pixelToContentSize(.{ .width = rect.right, .height = rect.bottom }));
+            runtime.windowUpdateSize(window, window.pixelToContentSize(.{ .width = rect.right, .height = rect.bottom }));
             return 0;
         },
         win32.WM_SHOWWINDOW => {
@@ -531,7 +531,7 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             var utf8: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(@intCast(wparam), &utf8) catch 0;
             if (len != 0 and input.isPrintableText(utf8[0..len])) {
-                window.updateText(utf8[0..len]);
+                runtime.windowUpdateText(window, utf8[0..len]);
             }
             return 0;
         },
@@ -541,7 +541,7 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             const repeated = !released and (@as(usize, @bitCast(lparam)) & 0x4000_0000) != 0;
             const action: Action = if (released) .release else if (repeated) .repeat else .press;
             const repeat_count: usize = if (action == .repeat) @max(1, @as(usize, @bitCast(lparam)) & 0xffff) else 1;
-            for (0..repeat_count) |_| window.updateKey(key, @intCast(wparam), action, modifiers());
+            for (0..repeat_count) |_| runtime.windowUpdateKey(window, key, @intCast(wparam), action, modifiers());
             if (message == win32.WM_KEYDOWN or message == win32.WM_KEYUP) return 0;
         },
         else => {},
@@ -559,7 +559,7 @@ fn updateRenderSuspension(window: *Window, fallback_suspended: bool) void {
     );
     // DWM also reports windows cloaked by the shell. If it is unavailable or
     // declines the query, retain the state inferred from the window message.
-    window.updateRenderSuspended(fallback_suspended or result == 0 and cloaked != 0);
+    runtime.windowUpdateRenderSuspended(window, fallback_suspended or result == 0 and cloaked != 0);
 }
 
 fn modifiers() Modifiers {

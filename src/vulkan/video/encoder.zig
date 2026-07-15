@@ -46,7 +46,7 @@ pub const RecordingTiming = union(enum) {
 
 /// Configuration for `RenderTarget.beginRecording` or `Recorder.begin`.
 ///
-/// Typical window recording needs only `allocator`, `io`, and `writer`; the
+/// Typical window recording needs only `io` and `writer`; the
 /// defaults produce a 60 fps, 12 Mbps Matroska file. Call `endRecording` (or
 /// `Recorder.end`) before closing the writer so pending GPU work is drained
 /// and the container is finalized.
@@ -55,16 +55,11 @@ pub const RecordingTiming = union(enum) {
 /// Packed 10-bit sources are converted to the recorder's 8-bit 4:2:0 encode
 /// input; it does not capture audio.
 pub const RecordingOptions = struct {
-    /// Used for temporary encoder state and capability queries. It must remain
-    /// valid until recording has ended and resources have been released.
-    allocator: std.mem.Allocator,
     /// Clock used by `.timing.monotonic`.
     io: std.Io,
     /// Destination for the encoded stream. The caller owns and closes it after
     /// `endRecording` completes.
     writer: *std.Io.Writer,
-    /// Codec carried by the raw stream or Matroska track.
-    codec: capabilities.Codec = .h264,
     /// Select timestamp behavior and the nominal encoder rate. Use `.fps(60)`
     /// for whole-number rates or `.init(30_000, 1001)` for exact fractions.
     timing: RecordingTiming = .{ .fixed_rate = .fps(60) },
@@ -126,7 +121,6 @@ pub const Recorder = struct {
         codec: capabilities.Codec,
         format: RecordingFormat,
         mkv: ?matroska.RecordingMuxer = null,
-        allocator: std.mem.Allocator,
         start_time_ns: i128,
         output_frames: u64 = 0,
         last_timestamp_ns: ?u64 = null,
@@ -160,13 +154,14 @@ pub const Recorder = struct {
         if (self.cache_poisoned) self.releaseResources();
         if (self.frames_in_flight == 0) return error.InvalidFramesInFlight;
         if (!sourceFormatSupported(self.color_format)) return error.UnsupportedSourceFormat;
-        try validateRecordingCodec(options.codec);
+        const codec = self.video_device.codec;
+        try validateRecordingCodec(codec);
         try options.timing.frameRate().validate();
         if (options.bitrate == 0) return error.InvalidBitrate;
         if (options.gop_size == 0) return error.InvalidGopSize;
         if (options.format != .mkv and !options.timing.isFixedRate()) return error.TimestampedOutputRequiresMkv;
 
-        _ = try self.configureCache(extent, options, true);
+        _ = try self.configureCache(extent, options, codec, true);
 
         var run = Run{
             .io = options.io,
@@ -177,9 +172,8 @@ pub const Recorder = struct {
             .quality = options.quality,
             .resize = options.resize,
             .parameter_sets = options.parameter_sets,
-            .codec = options.codec,
+            .codec = codec,
             .format = options.format,
-            .allocator = options.allocator,
             .start_time_ns = 0,
             .source_extent = extent,
         };
@@ -208,14 +202,14 @@ pub const Recorder = struct {
         self.last_error = null;
     }
 
-    fn configureCache(self: *Recorder, extent: low_vk.Extent2D, options: RecordingOptions, reset_compatible: bool) !bool {
+    fn configureCache(self: *Recorder, extent: low_vk.Extent2D, options: RecordingOptions, codec: capabilities.Codec, reset_compatible: bool) !bool {
         const query_options = capabilities.QueryH264SupportOptions{
             .instance = self.video_device.low_instance,
             .physical_device = toLowPhysicalDevice(self.video_device.physical_device),
             .extent = extent,
-            .allocator = options.allocator,
+            .allocator = self.allocator,
         };
-        const support: AnySupport = switch (options.codec) {
+        const support: AnySupport = switch (codec) {
             .h264 => AnySupport.fromH264(try capabilities.queryH264Support(query_options)),
             .h265 => AnySupport.fromCodec(try capabilities.queryH265Support(query_options)),
             .av1 => AnySupport.fromCodec(try capabilities.queryAV1Support(query_options)),
@@ -239,7 +233,7 @@ pub const Recorder = struct {
             .extent = support.coded_extent,
             .input_format = support.input_format.?,
             .dpb_format = support.dpb_format.?,
-            .codec = options.codec,
+            .codec = codec,
             .profile = support.profile,
             .max_level = support.max_level,
             .frame_rate = try options.timing.frameRate().reduced(),
@@ -253,11 +247,11 @@ pub const Recorder = struct {
         };
 
         if (self.cache == null or !std.meta.eql(self.cache.?.key, key)) {
-            const replacement = try options.allocator.create(Cache);
-            replacement.* = Cache.empty(options.allocator, self.video_device, self.graphics_queue_family, key, support);
+            const replacement = try self.allocator.create(Cache);
+            replacement.* = Cache.empty(self.allocator, self.video_device, self.graphics_queue_family, key, support);
             errdefer {
                 replacement.deinit();
-                options.allocator.destroy(replacement);
+                self.allocator.destroy(replacement);
             }
             try replacement.create();
             try replacement.initializeVideoSession();
@@ -353,7 +347,6 @@ pub const Recorder = struct {
 
         const run = &self.run.?;
         const options = RecordingOptions{
-            .allocator = run.allocator,
             .io = run.io,
             .writer = run.writer,
             .timing = run.timing,
@@ -362,10 +355,9 @@ pub const Recorder = struct {
             .quality = run.quality,
             .resize = run.resize,
             .parameter_sets = run.parameter_sets,
-            .codec = run.codec,
             .format = run.format,
         };
-        const changed = try self.configureCache(extent, options, false);
+        const changed = try self.configureCache(extent, options, run.codec, false);
         self.run.?.source_extent = extent;
         if (!changed) return;
         self.run.?.submitted = 0;
@@ -1670,6 +1662,7 @@ const Slot = struct {
 fn supportError(reason: ?capabilities.UnsupportedReason) anyerror {
     return switch (reason orelse return error.VideoEncodeUnsupported) {
         .missing_device_extension => error.MissingVideoDeviceExtension,
+        .missing_av1_feature => error.MissingVideoDeviceFeature,
         .no_h264_encode_queue, .no_h265_encode_queue, .no_av1_encode_queue => error.MissingVideoEncodeQueue,
         .unsupported_profile => error.UnsupportedVideoProfile,
         .unsupported_extent => error.UnsupportedVideoExtent,
@@ -1812,7 +1805,6 @@ test "recorder status transitions are non-consuming" {
         .parameter_sets = .stream_start,
         .codec = .h264,
         .format = .raw,
-        .allocator = std.testing.allocator,
         .start_time_ns = 0,
         .source_extent = .{ .width = 64, .height = 64 },
     };

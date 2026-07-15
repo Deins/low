@@ -203,10 +203,10 @@ fn wake(state: *api.State) void {
 }
 
 fn close(inner: *native.Window) void {
-    publicWindow(inner).updateClose();
+    api.windowUpdateClose(publicWindow(inner));
 }
 fn resize(inner: *native.Window, size: native.Size) void {
-    publicWindow(inner).updateSize(size);
+    api.windowUpdateSize(publicWindow(inner), size);
 }
 fn framebufferResize(inner: *native.Window, _: native.Size) void {
     const window = publicWindow(inner);
@@ -217,31 +217,31 @@ fn scale(inner: *native.Window, value: native.ContentScale) void {
     window.content_scale = value;
 }
 fn focus(inner: *native.Window, focused: bool) void {
-    publicWindow(inner).updateFocus(focused);
+    api.windowUpdateFocus(publicWindow(inner), focused);
 }
 fn renderSuspended(inner: *native.Window, suspended: bool) void {
-    publicWindow(inner).updateRenderSuspended(suspended);
+    api.windowUpdateRenderSuspended(publicWindow(inner), suspended);
 }
 fn frame(inner: *native.Window, time_ms: u32) void {
-    publicWindow(inner).updateFrameReady(time_ms);
+    api.windowUpdateFrameReady(publicWindow(inner), time_ms);
 }
 fn cursorEnter(inner: *native.Window, entered: bool) void {
-    publicWindow(inner).updateCursorEnter(entered);
+    api.windowUpdateCursorEnter(publicWindow(inner), entered);
 }
 fn cursorMotion(inner: *native.Window, point: native.Point) void {
-    publicWindow(inner).updateCursorMotion(point.x, point.y);
+    api.windowUpdateCursorMotion(publicWindow(inner), point.x, point.y);
 }
 fn mouseButton(inner: *native.Window, button: native.MouseButton, action: native.Action, mods: native.Modifiers) void {
-    publicWindow(inner).updateMouseButton(@enumFromInt(@intFromEnum(button)), @enumFromInt(@intFromEnum(action)), mods);
+    api.windowUpdateMouseButton(publicWindow(inner), @enumFromInt(@intFromEnum(button)), @enumFromInt(@intFromEnum(action)), mods);
 }
 fn scroll(inner: *native.Window, x: f64, y: f64) void {
-    publicWindow(inner).updateScroll(x, y);
+    api.windowUpdateScroll(publicWindow(inner), x, y);
 }
 fn key(inner: *native.Window, key_value: native.Key, raw: u32, action: native.Action, mods: native.Modifiers) void {
-    publicWindow(inner).updateKey(@enumFromInt(@intFromEnum(key_value)), raw, @enumFromInt(@intFromEnum(action)), mods);
+    api.windowUpdateKey(publicWindow(inner), @enumFromInt(@intFromEnum(key_value)), raw, @enumFromInt(@intFromEnum(action)), mods);
 }
 fn text(inner: *native.Window, bytes: []const u8) void {
-    publicWindow(inner).updateText(bytes);
+    api.windowUpdateText(publicWindow(inner), bytes);
 }
 
 const callbacks: native.WindowCallbacks = .{

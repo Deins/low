@@ -17,19 +17,12 @@ const PushConstants = extern struct {
     color: [3]f32,
 };
 
-const DeviceSelection = struct {
-    physical_device: vk.PhysicalDevice,
-    graphics_queue_family: u32,
-    encode_queue_family: ?u32 = null,
-    selected_video_format: ?video.SelectedVideoFormat = null,
-};
-
 const Renderer = struct {
     gpa: std.mem.Allocator,
     instance: vk.InstanceProxy,
     render_context: RenderContext,
     physical_device: vk.PhysicalDevice,
-    device_wrapper: *vk.DeviceWrapper,
+    device_resources: Targets.DeviceResources(vk),
     device: vk.DeviceProxy,
     graphics_queue: vk.Queue,
     graphics_queue_family: u32,
@@ -37,7 +30,6 @@ const Renderer = struct {
     pipeline_layout: vk.PipelineLayout,
     pipeline: vk.Pipeline,
     color_format: vk.Format,
-    color_formats: []const low.vulkan.api.Format,
     encode_queue: vk.Queue,
     encode_queue_family: ?u32,
     video_device: ?video.VideoDevice,
@@ -47,12 +39,33 @@ const Renderer = struct {
         gpa: std.mem.Allocator,
         instance: vk.InstanceProxy,
         low_instance_input: low.vulkan.Instance,
-        presentation_surface: ?vk.SurfaceKHR,
-        color_formats: []const low.vulkan.api.Format,
-        recording_codec: ?video.Codec,
+        presentation_surface: ?low.vulkan.api.SurfaceKHR,
+        recording: video.RecordingRequest,
     ) !Renderer {
-        const selection = try findDevice(gpa, instance, &low_instance_input, presentation_surface, recording_codec);
-        const color_format = try chooseColorFormat(gpa, &low_instance_input, low.vulkan.toPhysicalDevice(selection.physical_device), presentation_surface, color_formats);
+        const selection = try Targets.findDevice(
+            vk,
+            gpa,
+            instance,
+            &low_instance_input,
+            presentation_surface,
+            recording,
+        );
+        if (selection.selected_video_format) |selected| {
+            const coded_extent = selected.codedExtent();
+            log.debug("{s} encode: coded extent {d}x{d}, queue family {d}", .{
+                @tagName(selected.codec()),
+                coded_extent.width,
+                coded_extent.height,
+                selected.encodeQueueFamily().?,
+            });
+        }
+        const color_format: vk.Format = @enumFromInt(try Targets.chooseColorFormat(
+            &low_instance_input,
+            low.vulkan.toPhysicalDevice(selection.physical_device),
+            presentation_surface,
+            gpa,
+            Targets.default_color_formats,
+        ));
         const properties = instance.getPhysicalDeviceProperties(selection.physical_device);
         const version: vk.Version = @bitCast(properties.api_version);
         log.debug("selected Vulkan device: {s}, API {d}.{d}.{d}, graphics queue family {d}", .{
@@ -68,7 +81,7 @@ const Renderer = struct {
             .dynamic_rendering = .true,
         };
         var av1_features = vk.PhysicalDeviceVideoEncodeAV1FeaturesKHR{};
-        if (recording_codec != null and selection.selected_video_format.?.codec() == .av1) {
+        if (selection.selected_video_format != null and selection.selected_video_format.?.codec() == .av1) {
             av1_features.video_encode_av1 = .true;
             features_13.p_next = @ptrCast(&av1_features);
         }
@@ -81,54 +94,27 @@ const Renderer = struct {
             extension_storage[extension_count] = "VK_KHR_swapchain";
             extension_count += 1;
         }
-        if (recording_codec != null) {
-            for (video.requiredDeviceExtensions(selection.selected_video_format.?.codec())) |extension| {
+        if (selection.selected_video_format) |selected| {
+            for (selected.deviceExtensions()) |extension| {
                 extension_storage[extension_count] = extension;
                 extension_count += 1;
             }
         }
         const device_extensions = extension_storage[0..extension_count];
-        const queue_priority = [_]f32{1.0};
-        var queue_infos: [2]vk.DeviceQueueCreateInfo = undefined;
-        queue_infos[0] = .{
-            .queue_family_index = selection.graphics_queue_family,
-            .queue_count = 1,
-            .p_queue_priorities = &queue_priority,
-        };
-        var queue_info_count: u32 = 1;
-        if (recording_codec != null) {
-            var requirements = try selection.selected_video_format.?.deviceRequirements(.{
-                .allocator = gpa,
-                .graphics_queue_family = selection.graphics_queue_family,
-                .queue_priority = 1.0,
-            });
-            defer requirements.deinit(gpa);
-            queue_info_count = @intCast(requirements.queue_create_infos.len);
-            for (requirements.queue_create_infos, 0..) |requirement, index| queue_infos[index] = .{
-                .queue_family_index = requirement.queue_family_index,
-                .queue_count = 1,
-                .p_queue_priorities = &queue_priority,
-            };
-        }
-        const device_info = vk.DeviceCreateInfo{
-            .p_next = @ptrCast(&features_13),
-            .queue_create_info_count = queue_info_count,
-            .p_queue_create_infos = &queue_infos,
-            .enabled_extension_count = @intCast(device_extensions.len),
-            .pp_enabled_extension_names = device_extensions.ptr,
-        };
-        const device_handle = try instance.createDevice(selection.physical_device, &device_info, null);
-        const device_wrapper = try gpa.create(vk.DeviceWrapper);
-        errdefer gpa.destroy(device_wrapper);
-        device_wrapper.* = vk.DeviceWrapper.load(
-            device_handle,
-            instance.wrapper.dispatch.vkGetDeviceProcAddr.?,
+        var device_resources = try Targets.createDevice(
+            vk,
+            gpa,
+            instance,
+            &low_instance_input,
+            selection,
+            &features_13,
+            device_extensions,
         );
-        if (presentation_surface != null and device_wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
-        const device = vk.DeviceProxy.init(device_handle, device_wrapper);
-        errdefer device.destroyDevice(null);
+        errdefer device_resources.deinit();
+        if (presentation_surface != null and device_resources.wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
+        const device = device_resources.device;
         const low_instance = low_instance_input;
-        const low_device = try low.vulkan.Device.init(&low_instance, low.vulkan.toDevice(device_handle));
+        const low_device = device_resources.low_device;
 
         const command_pool = try device.createCommandPool(&.{
             .flags = .{ .reset_command_buffer_bit = true },
@@ -141,21 +127,21 @@ const Renderer = struct {
         const pipeline = try createPipeline(device, pipeline_layout, color_format);
         errdefer device.destroyPipeline(pipeline, null);
 
-        const graphics_queue = device.getDeviceQueue(selection.graphics_queue_family, 0);
-        const encode_queue = device.getDeviceQueue(selection.encode_queue_family orelse selection.graphics_queue_family, 0);
+        const graphics_queue = device_resources.graphics_queue;
+        const encode_queue = device_resources.encode_queue;
         return .{
             .gpa = gpa,
             .instance = instance,
-            .render_context = .{
-                .instance = low_instance,
-                .physical_device = low.vulkan.toPhysicalDevice(selection.physical_device),
-                .device = low_device,
-                .graphics_queue = low.vulkan.toQueue(graphics_queue),
-                .graphics_queue_family = selection.graphics_queue_family,
-                .command_pool = @intFromEnum(command_pool),
-            },
+            .render_context = RenderContext.init(
+                low_instance,
+                low.vulkan.toPhysicalDevice(selection.physical_device),
+                low_device,
+                low.vulkan.toQueue(graphics_queue),
+                selection.graphics_queue_family,
+                @intFromEnum(command_pool),
+            ),
             .physical_device = selection.physical_device,
-            .device_wrapper = device_wrapper,
+            .device_resources = device_resources,
             .device = device,
             .graphics_queue = graphics_queue,
             .graphics_queue_family = selection.graphics_queue_family,
@@ -163,7 +149,6 @@ const Renderer = struct {
             .pipeline_layout = pipeline_layout,
             .pipeline = pipeline,
             .color_format = color_format,
-            .color_formats = color_formats,
             .encode_queue = encode_queue,
             .encode_queue_family = selection.encode_queue_family,
             .video_device = null,
@@ -182,6 +167,7 @@ const Renderer = struct {
             .encode_queue_family = encode_family,
             .compute_queue = low.vulkan.toQueue(self.graphics_queue),
             .compute_queue_family = self.graphics_queue_family,
+            .codec = self.video_codec orelse return error.NoVideoEncodeDevice,
         });
         self.render_context.video_device = &self.video_device.?;
     }
@@ -191,8 +177,7 @@ const Renderer = struct {
         self.device.destroyPipeline(self.pipeline, null);
         self.device.destroyPipelineLayout(self.pipeline_layout, null);
         self.device.destroyCommandPool(self.command_pool, null);
-        self.device.destroyDevice(null);
-        self.gpa.destroy(self.device_wrapper);
+        self.device_resources.deinit();
         self.* = undefined;
     }
 };
@@ -205,7 +190,6 @@ const AppWindow = struct {
     color: [3]f32,
     dump_prefix: []const u8,
     recording_path: []const u8,
-    recording_codec: ?video.Codec,
     record_file: ?std.Io.File = null,
     record_buffer: [64 * 1024]u8 = undefined,
     record_writer: ?std.Io.File.Writer = null,
@@ -219,20 +203,23 @@ const AppWindow = struct {
         color: [3]f32,
         dump_prefix: []const u8,
         recording_path: []const u8,
+        readback: bool,
     ) !AppWindow {
+        var target = try RenderTarget.init(gpa, .{
+            .window = window,
+            .context = &renderer.render_context,
+            .readback = readback,
+        });
+        errdefer target.deinit();
+        if (target.colorFormat() != low.vulkan.toFormat(renderer.color_format)) return error.UnsupportedSurfaceFormat;
         return .{
             .window = window,
-            .target = try RenderTarget.init(gpa, .{
-                .window = window,
-                .context = &renderer.render_context,
-                .color_formats = renderer.color_formats,
-            }),
+            .target = target,
             .position = position,
             .velocity = velocity,
             .color = color,
             .dump_prefix = dump_prefix,
             .recording_path = recording_path,
-            .recording_codec = renderer.video_codec,
         };
     }
 
@@ -260,10 +247,8 @@ const AppWindow = struct {
         self.record_writer = self.record_file.?.writer(io, &self.record_buffer);
         errdefer self.record_writer = null;
         if (self.record_writer) |*writer| try self.target.beginRecording(.{
-            .allocator = self.target.allocator,
             .io = io,
             .writer = &writer.interface,
-            .codec = self.recording_codec orelse return error.VideoEncodeUnsupported,
             .resize = .change_resolution,
         });
     }
@@ -354,7 +339,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const app_options = try parseOptions(args);
-    const recording_requested = app_options.record;
+    const recording_requested = app_options.record or app_options.record_codec != null;
 
     var loader = try low.vulkan.Loader.init();
     defer loader.deinit();
@@ -377,15 +362,16 @@ pub fn main(init: std.process.Init) !void {
         .engine_version = 1,
         .api_version = @bitCast(vk.API_VERSION_1_3),
     };
-    const instance_info = vk.InstanceCreateInfo{
-        .p_application_info = &app_info,
-        .enabled_extension_count = @intCast(extensions.len),
-        .pp_enabled_extension_names = extensions.ptr,
-    };
-    const instance_handle = try base.createInstance(&instance_info, null);
-    const instance_wrapper = vk.InstanceWrapper.load(instance_handle, get_instance_proc_addr);
-    const instance = vk.InstanceProxy.init(instance_handle, &instance_wrapper);
-    defer instance.destroyInstance(null);
+    var instance_resources = try Targets.createInstance(
+        vk,
+        gpa,
+        base,
+        get_instance_proc_addr,
+        app_info,
+        extensions,
+    );
+    defer instance_resources.deinit();
+    const instance = instance_resources.instance;
 
     const low_instance = try loader.loadInstanceApi(low.vulkan.toInstance(instance.handle));
     const offscreen = context.backendKind() == .offscreen;
@@ -393,18 +379,23 @@ pub fn main(init: std.process.Init) !void {
         .title = "low Vulkan — first window",
         .size = .{ .width = 640, .height = 480 },
     });
-    var selection_surface: ?vk.SurfaceKHR = null;
+    var selection_surface: ?low.vulkan.PresentationSurface = null;
     if (!offscreen) {
-        selection_surface = try createSelectionSurface(instance, &context, first_window);
+        selection_surface = try context.createVulkanPresentationSurface(&low_instance, first_window);
     }
-    defer if (selection_surface) |surface| instance.destroySurfaceKHR(surface, null);
+    defer if (selection_surface) |*surface| surface.deinit();
+    const recording_request: video.RecordingRequest = if (!recording_requested)
+        .off
+    else if (app_options.record_codec) |codec|
+        .{ .codec = codec }
+    else
+        .on;
     var renderer = Renderer.init(
         gpa,
         instance,
         low_instance,
-        selection_surface,
-        Targets.default_color_formats,
-        if (recording_requested) app_options.record_codec else null,
+        if (selection_surface) |surface| surface.handle else null,
+        recording_request,
     ) catch |err| {
         if (recording_requested) {
             std.log.err("no device can render and encode the requested video format: {s}", .{@errorName(err)});
@@ -426,6 +417,7 @@ pub fn main(init: std.process.Init) !void {
         .{ 1.0, 0.30, 0.20 },
         "first",
         "tmp/first.mkv",
+        app_options.dump,
     );
     defer if (first) |*app_window| app_window.deinit(init.io);
     var second: ?AppWindow = try AppWindow.init(
@@ -437,6 +429,7 @@ pub fn main(init: std.process.Init) !void {
         .{ 0.18, 0.90, 0.95 },
         "second",
         "tmp/second.mkv",
+        app_options.dump,
     );
     defer if (second) |*app_window| app_window.deinit(init.io);
     const windows = [_]*?AppWindow{ &first, &second };
@@ -508,120 +501,6 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-}
-
-fn chooseColorFormat(
-    allocator: std.mem.Allocator,
-    instance: *const low.vulkan.Instance,
-    physical_device: low.vulkan.api.PhysicalDevice,
-    presentation_surface: ?vk.SurfaceKHR,
-    desired: []const low.vulkan.api.Format,
-) !vk.Format {
-    const selected = if (presentation_surface) |surface| blk: {
-        const available = try instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
-            physical_device,
-            @intCast(@intFromEnum(surface)),
-            allocator,
-        );
-        defer allocator.free(available);
-        break :blk (Targets.chooseSurfaceFormat(available, desired) orelse return error.UnsupportedSurfaceFormat).format;
-    } else blk: {
-        break :blk Targets.chooseOffscreenFormat(instance, physical_device, desired) orelse return error.UnsupportedSurfaceFormat;
-    };
-    return @enumFromInt(selected);
-}
-
-fn findDevice(
-    gpa: std.mem.Allocator,
-    instance: vk.InstanceProxy,
-    low_instance: *const low.vulkan.Instance,
-    presentation_surface: ?vk.SurfaceKHR,
-    recording_codec: ?video.Codec,
-) !DeviceSelection {
-    const physical_devices = try instance.enumeratePhysicalDevicesAlloc(gpa);
-    defer gpa.free(physical_devices);
-    for (physical_devices) |physical_device| {
-        const version: vk.Version = @bitCast(instance.getPhysicalDeviceProperties(physical_device).api_version);
-        if (version.major < 1 or (version.major == 1 and version.minor < 3)) continue;
-
-        var features_13 = vk.PhysicalDeviceVulkan13Features{};
-        var features_2 = vk.PhysicalDeviceFeatures2{ .p_next = @ptrCast(&features_13), .features = .{} };
-        instance.getPhysicalDeviceFeatures2(physical_device, &features_2);
-        if (features_13.synchronization_2 != .true or features_13.dynamic_rendering != .true) continue;
-
-        const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, gpa);
-        defer gpa.free(families);
-        for (families, 0..) |family, index| {
-            if (!family.queue_flags.graphics_bit) continue;
-            if (presentation_surface) |surface| {
-                if (try instance.getPhysicalDeviceSurfaceSupportKHR(
-                    physical_device,
-                    @intCast(index),
-                    surface,
-                ) != .true) continue;
-            }
-            if (recording_codec) |codec| {
-                const selected = try video.selectVideoFormat(.{
-                    .instance = low_instance,
-                    .physical_device = low.vulkan.toPhysicalDevice(physical_device),
-                    .extent = .{ .width = 640, .height = 480 },
-                    .allocator = gpa,
-                }, &.{codec}) orelse continue;
-                if (!videoCodecFeaturesSupported(instance, physical_device, selected.codec())) continue;
-                const coded_extent = selected.codedExtent();
-                log.debug("{s} encode: coded extent {d}x{d}, queue family {d}", .{
-                    @tagName(selected.codec()),
-                    coded_extent.width,
-                    coded_extent.height,
-                    selected.encodeQueueFamily().?,
-                });
-                return .{
-                    .physical_device = physical_device,
-                    .graphics_queue_family = @intCast(index),
-                    .encode_queue_family = selected.encodeQueueFamily(),
-                    .selected_video_format = selected,
-                };
-            }
-            return .{
-                .physical_device = physical_device,
-                .graphics_queue_family = @intCast(index),
-            };
-        }
-    }
-    return error.NoVulkan13PresentDevice;
-}
-
-fn videoCodecFeaturesSupported(instance: vk.InstanceProxy, physical_device: vk.PhysicalDevice, codec: video.Codec) bool {
-    switch (codec) {
-        .h264, .h265 => return true,
-        .av1 => {
-            var av1 = vk.PhysicalDeviceVideoEncodeAV1FeaturesKHR{};
-            var features = vk.PhysicalDeviceFeatures2{ .p_next = @ptrCast(&av1), .features = .{} };
-            instance.getPhysicalDeviceFeatures2(physical_device, &features);
-            return av1.video_encode_av1 == .true;
-        },
-    }
-}
-
-/// The device-selection surface stays within the application's Vulkan binding.
-/// In particular, validation layers may replace non-dispatchable handles, so
-/// surface creation, querying, and destruction must use one dispatch path.
-fn createSelectionSurface(instance: vk.InstanceProxy, context: *const low.Context, window: *low.Window) !vk.SurfaceKHR {
-    return switch (context.backendKind()) {
-        .wayland => instance.createWaylandSurfaceKHR(&.{
-            .display = @ptrCast(@alignCast(context.nativeDisplay())),
-            .surface = @ptrFromInt(window.nativeSurface()),
-        }, null),
-        .x11 => instance.createXlibSurfaceKHR(&.{
-            .dpy = @ptrCast(@alignCast(context.nativeDisplay())),
-            .window = @intCast(window.nativeSurface()),
-        }, null),
-        .windows => instance.createWin32SurfaceKHR(&.{
-            .hinstance = @ptrCast(context.nativeDisplay()),
-            .hwnd = @ptrFromInt(window.nativeSurface()),
-        }, null),
-        .offscreen => error.OffscreenSurfaceUnavailable,
-    };
 }
 
 fn createPipelineLayout(device: vk.DeviceProxy) !vk.PipelineLayout {
@@ -733,7 +612,7 @@ const AppOptions = struct {
     backend: low.BackendRequest = .auto,
     record: bool = false,
     dump: bool = false,
-    record_codec: video.Codec = .av1,
+    record_codec: ?video.Codec = null,
     frames: ?u32 = null,
 };
 

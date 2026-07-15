@@ -90,6 +90,7 @@ pub const Instance = struct {
         get_physical_device_surface_support_khr: ?api.PfnGetPhysicalDeviceSurfaceSupportKHR,
         get_physical_device_surface_capabilities_khr: ?api.PfnGetPhysicalDeviceSurfaceCapabilitiesKHR,
         get_physical_device_surface_formats_khr: ?api.PfnGetPhysicalDeviceSurfaceFormatsKHR,
+        get_physical_device_surface_present_modes_khr: ?api.PfnGetPhysicalDeviceSurfacePresentModesKHR,
         create_win32_surface_khr: ?api.PfnCreateWin32SurfaceKHR = null,
         create_wayland_surface_khr: ?api.PfnCreateWaylandSurfaceKHR = null,
         create_xlib_surface_khr: ?api.PfnCreateXlibSurfaceKHR = null,
@@ -112,6 +113,7 @@ pub const Instance = struct {
                 .get_physical_device_surface_support_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceSupportKHR, "vkGetPhysicalDeviceSurfaceSupportKHR"),
                 .get_physical_device_surface_capabilities_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceCapabilitiesKHR, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"),
                 .get_physical_device_surface_formats_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceFormatsKHR, "vkGetPhysicalDeviceSurfaceFormatsKHR"),
+                .get_physical_device_surface_present_modes_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfacePresentModesKHR, "vkGetPhysicalDeviceSurfacePresentModesKHR"),
                 .create_win32_surface_khr = loadOptionalInstance(loader, handle, api.PfnCreateWin32SurfaceKHR, "vkCreateWin32SurfaceKHR"),
                 .create_wayland_surface_khr = loadOptionalInstance(loader, handle, api.PfnCreateWaylandSurfaceKHR, "vkCreateWaylandSurfaceKHR"),
                 .create_xlib_surface_khr = loadOptionalInstance(loader, handle, api.PfnCreateXlibSurfaceKHR, "vkCreateXlibSurfaceKHR"),
@@ -136,6 +138,21 @@ pub const Instance = struct {
         const function = self.dispatch.get_physical_device_surface_support_khr orelse return error.VulkanFunctionUnavailable;
         try check(function(physical_device, queue_family, surface, &supported));
         return supported;
+    }
+
+    /// Returns the first queue family that can present to `surface`.
+    ///
+    /// The queue-family properties themselves are binding-specific, so the
+    /// caller supplies the number of families obtained from its Vulkan
+    /// binding. A null result means no family in that range supports the
+    /// surface.
+    pub fn findPresentQueueFamilyKHR(self: *const Self, physical_device: api.PhysicalDevice, surface: api.SurfaceKHR, queue_family_count: u32) !?u32 {
+        for (0..queue_family_count) |index| {
+            if (try self.getPhysicalDeviceSurfaceSupportKHR(physical_device, @intCast(index), surface) == api.TRUE) {
+                return @intCast(index);
+            }
+        }
+        return null;
     }
 
     pub fn getPhysicalDeviceSurfaceCapabilitiesKHR(self: *const Self, physical_device: api.PhysicalDevice, surface: api.SurfaceKHR) !api.SurfaceCapabilitiesKHR {
@@ -166,6 +183,27 @@ pub const Instance = struct {
         }
     }
 
+    pub fn getPhysicalDeviceSurfacePresentModesAllocKHR(self: *const Self, physical_device: api.PhysicalDevice, surface: api.SurfaceKHR, allocator: std.mem.Allocator) ![]api.PresentModeKHR {
+        const function = self.dispatch.get_physical_device_surface_present_modes_khr orelse return error.VulkanFunctionUnavailable;
+        while (true) {
+            var count: u32 = 0;
+            try check(function(physical_device, surface, &count, null));
+            const modes = try allocator.alloc(api.PresentModeKHR, count);
+            if (count == 0) return modes;
+            const result = function(physical_device, surface, &count, modes.ptr);
+            if (result == .incomplete) {
+                allocator.free(modes);
+                continue;
+            }
+            if (result != .success) {
+                allocator.free(modes);
+                try check(result);
+                return error.VulkanError;
+            }
+            return modes[0..count];
+        }
+    }
+
     pub fn createWin32SurfaceKHR(self: *const Self, info: *const api.Win32SurfaceCreateInfoKHR) !api.SurfaceKHR {
         const function = self.dispatch.create_win32_surface_khr orelse return error.VulkanFunctionUnavailable;
         var surface: api.SurfaceKHR = 0;
@@ -190,6 +228,28 @@ pub const Instance = struct {
     pub fn destroySurfaceKHR(self: *const Self, surface: api.SurfaceKHR) void {
         const function = self.dispatch.destroy_surface_khr orelse return;
         function(self.handle, surface, null);
+    }
+};
+
+/// An owned Vulkan presentation surface created for a low window.
+///
+/// The Vulkan instance must outlive this value. A `RenderTarget` can borrow
+/// the `handle` while the surface remains alive; deinitialize the target
+/// before deinitializing this surface.
+pub const PresentationSurface = struct {
+    instance: Instance,
+    handle: api.SurfaceKHR,
+
+    pub fn init(instance: *const Instance, backend_kind: types.BackendKind, native_display: *anyopaque, native_surface: usize) !@This() {
+        return .{
+            .instance = instance.*,
+            .handle = try createSurface(instance, backend_kind, native_display, native_surface),
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.handle != 0) self.instance.destroySurfaceKHR(self.handle);
+        self.* = undefined;
     }
 };
 
@@ -537,6 +597,12 @@ pub inline fn toCommandBuffer(value: anytype) api.CommandBuffer {
     return @ptrFromInt(@intFromEnum(value));
 }
 
+/// Converts a low ABI command-buffer handle to a generated Vulkan binding
+/// handle. `CommandBuffer` is normally `vk.CommandBuffer`.
+pub inline fn fromCommandBuffer(comptime CommandBuffer: type, value: api.CommandBuffer) CommandBuffer {
+    return @enumFromInt(@intFromPtr(value));
+}
+
 /// Converts a generated Vulkan format enum to low's numeric format ABI.
 pub inline fn toFormat(value: anytype) api.Format {
     return @intCast(@intFromEnum(value));
@@ -545,6 +611,18 @@ pub inline fn toFormat(value: anytype) api.Format {
 /// Converts a generated Vulkan non-dispatchable image-view handle to low's
 /// numeric handle ABI.
 pub inline fn toImageView(value: anytype) api.ImageView {
+    return @intCast(@intFromEnum(value));
+}
+
+/// Converts a low ABI image-view handle to a generated Vulkan binding handle.
+/// `ImageView` is normally `vk.ImageView`.
+pub inline fn fromImageView(comptime ImageView: type, value: api.ImageView) ImageView {
+    return @enumFromInt(value);
+}
+
+/// Converts a generated Vulkan non-dispatchable surface handle to low's
+/// numeric handle ABI.
+pub inline fn toSurface(value: anytype) api.SurfaceKHR {
     return @intCast(@intFromEnum(value));
 }
 
@@ -664,6 +742,11 @@ const VulkanTestStubs = struct {
         return .suboptimal_khr;
     }
 
+    fn presentSupport(_: api.PhysicalDevice, queue_family: u32, _: api.SurfaceKHR, supported: *api.Bool32) callconv(api.call_conv) api.Result {
+        supported.* = if (queue_family == 2) api.TRUE else api.FALSE;
+        return .success;
+    }
+
     fn beginWithInheritance(_: api.CommandBuffer, info: *const api.CommandBufferBeginInfo) callconv(api.call_conv) api.Result {
         std.debug.assert(info.p_inheritance_info != null);
         std.debug.assert(info.p_inheritance_info.?.s_type == .command_buffer_inheritance_info);
@@ -697,6 +780,18 @@ test "acquireNextImageKHR returns an index only after acquisition" {
     const acquired = (try device.acquireNextImageKHR(0, 0, 0, 0)).?;
     try std.testing.expectEqual(api.Result.suboptimal_khr, acquired.result);
     try std.testing.expectEqual(@as(u32, 7), acquired.image_index);
+}
+
+test "findPresentQueueFamilyKHR returns the first supported family" {
+    var dispatch: Instance.Dispatch = undefined;
+    dispatch.get_physical_device_surface_support_khr = VulkanTestStubs.presentSupport;
+    const instance = Instance{
+        .handle = null,
+        .get_instance_proc_addr = undefined,
+        .dispatch = dispatch,
+    };
+    try std.testing.expectEqual(@as(?u32, 2), try instance.findPresentQueueFamilyKHR(null, 1, 4));
+    try std.testing.expectEqual(@as(?u32, null), try instance.findPresentQueueFamilyKHR(null, 1, 2));
 }
 
 test "beginCommandBufferWithInfo accepts secondary inheritance" {

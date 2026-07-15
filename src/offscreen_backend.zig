@@ -206,8 +206,8 @@ pub const Backend = struct {
 
     fn dispatch(window: *api.Window, event: *QueuedEvent) void {
         switch (event.*) {
-            .close => window.updateClose(),
-            .resize => |value| window.updateSize(value),
+            .close => api.windowUpdateClose(window),
+            .resize => |value| api.windowUpdateSize(window, value),
             .framebuffer_resize => |value| {
                 window.framebuffer_size = value;
             },
@@ -215,13 +215,13 @@ pub const Backend = struct {
                 window.content_scale = value;
                 window.framebuffer_size = common.scaledSize(window.size, value);
             },
-            .focus => |value| window.updateFocus(value),
-            .cursor_enter => |value| window.updateCursorEnter(value),
-            .cursor_motion => |value| window.updateCursorMotion(value.x, value.y),
-            .mouse_button => |value| window.updateMouseButton(value.button, value.action, value.mods),
-            .scroll => |value| window.updateScroll(value.x, value.y),
-            .key => |value| window.updateKey(value.key, value.raw_keycode, value.action, value.mods),
-            .text => |value| window.updateText(value),
+            .focus => |value| api.windowUpdateFocus(window, value),
+            .cursor_enter => |value| api.windowUpdateCursorEnter(window, value),
+            .cursor_motion => |value| api.windowUpdateCursorMotion(window, value.x, value.y),
+            .mouse_button => |value| api.windowUpdateMouseButton(window, value.button, value.action, value.mods),
+            .scroll => |value| api.windowUpdateScroll(window, value.x, value.y),
+            .key => |value| api.windowUpdateKey(window, value.key, value.raw_keycode, value.action, value.mods),
+            .text => |value| api.windowUpdateText(window, value),
         }
     }
 

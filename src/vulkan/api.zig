@@ -152,7 +152,10 @@ pub const CommandBufferLevel = enum(i32) {
 
 pub const PresentModeKHR = i32;
 pub const present_mode = struct {
+    pub const immediate_khr: PresentModeKHR = 0;
+    pub const mailbox_khr: PresentModeKHR = 1;
     pub const fifo_khr: PresentModeKHR = 2;
+    pub const fifo_relaxed_khr: PresentModeKHR = 3;
 };
 
 pub const ImageUsageFlags = u32;
@@ -554,6 +557,7 @@ pub const PfnDestroySurfaceKHR = *const fn (InstanceHandle, SurfaceKHR, ?*const 
 pub const PfnGetPhysicalDeviceSurfaceSupportKHR = *const fn (PhysicalDevice, u32, SurfaceKHR, *Bool32) callconv(call_conv) Result;
 pub const PfnGetPhysicalDeviceSurfaceCapabilitiesKHR = *const fn (PhysicalDevice, SurfaceKHR, *SurfaceCapabilitiesKHR) callconv(call_conv) Result;
 pub const PfnGetPhysicalDeviceSurfaceFormatsKHR = *const fn (PhysicalDevice, SurfaceKHR, *u32, ?[*]SurfaceFormatKHR) callconv(call_conv) Result;
+pub const PfnGetPhysicalDeviceSurfacePresentModesKHR = *const fn (PhysicalDevice, SurfaceKHR, *u32, ?[*]PresentModeKHR) callconv(call_conv) Result;
 pub const PfnGetPhysicalDeviceFormatProperties = *const fn (PhysicalDevice, Format, *FormatProperties) callconv(call_conv) void;
 pub const PfnGetPhysicalDeviceMemoryProperties = *const fn (PhysicalDevice, *PhysicalDeviceMemoryProperties) callconv(call_conv) void;
 pub const PfnCreateWin32SurfaceKHR = *const fn (InstanceHandle, *const Win32SurfaceCreateInfoKHR, ?*const anyopaque, *SurfaceKHR) callconv(call_conv) Result;

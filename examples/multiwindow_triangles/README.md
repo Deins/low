@@ -23,15 +23,25 @@ zig build run
 zig build run -- --desktop=x11
 ```
 
+Each window uses the default-first target setup: the application supplies its
+window and shared render context, and `low` creates the surface, chooses the
+presentation mode, and owns the swapchain and synchronization. The example
+creates one temporary owned surface only because its custom Vulkan renderer
+selects a physical device and graphics queue before creating its first target.
 The render format prefers packed 10-bit UNORM targets and falls back to 8-bit
 BGRA when the surface or device does not advertise a supported 10-bit format.
-The preference list is supplied to `low`'s `RenderTarget` API, and selection
-is reported as an unsupported-surface-format error when none of the requested
-formats is available.
+Presentation uses `low`'s default `.vsync = .on` policy. Applications can
+select `.vsync = .relaxed` or `.vsync = .off` without managing Vulkan
+present-mode lists directly.
 
-For offscreen or desktop screenshot output, pass `--dump`. This writes each
-rendered frame as `tmp/first-0001.bmp`, `tmp/second-0001.bmp`, and so on. BMP
-dumping is disabled by default.
+The selected color format is checked against the shared graphics pipeline, and
+selection is reported as an unsupported-surface-format error when the windows
+cannot use a common format. Applications that need a different presentation
+policy can override the target's format and present-mode preference lists.
+
+For offscreen or desktop screenshot output, pass `--dump`. This enables
+readback and writes each rendered frame as `tmp/first-0001.bmp`,
+`tmp/second-0001.bmp`, and so on. BMP dumping is disabled by default.
 
 ```sh
 zig build run -- --desktop=offscreen --dump --frames=12
@@ -39,7 +49,8 @@ zig build run -- --desktop=offscreen --dump --frames=12
 
 ## Recording
 
-`--record` creates independent AV1 Matroska recordings for both windows:
+`--record` creates independent Matroska recordings for both windows. Low tries
+AV1, H.265, then H.264 and uses the first codec supported by the selected GPU:
 
 ```sh
 zig build run -- --record
@@ -48,7 +59,7 @@ zig build run -- --record
 Output: `tmp/first.mkv` and `tmp/second.mkv`. Recording uses `low`'s defaults:
 60 fps, 12 Mbps, and a 60-frame GOP.
 
-Select AV1, H.265, or H.264 with `--record-codec`:
+Require AV1, H.265, or H.264 with `--record-codec`:
 
 ```sh
 zig build run -- --record --record-codec=h265
@@ -96,5 +107,7 @@ lazy headers dependency.
 
 `low.vulkan.Loader` dynamically opens the system Vulkan loader.
 `Context.requiredVulkanInstanceExtensions()` supplies backend-specific instance
-extensions. `RenderTarget` creates the Wayland, Xlib, or Win32 surface and
-owns its swapchain and synchronization/recreation resources.
+extensions. `Context.createVulkanPresentationSurface()` hides the Wayland,
+Xlib, and Win32 details needed by the one device-selection probe. Each
+`RenderTarget` then creates and owns its actual window surface, swapchain, and
+synchronization/recreation resources.

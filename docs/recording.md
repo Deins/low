@@ -4,10 +4,9 @@
 feature is optional: build with `-Dvk_video=true`, then access it through
 `low.vulkan.video()`.
 
-The module can query and select the host's AV1, H.265, and H.264 Vulkan Video
-encode capabilities. Pass
-the formats in preference order; the returned support object carries the exact
-queue requirements for the selected codec:
+Recording support is an on/off device-selection request. `.on` considers AV1,
+H.265, and H.264 in that order and selects the first fully usable codec. The
+returned support object carries the exact extensions and queue requirements:
 
 ```zig
 const video = low.vulkan.video();
@@ -15,13 +14,14 @@ const selected = try video.selectVideoFormat(.{
     .instance = &instance,
     .physical_device = physical_device,
     .extent = .{ .width = 1920, .height = 1080 },
-}, &.{ .av1, .h265, .h264 }) orelse return error.NoRequestedVideoFormat;
+}, .on) orelse return error.NoVideoFormat;
 ```
 
-Use `video.requiredDeviceExtensions(selected.codec())` and
+Use `selected.deviceExtensions()` and
 `selected.deviceRequirements(...)` when building the matching logical device.
-H.264's existing `required_device_extensions` value remains available for
-compatibility.
+To require one codec, use `.{ .codec = .h265 }`; use
+`.{ .preferred = &.{ .h265, .h264 } }` for a custom preference order. `.off`
+skips video capability selection entirely.
 
 The recorder captures the render target's submitted BGRA frames on the GPU. It
 does not capture the desktop, other application windows, or audio. Frames are
@@ -56,7 +56,7 @@ if (!support.available) return error.H264EncodingUnavailable;
 var requirements = try support.deviceRequirements(.{
     .graphics_queue_family = graphics_queue_family,
 });
-defer requirements.deinit(allocator);
+defer requirements.deinit();
 
 // Add support.required_device_extensions and
 // requirements.queue_create_infos to VkDeviceCreateInfo.
@@ -67,13 +67,16 @@ unavailable result carries a reason instead of requiring device creation to
 fail. The query checks the codec extension, an encode queue for that codec,
 the supported profile, coded extent and alignment, encode-input and DPB image
 formats, and at least one usable rate-control mode. For a runtime codec
-choice, use `selectVideoFormat` with the preferred order; apply the returned
-support object's extensions and queue requirements to the same device.
+choice, use `selectVideoFormat` with `.codec` or `.preferred`; apply the
+returned support object's extensions and queue requirements to the same device.
 
 Create `VideoDevice` from the resulting Vulkan device and supply it through
 `targets().RenderContext.video_device`. The target must be deinitialized
 before its `VideoDevice`. The encode queue is owned by `low` for the lifetime
 of the `VideoDevice`; do not submit application work to that queue directly.
+Set `VideoDevice.Options.codec` to `selected.codec()`. Recording options use
+that codec automatically. To choose a codec, constrain the recording request
+before creating the Vulkan device.
 
 ## Minimal recording lifecycle
 
@@ -83,7 +86,6 @@ writer:
 
 ```zig
 try target.beginRecording(.{
-    .allocator = allocator,
     .io = io,
     .writer = writer,
 });
@@ -114,9 +116,7 @@ Matroska track updates for resize handling.
 
 `.raw` writes the selected codec's native elementary stream (Annex-B for H.264
 and H.265, OBU stream for AV1). Choose it only when the consumer expects that codec. It
-has no container timestamps, so it only accepts fixed-rate timing. Set
-`RecordingOptions.codec`; unsupported recorder codecs are rejected before any
-output is written.
+has no container timestamps, so it only accepts fixed-rate timing.
 
 ## Timing
 
