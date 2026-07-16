@@ -189,4 +189,4 @@ For the broadest player compatibility when sizes may change, prefer `.mkv`.
 ## Example
 
 [`examples/multiwindow_triangles`](../examples/multiwindow_triangles/README.md)
-can record both of its windows with `zig build run -- --record`.
+can record both of its windows with `zig build run -- --screencap`.

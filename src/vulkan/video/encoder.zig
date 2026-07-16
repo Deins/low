@@ -62,7 +62,7 @@ pub const RecordingOptions = struct {
     writer: *std.Io.Writer,
     /// Select timestamp behavior and the nominal encoder rate. Use `.fps(60)`
     /// for whole-number rates or `.init(30_000, 1001)` for exact fractions.
-    timing: RecordingTiming = .{ .fixed_rate = .fps(60) },
+    timing: RecordingTiming = .{ .monotonic = .fps(60) },
     /// Target video bitrate in bits per second. Higher values preserve detail
     /// but increase file size; 12 Mbps is a reasonable 1080p starting point.
     bitrate: u32 = 12_000_000,

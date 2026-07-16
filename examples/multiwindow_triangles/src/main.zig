@@ -339,7 +339,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const app_options = try parseOptions(args);
-    const recording_requested = app_options.record or app_options.record_codec != null;
+    const recording_requested = app_options.screencap or app_options.record_codec != null;
 
     var loader = try low.vulkan.Loader.init();
     defer loader.deinit();
@@ -610,7 +610,7 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
 
 const AppOptions = struct {
     backend: low.BackendRequest = .auto,
-    record: bool = false,
+    screencap: bool = false,
     dump: bool = false,
     record_codec: ?video.Codec = null,
     frames: ?u32 = null,
@@ -627,8 +627,8 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
             const name = arg["--desktop=".len..];
             result.backend = std.meta.stringToEnum(low.BackendRequest, name) orelse return error.InvalidDesktop;
             desktop_selected = true;
-        } else if (std.mem.eql(u8, arg, "--record")) {
-            result.record = true;
+        } else if (std.mem.eql(u8, arg, "--screencap")) {
+            result.screencap = true;
         } else if (std.mem.eql(u8, arg, "--dump")) {
             result.dump = true;
         } else if (std.mem.startsWith(u8, arg, "--record-codec=")) {

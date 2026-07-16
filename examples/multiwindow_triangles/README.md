@@ -3,7 +3,7 @@
 This example opens two native `low` windows. Each has its own Vulkan surface
 and swapchain, while sharing vulkan device and graphics pipeline.
 Close either window independently, or click one to reverse and recolour its
-bouncing triangle. With Vulkan Video support, `--record` saves each window to
+bouncing triangle. With Vulkan Video support, `--screencap` saves each window to
 as encoded .mkv file.
 
 ## Run
@@ -49,20 +49,21 @@ zig build run -- --desktop=offscreen --dump --frames=12
 
 ## Recording
 
-`--record` creates independent Matroska recordings for both windows. Low tries
+`--screencap` creates independent Matroska recordings for both windows. Low tries
 AV1, H.265, then H.264 and uses the first codec supported by the selected GPU:
 
 ```sh
-zig build run -- --record
+zig build run -- --screencap
 ```
 
-Output: `tmp/first.mkv` and `tmp/second.mkv`. Recording uses `low`'s defaults:
-60 fps, 12 Mbps, and a 60-frame GOP.
+Output: `tmp/first.mkv` and `tmp/second.mkv`. Frames carry their monotonic
+capture timestamps so playback follows the actual render cadence. The encoder
+uses a nominal 60 fps rate, 12 Mbps, and a 60-frame GOP.
 
 Require AV1, H.265, or H.264 with `--record-codec`:
 
 ```sh
-zig build run -- --record --record-codec=h265
+zig build run -- --screencap --record-codec=h265
 ```
 
 The output remains `tmp/first.mkv` and `tmp/second.mkv`; only the carried codec
@@ -83,7 +84,7 @@ timing modes, quality tradeoffs, resizing, and the recording lifecycle.
 For automated runs, `--frames` closes the demo after a fixed number of frames:
 
 ```sh
-zig build run -- --frames=300 --record
+zig build run -- --frames=300 --screencap
 ```
 
 Inspect either recording:

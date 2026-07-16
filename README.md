@@ -54,7 +54,7 @@ helpers:
 ```sh
 zig build -Dvk_video=true
 zig build run --build-file ./examples/multiwindow_triangles/build.zig \
-  -- --frames 300 --record
+  -- --frames 300 --screencap
 ```
 
 The recorder keeps rendered pixels on the GPU, converts BGRA to BT.709 NV12,
