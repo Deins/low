@@ -93,7 +93,7 @@ defer target.endRecording() catch {};
 
 var frame = try target.acquire();
 // Record application rendering commands into frame.command_buffer.
-try frame.submitAndPresent();
+try frame.submitAndPresent(.{});
 
 try target.endRecording();
 ```
@@ -124,34 +124,83 @@ has no container timestamps, so it only accepts fixed-rate timing.
 rate needed to configure H.264 and Vulkan rate control:
 
 ```zig
-// Evenly spaced 60 fps timestamps. This is the default.
+// Evenly spaced 60 fps timestamps and an automatic 60 fps capture cap.
 .timing = .{ .fixed_rate = .fps(60) },
 
-// Variable timestamps taken when each frame is submitted.
+// Variable timestamps and an automatic 60 fps capture cap. This is the default.
 .timing = .{ .monotonic = .fps(60) },
 
-// Variable timestamps supplied by the application.
-.timing = .{ .explicit = .init(30_000, 1001) },
+// Variable timestamps, with an exact fractional nominal/capture rate.
+.timing = .{ .monotonic = .init(30_000, 1001) },
 ```
 
-Use `.fixed_rate` for a conventional recording where every submitted frame
-should play at an even interval. `submitAndPresentAt` is rejected in this mode.
+Use `.fixed_rate` for a conventional constant-rate recording. Accepted frames
+play at an even interval, and the default per-frame rate policy drops excess
+frames at that same rate. A caller-provided timestamp controls admission but
+does not replace the evenly spaced output timestamp.
 
 Use `.monotonic` for a variable-rate recording driven by normal rendering.
-`submitAndPresent` timestamps each frame using the monotonic clock. The carried
-frame rate is a nominal encoder setting; it does not force frames to that
-cadence.
+`submitAndPresent(.{})` timestamps frames using the monotonic clock and drops
+excess frames at the carried rate. Accepted frames retain their actual capture
+timestamps.
 
-Use `.explicit` when timestamps come from an application clock, a media source,
-or another external scheduler. Submit every recorded frame with
-`submitAndPresentAt(timestamp_ns)`. Timestamps are nanoseconds on the recording
-timeline and must be strictly increasing. The carried frame rate remains a
-nominal encoder setting because the Vulkan Video session is configured before
-future timestamps are known.
+When timestamps come from an application clock, a media source, or another
+external scheduler, set `.recording.timestamp_ns` in monotonic mode. Timestamps
+are nanoseconds on the recording timeline and must be strictly increasing. Use
+`.rate_limit = .unlimited` when every timestamped frame should be recorded;
+otherwise `.auto` applies the timing rate as a capture cap.
 
 `.fps(60)` is the clearest choice for whole-number rates. Use
 `.init(30_000, 1001)` for exact fractional rates such as NTSC 29.97 fps;
 fractions avoid accumulated rounding error from a nanosecond interval.
+
+## Per-frame recording control
+
+`submitAndPresent` has one options-based form. Its defaults work whether or not
+recording is active; recording fields are ignored when it is inactive:
+
+```zig
+try frame.submitAndPresent(.{
+    .recording = .{
+        .skip_frame = false,
+        .timestamp_ns = null,
+        .rate_limit = .auto,
+    },
+});
+```
+
+`skip_frame` presents normally but bypasses all recording copy, conversion, and
+encode work, making it suitable for manual admission control.
+
+`timestamp_ns` supplies the capture time. Fixed timing uses it only for rate
+admission and still emits evenly spaced timestamps. Monotonic timing uses it
+for output. When omitted, Low samples its monotonic clock.
+
+The rate policy controls automatic admission without delaying presentation:
+
+```zig
+.rate_limit = .auto                 // use the configured timing rate
+.rate_limit = .unlimited            // record every submitted frame
+.rate_limit = .fps(30)              // at most 30 recorded frames per second
+.rate_limit = .init(30_000, 1001)   // exact fractional rate
+.rate_limit = .interval(50_000_000) // at most one frame every 50 ms
+```
+
+For fixed timing, `.auto` is normally correct. A custom rate must equal the
+fixed output rate or submission returns `FixedRateLimitMismatch`; otherwise the
+capture cadence and output cadence would change playback speed. `.unlimited`
+is allowed as an explicit opt-out for callers that intentionally want every
+frame encoded with fixed spacing. Changing the policy accepts that frame and
+starts a new cadence; missed rate slots are skipped rather than emitted later
+as a burst.
+
+Readback uses the same submission model:
+
+```zig
+var pixels = try frame.submitAndReadback(allocator, .{
+    .recording = .{ .skip_frame = true },
+});
+```
 
 ## Quality and file-size tradeoffs
 

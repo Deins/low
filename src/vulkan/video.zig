@@ -10,6 +10,7 @@ const conversion = @import("video/conversion.zig");
 const device = @import("video/device.zig");
 const encoder = @import("video/encoder.zig");
 const matroska = @import("video/matroska.zig");
+const recording_submit = @import("recording_submit.zig");
 
 pub const UnsupportedReason = capabilities.UnsupportedReason;
 pub const Codec = capabilities.Codec;
@@ -42,6 +43,8 @@ pub const RecordingOptions = encoder.RecordingOptions;
 pub const RecordingTiming = encoder.RecordingTiming;
 pub const RecordingStatus = encoder.RecordingStatus;
 pub const RecordingFormat = encoder.RecordingFormat;
+pub const RecordingRateLimit = recording_submit.RateLimit;
+pub const RecordingFrameOptions = recording_submit.RecordingOptions;
 pub const VideoRecorder = encoder.Recorder;
 
 test {

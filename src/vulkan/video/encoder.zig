@@ -1,6 +1,7 @@
 const std = @import("std");
 const vk = @import("_vk_video");
 const low_vk = @import("../api.zig");
+const recording_submit = @import("../recording_submit.zig");
 const capabilities = @import("capabilities.zig");
 const conversion = @import("conversion.zig");
 const h264 = @import("h264.zig");
@@ -21,17 +22,17 @@ pub const RecordingFormat = enum {
 /// Selects how recorded frames are timestamped and supplies the nominal rate
 /// required to configure the selected encoder.
 ///
-/// Variable-rate timing (`.monotonic` and `.explicit`) requires `.mkv` output;
-/// raw elementary streams have no container timestamps.
+/// Variable-rate timing (`.monotonic`) requires `.mkv` output; raw elementary
+/// streams have no container timestamps.
 pub const RecordingTiming = union(enum) {
-    /// Space frames evenly at this rate. `submitAndPresentAt` is rejected.
+    /// Space accepted frames evenly at this rate. Automatic per-frame rate
+    /// limiting uses the same rate so faster presentation does not slow down
+    /// playback.
     fixed_rate: capabilities.FrameRate,
-    /// Timestamp `submitAndPresent` calls from the monotonic clock. Frames can
-    /// have variable spacing; the carried rate is the encoder's nominal rate.
+    /// Timestamp accepted frames from the monotonic clock or a per-frame
+    /// caller timestamp. Frames can have variable spacing; the carried rate
+    /// is also the automatic capture cap.
     monotonic: capabilities.FrameRate,
-    /// Require `submitAndPresentAt` for every frame. Timestamps must be
-    /// strictly increasing; the carried rate is the encoder's nominal rate.
-    explicit: capabilities.FrameRate,
 
     pub fn frameRate(self: RecordingTiming) capabilities.FrameRate {
         return switch (self) {
@@ -124,6 +125,7 @@ pub const Recorder = struct {
         start_time_ns: i128,
         output_frames: u64 = 0,
         last_timestamp_ns: ?u64 = null,
+        rate_state: ?CaptureRateState = null,
         source_extent: low_vk.Extent2D,
         submitted: u64 = 0,
         consumed: u64 = 0,
@@ -131,6 +133,22 @@ pub const Recorder = struct {
         stopped_resize: bool = false,
         sticky_error: ?anyerror = null,
         pending_sequence_header: bool = false,
+    };
+
+    const ResolvedRateLimit = struct {
+        numerator: u64,
+        denominator: u64,
+    };
+
+    const CaptureRateState = struct {
+        limit: ResolvedRateLimit,
+        origin_ns: u64,
+        slot: u64,
+    };
+
+    pub const SelectedFrame = struct {
+        timestamp_ns: u64,
+        rate_state: ?CaptureRateState,
     };
 
     pub fn init(allocator: std.mem.Allocator, video_device: *VideoDevice, graphics_queue_family: u32, frames_in_flight: u32, color_format: low_vk.Format) Recorder {
@@ -365,7 +383,28 @@ pub const Recorder = struct {
         self.run.?.pending_sequence_header = true;
     }
 
-    pub fn prepareFrame(self: *Recorder, command_buffer: low_vk.CommandBuffer, image: low_vk.Image, extent: low_vk.Extent2D, explicit_timestamp_ns: ?u64) !?PreparedFrame {
+    /// Resolves this submission's timestamp and rate policy before the render
+    /// target records any transfer work. A null result presents the frame but
+    /// omits it from the recording.
+    pub fn selectFrame(self: *Recorder, options: recording_submit.RecordingOptions) !?SelectedFrame {
+        const run = &(self.run orelse return null);
+        if (!run.accepting or run.sticky_error != null or options.skip_frame) return null;
+
+        const capture_timestamp_ns = options.timestamp_ns orelse self.monotonicTimestamp();
+        const limit = try resolveRateLimit(run.timing, options.rate_limit);
+        const rate_state = if (limit) |resolved|
+            (try selectRateSlot(run.rate_state, resolved, capture_timestamp_ns)) orelse return null
+        else
+            null;
+        const output_timestamp_ns = switch (run.timing) {
+            .fixed_rate => |frame_rate| try fixedFrameTimestamp(run.output_frames, frame_rate),
+            .monotonic => capture_timestamp_ns,
+        };
+        if (run.last_timestamp_ns) |previous| if (output_timestamp_ns <= previous) return error.NonMonotonicFrameTimestamp;
+        return .{ .timestamp_ns = output_timestamp_ns, .rate_state = rate_state };
+    }
+
+    pub fn prepareFrame(self: *Recorder, command_buffer: low_vk.CommandBuffer, image: low_vk.Image, extent: low_vk.Extent2D, selected: SelectedFrame) !?PreparedFrame {
         const run = &(self.run orelse return null);
         if (!run.accepting or run.sticky_error != null) return null;
         std.debug.assert(self.prepared_slot == null);
@@ -384,7 +423,6 @@ pub const Recorder = struct {
 
         const device = self.video_device.device();
         const slot = &cache.slots[slot_index];
-        const timestamp_ns = try self.resolveTimestamp(explicit_timestamp_ns);
         errdefer |err| self.failShared(err);
         try device.resetCommandBuffer(slot.encode_command_buffer, .{});
         try device.resetCommandBuffer(slot.compute_command_buffer, .{});
@@ -410,7 +448,8 @@ pub const Recorder = struct {
         try cache.recordEncode(slot_index, run.submitted);
         slot.frame_index = run.submitted;
         slot.is_idr = run.submitted % run.gop_size == 0;
-        slot.timestamp_ns = timestamp_ns;
+        slot.timestamp_ns = selected.timestamp_ns;
+        slot.rate_state = selected.rate_state;
         self.prepared_slot = slot_index;
         return .{ .signal_semaphore = @intFromEnum(slot.copy_finished) };
     }
@@ -449,6 +488,7 @@ pub const Recorder = struct {
         self.run.?.submitted += 1;
         self.run.?.output_frames += 1;
         self.run.?.last_timestamp_ns = slot.timestamp_ns;
+        self.run.?.rate_state = slot.rate_state;
         self.prepared_slot = null;
     }
 
@@ -546,21 +586,10 @@ pub const Recorder = struct {
         self.failLocal(err);
     }
 
-    fn resolveTimestamp(self: *Recorder, explicit_timestamp_ns: ?u64) !u64 {
+    fn monotonicTimestamp(self: *const Recorder) u64 {
         const run = &self.run.?;
-        const timestamp_ns = switch (run.timing) {
-            .fixed_rate => |frame_rate| if (explicit_timestamp_ns != null)
-                return error.UnexpectedFrameTimestamp
-            else
-                try fixedFrameTimestamp(run.output_frames, frame_rate),
-            .monotonic => explicit_timestamp_ns orelse blk: {
-                const now = std.Io.Timestamp.now(run.io, .awake).nanoseconds;
-                break :blk @as(u64, @intCast(@max(now - run.start_time_ns, 0)));
-            },
-            .explicit => explicit_timestamp_ns orelse return error.FrameTimestampRequired,
-        };
-        if (run.last_timestamp_ns) |previous| if (timestamp_ns <= previous) return error.NonMonotonicFrameTimestamp;
-        return timestamp_ns;
+        const now = std.Io.Timestamp.now(run.io, .awake).nanoseconds;
+        return @intCast(@max(now - run.start_time_ns, 0));
     }
 };
 
@@ -1512,6 +1541,7 @@ const Slot = struct {
     frame_index: u64 = 0,
     is_idr: bool = false,
     timestamp_ns: u64 = 0,
+    rate_state: ?Recorder.CaptureRateState = null,
 
     fn create(self: *Slot, cache: *Cache) !void {
         const device = cache.video_device.device();
@@ -1700,6 +1730,54 @@ fn fixedFrameTimestamp(frame_index: u64, frame_rate: capabilities.Rational) !u64
     return @intCast(rounded);
 }
 
+fn resolveRateLimit(timing: RecordingTiming, policy: recording_submit.RateLimit) !?Recorder.ResolvedRateLimit {
+    const fixed_rate = switch (timing) {
+        .fixed_rate => |rate| rate,
+        .monotonic => null,
+    };
+    return switch (policy) {
+        .auto => switch (timing) {
+            .fixed_rate, .monotonic => |rate| try resolvedFrameRate(rate.numerator, rate.denominator),
+        },
+        .unlimited => null,
+        .frame_rate => |rate| blk: {
+            const resolved = try resolvedFrameRate(rate.numerator, rate.denominator);
+            if (fixed_rate) |fixed| {
+                const expected = try resolvedFrameRate(fixed.numerator, fixed.denominator);
+                if (!std.meta.eql(resolved, expected)) return error.FixedRateLimitMismatch;
+            }
+            break :blk resolved;
+        },
+        .interval_ns => |interval_ns| blk: {
+            if (interval_ns == 0) return error.InvalidRecordingRateLimit;
+            if (fixed_rate) |fixed| {
+                if (interval_ns != try fixedFrameTimestamp(1, fixed)) return error.FixedRateLimitMismatch;
+                break :blk try resolvedFrameRate(fixed.numerator, fixed.denominator);
+            }
+            break :blk try resolvedFrameRate(std.time.ns_per_s, interval_ns);
+        },
+    };
+}
+
+fn resolvedFrameRate(numerator: u64, denominator: u64) !Recorder.ResolvedRateLimit {
+    if (numerator == 0 or denominator == 0) return error.InvalidRecordingRateLimit;
+    const divisor = std.math.gcd(numerator, denominator);
+    return .{ .numerator = numerator / divisor, .denominator = denominator / divisor };
+}
+
+fn selectRateSlot(previous: ?Recorder.CaptureRateState, limit: Recorder.ResolvedRateLimit, timestamp_ns: u64) !?Recorder.CaptureRateState {
+    const state = previous orelse return .{ .limit = limit, .origin_ns = timestamp_ns, .slot = 0 };
+    if (!std.meta.eql(state.limit, limit)) return .{ .limit = limit, .origin_ns = timestamp_ns, .slot = 0 };
+    if (timestamp_ns < state.origin_ns) return error.NonMonotonicFrameTimestamp;
+    const elapsed_ns = timestamp_ns - state.origin_ns;
+    const numerator = @as(u128, elapsed_ns) * limit.numerator;
+    const denominator = @as(u128, limit.denominator) * std.time.ns_per_s;
+    const slot = numerator / denominator;
+    if (slot <= state.slot) return null;
+    if (slot > std.math.maxInt(u64)) return error.FrameTimestampOverflow;
+    return .{ .limit = limit, .origin_ns = state.origin_ns, .slot = @intCast(slot) };
+}
+
 fn pictureResource(view: vk.ImageView, extent: vk.Extent2D) vk.VideoPictureResourceInfoKHR {
     return .{
         .coded_offset = .{ .x = 0, .y = 0 },
@@ -1819,6 +1897,87 @@ test "recorder status transitions are non-consuming" {
     }
     // Status reads do not clear the sticky error.
     try std.testing.expect(recorder.status().? == .failed);
+}
+
+test "recording admission throttles monotonic and fixed timing from supplied timestamps" {
+    var video_device: VideoDevice = undefined;
+    var writer: std.Io.Writer = .failing;
+
+    var monotonic = Recorder.init(std.testing.allocator, &video_device, 0, 2, low_vk.format.b8g8r8a8_unorm);
+    monotonic.run = .{
+        .io = std.Options.debug_io,
+        .writer = &writer,
+        .timing = .{ .monotonic = .fps(60) },
+        .bitrate = 1,
+        .gop_size = 1,
+        .quality = .balanced,
+        .resize = .stop_recording,
+        .parameter_sets = .stream_start,
+        .codec = .h264,
+        .format = .mkv,
+        .start_time_ns = 0,
+        .source_extent = .{ .width = 64, .height = 64 },
+    };
+    const first = (try monotonic.selectFrame(.{ .timestamp_ns = 0 })).?;
+    try std.testing.expectEqual(@as(u64, 0), first.timestamp_ns);
+    monotonic.run.?.rate_state = first.rate_state;
+    monotonic.run.?.last_timestamp_ns = first.timestamp_ns;
+    monotonic.run.?.output_frames += 1;
+    try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try monotonic.selectFrame(.{ .timestamp_ns = 8_000_000 }));
+    const second = (try monotonic.selectFrame(.{ .timestamp_ns = 17_000_000 })).?;
+    try std.testing.expectEqual(@as(u64, 17_000_000), second.timestamp_ns);
+
+    var fixed = Recorder.init(std.testing.allocator, &video_device, 0, 2, low_vk.format.b8g8r8a8_unorm);
+    fixed.run = .{
+        .io = std.Options.debug_io,
+        .writer = &writer,
+        .timing = .{ .fixed_rate = .fps(30) },
+        .bitrate = 1,
+        .gop_size = 1,
+        .quality = .balanced,
+        .resize = .stop_recording,
+        .parameter_sets = .stream_start,
+        .codec = .h264,
+        .format = .mkv,
+        .start_time_ns = 0,
+        .source_extent = .{ .width = 64, .height = 64 },
+    };
+    const fixed_first = (try fixed.selectFrame(.{ .timestamp_ns = 0 })).?;
+    fixed.run.?.rate_state = fixed_first.rate_state;
+    fixed.run.?.last_timestamp_ns = fixed_first.timestamp_ns;
+    fixed.run.?.output_frames += 1;
+    try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try fixed.selectFrame(.{ .timestamp_ns = 20_000_000 }));
+    const fixed_second = (try fixed.selectFrame(.{ .timestamp_ns = 34_000_000 })).?;
+    try std.testing.expectEqual(@as(u64, 33_333_333), fixed_second.timestamp_ns);
+    try std.testing.expectError(error.FixedRateLimitMismatch, fixed.selectFrame(.{
+        .timestamp_ns = 40_000_000,
+        .rate_limit = .fps(15),
+    }));
+}
+
+test "unlimited monotonic recording accepts custom and automatic timestamps" {
+    var video_device: VideoDevice = undefined;
+    var writer: std.Io.Writer = .failing;
+    var recorder = Recorder.init(std.testing.allocator, &video_device, 0, 2, low_vk.format.b8g8r8a8_unorm);
+    recorder.run = .{
+        .io = std.Options.debug_io,
+        .writer = &writer,
+        .timing = .{ .monotonic = .fps(60) },
+        .bitrate = 1,
+        .gop_size = 1,
+        .quality = .balanced,
+        .resize = .stop_recording,
+        .parameter_sets = .stream_start,
+        .codec = .h264,
+        .format = .mkv,
+        .start_time_ns = std.Io.Timestamp.now(std.Options.debug_io, .awake).nanoseconds,
+        .source_extent = .{ .width = 64, .height = 64 },
+    };
+    try std.testing.expect((try recorder.selectFrame(.{ .rate_limit = .unlimited })) != null);
+    try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try recorder.selectFrame(.{ .skip_frame = true }));
+    const selected = (try recorder.selectFrame(.{ .timestamp_ns = 42, .rate_limit = .unlimited })).?;
+    try std.testing.expectEqual(@as(u64, 42), selected.timestamp_ns);
+    try std.testing.expectEqual(@as(?Recorder.CaptureRateState, null), selected.rate_state);
 }
 
 test "recorder declarations compile" {

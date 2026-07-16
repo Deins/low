@@ -191,7 +191,7 @@ recorder state machine. Compile coverage must include the default build with
 video disabled and the optional video build on supported target platforms.
 
 Hardware validation should exercise both offscreen and WSI targets, more
-frames than the ring size, resize policies, fixed/monotonic/explicit timing,
+frames than the ring size, resize policies, fixed/monotonic timing,
 unsupported-device paths, and same-family and separate-family queues where
 available. Run with Vulkan validation layers, then verify output with a media
 probe and decoder. Hardware tests should be skipped with an explicit reason

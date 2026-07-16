@@ -323,11 +323,11 @@ const AppWindow = struct {
         renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
         renderer.device.cmdEndRendering(command_buffer);
         if (dump_path) |path| {
-            var readback = try frame.submitAndReadback(renderer.gpa);
+            var readback = try frame.submitAndReadback(renderer.gpa, .{});
             defer readback.deinit();
             try readback.writeBmp(io, path);
         } else {
-            try frame.submitAndPresent();
+            try frame.submitAndPresent(.{});
         }
     }
 };

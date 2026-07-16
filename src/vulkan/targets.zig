@@ -6,6 +6,7 @@ const std = @import("std");
 const vk = @import("api.zig");
 const Vulkan = @import("../vulkan.zig");
 const runtime = @import("../internal/runtime.zig");
+const recording_submit = @import("recording_submit.zig");
 const build_options = @import("build_options");
 const log = std.log.scoped(.low);
 const Video = if (build_options.vk_video) @import("video.zig") else struct {
@@ -16,6 +17,10 @@ const Video = if (build_options.vk_video) @import("video.zig") else struct {
     pub const RecordingStatus = void;
 };
 const Window = runtime.Window;
+
+pub const RecordingRateLimit = recording_submit.RateLimit;
+pub const RecordingFrameOptions = recording_submit.RecordingOptions;
+pub const SubmitOptions = recording_submit.SubmitOptions;
 
 /// Preferred render-target formats, ordered from highest precision to widest
 /// presentation support.
@@ -455,8 +460,8 @@ pub const RenderTarget = struct {
         view: vk.ImageView,
         extent: vk.Extent2D,
         command_buffer: vk.CommandBuffer,
-        submit_fn: *const fn (?*anyopaque, ?u64) anyerror!void,
-        readback_fn: *const fn (?*anyopaque, std.mem.Allocator, ?u64) anyerror!Readback,
+        submit_fn: *const fn (?*anyopaque, SubmitOptions) anyerror!void,
+        readback_fn: *const fn (?*anyopaque, std.mem.Allocator, SubmitOptions) anyerror!Readback,
         abort_fn: *const fn (?*anyopaque) void,
         state: ?*anyopaque,
 
@@ -472,34 +477,20 @@ pub const RenderTarget = struct {
             return Vulkan.fromImageView(ImageView, self.view);
         }
 
-        pub fn submitAndPresent(self: *Frame) !void {
+        /// Submits and presents this frame. Recording options are ignored when
+        /// no recording is active.
+        pub fn submitAndPresent(self: *Frame, options: SubmitOptions) !void {
             const state = self.state orelse return error.FrameAlreadyFinished;
-            try self.submit_fn(state, null);
-            self.state = null;
-        }
-
-        /// Submits with an explicit recording timestamp, in nanoseconds on
-        /// the recording timeline. Recording must use `.timing = .{ .explicit = ... }`
-        /// or `.timing = .{ .monotonic = ... }`.
-        pub fn submitAndPresentAt(self: *Frame, timestamp_ns: u64) !void {
-            const state = self.state orelse return error.FrameAlreadyFinished;
-            try self.submit_fn(state, timestamp_ns);
+            try self.submit_fn(state, options);
             self.state = null;
         }
 
         /// Submits the frame and waits until its tightly packed pixels have
         /// been copied into allocator-owned CPU memory. Onscreen frames are
         /// presented after the copy.
-        pub fn submitAndReadback(self: *Frame, allocator: std.mem.Allocator) !Readback {
+        pub fn submitAndReadback(self: *Frame, allocator: std.mem.Allocator, options: SubmitOptions) !Readback {
             const state = self.state orelse return error.FrameAlreadyFinished;
-            const result = try self.readback_fn(state, allocator, null);
-            self.state = null;
-            return result;
-        }
-
-        pub fn submitAndReadbackAt(self: *Frame, allocator: std.mem.Allocator, timestamp_ns: u64) !Readback {
-            const state = self.state orelse return error.FrameAlreadyFinished;
-            const result = try self.readback_fn(state, allocator, timestamp_ns);
+            const result = try self.readback_fn(state, allocator, options);
             self.state = null;
             return result;
         }
@@ -616,14 +607,14 @@ pub const RenderTarget = struct {
                 self.recreate_pending = true;
             }
 
-            fn submitOpaque(ptr: ?*anyopaque, timestamp_ns: ?u64) anyerror!void {
+            fn submitOpaque(ptr: ?*anyopaque, submit_options: SubmitOptions) anyerror!void {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
-                _ = try self.submitFrame(null, timestamp_ns);
+                _ = try self.submitFrame(null, submit_options);
             }
 
-            fn readbackOpaque(ptr: ?*anyopaque, output_allocator: std.mem.Allocator, timestamp_ns: ?u64) anyerror!Readback {
+            fn readbackOpaque(ptr: ?*anyopaque, output_allocator: std.mem.Allocator, submit_options: SubmitOptions) anyerror!Readback {
                 const self: *StateSelf = @ptrCast(@alignCast(ptr.?));
-                return (try self.submitFrame(output_allocator, timestamp_ns)).?;
+                return (try self.submitFrame(output_allocator, submit_options)).?;
             }
 
             fn abortOpaque(ptr: ?*anyopaque) void {
@@ -779,7 +770,7 @@ pub const RenderTarget = struct {
                 };
             }
 
-            fn submitFrame(self: *StateSelf, readback_allocator: ?std.mem.Allocator, recording_timestamp_ns: ?u64) anyerror!?Readback {
+            fn submitFrame(self: *StateSelf, readback_allocator: ?std.mem.Allocator, submit_options: SubmitOptions) anyerror!?Readback {
                 const slot_index = self.active_slot orelse return error.FrameAlreadyFinished;
                 const image_index = self.active_image orelse return error.FrameAlreadyFinished;
                 const slot = &self.slots[slot_index];
@@ -793,14 +784,18 @@ pub const RenderTarget = struct {
                     if (self.recorder) |*recorder| recorder.isRecording() else false
                 else
                     false;
-                const copy_image = readback_allocator != null or wants_recording;
+                const recording_frame = if (comptime build_options.vk_video)
+                    if (wants_recording) try self.recorder.?.selectFrame(submit_options.recording) else null
+                else
+                    null;
+                const copy_image = readback_allocator != null or recording_frame != null;
                 const post_render_layout: vk.ImageLayout = if (copy_image) .transfer_src_optimal else if (self.surface == 0) .color_attachment_optimal else .present_src_khr;
                 transitionImage(self.device, slot.command_buffer, image_handle, .color_attachment_optimal, post_render_layout, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit, if (post_render_layout == .transfer_src_optimal) vk.pipeline_stage.transfer_bit else vk.pipeline_stage.bottom_of_pipe_bit, if (post_render_layout == .transfer_src_optimal) vk.access.transfer_read_bit else 0);
                 var recorder_prepared = false;
                 var recorder_signal: vk.Semaphore = 0;
                 if (comptime build_options.vk_video) {
-                    if (wants_recording) {
-                        if (try self.recorder.?.prepareFrame(slot.command_buffer, image_handle, self.extent, recording_timestamp_ns)) |prepared| {
+                    if (recording_frame) |selected| {
+                        if (try self.recorder.?.prepareFrame(slot.command_buffer, image_handle, self.extent, selected)) |prepared| {
                             recorder_prepared = true;
                             recorder_signal = prepared.signal_semaphore;
                         }
