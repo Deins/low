@@ -1,14 +1,6 @@
 const std = @import("std");
 const input = @import("input.zig");
 
-pub const BackendRequest = enum {
-    auto,
-    wayland,
-    x11,
-    /// An in-process backend which never connects to a display server.
-    offscreen,
-};
-
 pub const BackendKind = enum {
     wayland,
     x11,
@@ -108,12 +100,20 @@ pub const OffscreenOptions = struct {
     frame_mode: FrameMode = .manual,
 };
 
+/// Backend selection and its backend-specific initialization settings.
+pub const BackendRequest = union(enum) {
+    auto: void,
+    wayland: void,
+    x11: void,
+    /// An in-process backend which never connects to a display server.
+    offscreen: OffscreenOptions,
+};
+
 pub const InitOptions = struct {
     backend: BackendRequest = .auto,
     app_name: [:0]const u8 = "low",
     /// Used by desktop backends that support selecting a named display.
     display_name: ?[:0]const u8 = null,
-    offscreen: OffscreenOptions = .{},
 };
 
 pub const WindowOptions = struct {
@@ -145,6 +145,8 @@ pub const Event = union(enum) {
     cursor_enter: bool,
     /// Pointer location in logical content units.
     cursor_motion: ContentOffset,
+    /// Relative pointer movement in logical content units.
+    cursor_delta: ContentOffset,
     mouse_button: struct { button: input.MouseButton, action: input.Action, mods: input.Modifiers = .{} },
     /// Scroll delta in platform-defined scroll units; it is neither content
     /// units nor physical pixels.
@@ -199,6 +201,15 @@ test "detectBackend" {
         BackendKind.x11,
         detectBackend(.{ .display = ":0" }),
     );
+}
+
+test "backend request carries backend-specific options" {
+    const options = InitOptions{
+        .backend = .{ .offscreen = .{ .frame_mode = .{ .continuous = .{ .interval_ns = 1_000 } } } },
+    };
+    try std.testing.expectEqual(std.meta.Tag(BackendRequest).offscreen, std.meta.activeTag(options.backend));
+    try std.testing.expectEqual(@as(?u64, 1_000), options.backend.offscreen.frame_mode.continuous.interval_ns);
+    try std.testing.expectEqual(std.meta.Tag(BackendRequest).auto, std.meta.activeTag((InitOptions{}).backend));
 }
 
 test "scaledSize" {

@@ -19,7 +19,6 @@ const PushConstants = extern struct {
 
 const Renderer = struct {
     gpa: std.mem.Allocator,
-    instance: vk.InstanceProxy,
     render_context: RenderContext,
     physical_device: vk.PhysicalDevice,
     device_resources: Targets.DeviceResources(vk),
@@ -39,7 +38,7 @@ const Renderer = struct {
         gpa: std.mem.Allocator,
         instance: vk.InstanceProxy,
         low_instance_input: low.vulkan.Instance,
-        presentation_surface: ?low.vulkan.api.SurfaceKHR,
+        presentation: ?low.vulkan.PresentationSupport,
         recording: video.RecordingRequest,
     ) !Renderer {
         const selection = try Targets.findDevice(
@@ -47,8 +46,10 @@ const Renderer = struct {
             gpa,
             instance,
             &low_instance_input,
-            presentation_surface,
-            recording,
+            .{
+                .presentation = presentation,
+                .recording = recording,
+            },
         );
         if (selection.selected_video_format) |selected| {
             const coded_extent = selected.codedExtent();
@@ -59,13 +60,6 @@ const Renderer = struct {
                 selected.encodeQueueFamily().?,
             });
         }
-        const color_format: vk.Format = @enumFromInt(try Targets.chooseColorFormat(
-            &low_instance_input,
-            low.vulkan.toPhysicalDevice(selection.physical_device),
-            presentation_surface,
-            gpa,
-            Targets.default_color_formats,
-        ));
         const properties = instance.getPhysicalDeviceProperties(selection.physical_device);
         const version: vk.Version = @bitCast(properties.api_version);
         log.debug("selected Vulkan device: {s}, API {d}.{d}.{d}, graphics queue family {d}", .{
@@ -76,42 +70,14 @@ const Renderer = struct {
             selection.graphics_queue_family,
         });
 
-        var features_13 = vk.PhysicalDeviceVulkan13Features{
-            .synchronization_2 = .true,
-            .dynamic_rendering = .true,
-        };
-        var av1_features = vk.PhysicalDeviceVideoEncodeAV1FeaturesKHR{};
-        if (selection.selected_video_format != null and selection.selected_video_format.?.codec() == .av1) {
-            av1_features.video_encode_av1 = .true;
-            features_13.p_next = @ptrCast(&av1_features);
-        }
-        // Surface extensions come from Context.requiredVulkanInstanceExtensions
-        // when creating the instance. VK_KHR_swapchain is separately a device
-        // extension, and is unnecessary for RenderTarget's offscreen images.
-        var extension_storage: [4][*:0]const u8 = undefined;
-        var extension_count: usize = 0;
-        if (presentation_surface != null) {
-            extension_storage[extension_count] = "VK_KHR_swapchain";
-            extension_count += 1;
-        }
-        if (selection.selected_video_format) |selected| {
-            for (selected.deviceExtensions()) |extension| {
-                extension_storage[extension_count] = extension;
-                extension_count += 1;
-            }
-        }
-        const device_extensions = extension_storage[0..extension_count];
         var device_resources = try Targets.createDevice(
             vk,
             gpa,
             instance,
             &low_instance_input,
             selection,
-            &features_13,
-            device_extensions,
         );
         errdefer device_resources.deinit();
-        if (presentation_surface != null and device_resources.wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
         const device = device_resources.device;
         const low_instance = low_instance_input;
         const low_device = device_resources.low_device;
@@ -122,38 +88,58 @@ const Renderer = struct {
         }, null);
         errdefer device.destroyCommandPool(command_pool, null);
 
-        const pipeline_layout = try createPipelineLayout(device);
-        errdefer device.destroyPipelineLayout(pipeline_layout, null);
-        const pipeline = try createPipeline(device, pipeline_layout, color_format);
-        errdefer device.destroyPipeline(pipeline, null);
-
         const graphics_queue = device_resources.graphics_queue;
         const encode_queue = device_resources.encode_queue;
+        var render_context = RenderContext.init(
+            low_instance,
+            low.vulkan.toPhysicalDevice(selection.physical_device),
+            low_device,
+            low.vulkan.toQueue(graphics_queue),
+            selection.graphics_queue_family,
+            @intFromEnum(command_pool),
+        );
+        if (selection.present_queue_family) |present_family| {
+            if (present_family != selection.graphics_queue_family) {
+                render_context.present_queue = .{
+                    .queue = low.vulkan.toQueue(device_resources.present_queue),
+                    .family = present_family,
+                };
+            }
+        }
         return .{
             .gpa = gpa,
-            .instance = instance,
-            .render_context = RenderContext.init(
-                low_instance,
-                low.vulkan.toPhysicalDevice(selection.physical_device),
-                low_device,
-                low.vulkan.toQueue(graphics_queue),
-                selection.graphics_queue_family,
-                @intFromEnum(command_pool),
-            ),
+            .render_context = render_context,
             .physical_device = selection.physical_device,
             .device_resources = device_resources,
             .device = device,
             .graphics_queue = graphics_queue,
             .graphics_queue_family = selection.graphics_queue_family,
             .command_pool = command_pool,
-            .pipeline_layout = pipeline_layout,
-            .pipeline = pipeline,
-            .color_format = color_format,
+            .pipeline_layout = .null_handle,
+            .pipeline = .null_handle,
+            .color_format = .undefined,
             .encode_queue = encode_queue,
             .encode_queue_family = selection.encode_queue_family,
             .video_device = null,
             .video_codec = if (selection.selected_video_format) |selected| selected.codec() else null,
         };
+    }
+
+    fn initPipeline(self: *Renderer, surface: ?low.vulkan.api.SurfaceKHR) !void {
+        std.debug.assert(self.pipeline == .null_handle);
+        const color_format: vk.Format = @enumFromInt(try Targets.chooseColorFormat(
+            &self.render_context.instance,
+            low.vulkan.toPhysicalDevice(self.physical_device),
+            surface,
+            self.gpa,
+            Targets.default_color_formats,
+        ));
+        const pipeline_layout = try createPipelineLayout(self.device);
+        errdefer self.device.destroyPipelineLayout(pipeline_layout, null);
+        const pipeline = try createPipeline(self.device, pipeline_layout, color_format);
+        self.pipeline_layout = pipeline_layout;
+        self.pipeline = pipeline;
+        self.color_format = color_format;
     }
 
     fn initVideo(self: *Renderer) !void {
@@ -174,8 +160,8 @@ const Renderer = struct {
 
     fn deinit(self: *Renderer) void {
         if (self.video_device) |*video_device| video_device.deinit();
-        self.device.destroyPipeline(self.pipeline, null);
-        self.device.destroyPipelineLayout(self.pipeline_layout, null);
+        if (self.pipeline != .null_handle) self.device.destroyPipeline(self.pipeline, null);
+        if (self.pipeline_layout != .null_handle) self.device.destroyPipelineLayout(self.pipeline_layout, null);
         self.device.destroyCommandPool(self.command_pool, null);
         self.device_resources.deinit();
         self.* = undefined;
@@ -190,6 +176,10 @@ const AppWindow = struct {
     color: [3]f32,
     dump_prefix: []const u8,
     recording_path: []const u8,
+    vsync: Targets.VSync = .on,
+    fps_frames: u32 = 0,
+    fps_started_ns: ?i128 = null,
+    fps: f32 = 0,
     record_file: ?std.Io.File = null,
     record_buffer: [64 * 1024]u8 = undefined,
     record_writer: ?std.Io.File.Writer = null,
@@ -205,13 +195,14 @@ const AppWindow = struct {
         recording_path: []const u8,
         readback: bool,
     ) !AppWindow {
-        var target = try RenderTarget.init(gpa, .{
+        const target = try RenderTarget.init(gpa, .{
             .window = window,
             .context = &renderer.render_context,
+            // Both windows share one format-specialized graphics pipeline.
+            // Reject a surface that cannot present that exact format.
+            .color_formats = &.{low.vulkan.toFormat(renderer.color_format)},
             .readback = readback,
         });
-        errdefer target.deinit();
-        if (target.colorFormat() != low.vulkan.toFormat(renderer.color_format)) return error.UnsupportedSurfaceFormat;
         return .{
             .window = window,
             .target = target,
@@ -227,6 +218,8 @@ const AppWindow = struct {
         self.window.setUserData(self);
         self.window.setCallbacks(.{
             .mouse_button = onMouseButton,
+            .cursor_delta = onCursorDelta,
+            .key = onKey,
         });
     }
 
@@ -258,6 +251,7 @@ const AppWindow = struct {
     }
 
     fn update(self: *AppWindow, dt: f32) void {
+        if (self.window.isMouseCaptured()) return;
         const framebuffer_size = self.window.getFramebufferSize();
         const width: f32 = @floatFromInt(@max(framebuffer_size.width, 1));
         const height: f32 = @floatFromInt(@max(framebuffer_size.height, 1));
@@ -277,9 +271,33 @@ const AppWindow = struct {
         }
     }
 
-    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8) !void {
+    fn updateFps(self: *AppWindow, now_ns: i128) void {
+        if (self.fps_started_ns == null) self.fps_started_ns = now_ns;
+        self.fps_frames += 1;
+        const elapsed_ns = now_ns - self.fps_started_ns.?;
+        if (elapsed_ns < 500_000_000) return;
+
+        self.fps = @as(f32, @floatFromInt(self.fps_frames)) * 1_000_000_000.0 /
+            @as(f32, @floatFromInt(elapsed_ns));
+        self.fps_frames = 0;
+        self.fps_started_ns = now_ns;
+        self.updateTitle();
+    }
+
+    fn updateTitle(self: *AppWindow) void {
+        var buffer: [128:0]u8 = undefined;
+        const title = std.fmt.bufPrint(buffer[0 .. buffer.len - 1], "low Vulkan — {s} window | {d:.1} FPS | vsync {s}", .{
+            self.dump_prefix,
+            self.fps,
+            if (self.vsync == .on) "on" else "off",
+        }) catch return;
+        buffer[title.len] = 0;
+        self.window.setTitle(buffer[0..title.len :0]);
+    }
+
+    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8) !bool {
         var frame = self.target.acquire() catch |err| switch (err) {
-            error.FrameSkipped, error.FrameOutOfDate => return,
+            error.FrameSkipped, error.FrameOutOfDate => return false,
             else => return err,
         };
         defer frame.abort();
@@ -329,6 +347,7 @@ const AppWindow = struct {
         } else {
             try frame.submitAndPresent(.{});
         }
+        return true;
     }
 };
 
@@ -349,10 +368,9 @@ pub fn main(init: std.process.Init) !void {
     var context = try low.Context.init(gpa, .{
         .app_name = "low.multiwindow_triangles",
         .backend = app_options.backend,
-        .offscreen = .{ .frame_mode = .{ .continuous = .{} } },
     });
     defer context.deinit();
-    log.debug("using {s} backend", .{@tagName(context.backendKind())});
+    log.debug("using window system: {s}", .{@tagName(context.backendKind())});
     const extensions = context.requiredVulkanInstanceExtensions();
 
     const app_info = vk.ApplicationInfo{
@@ -375,15 +393,6 @@ pub fn main(init: std.process.Init) !void {
 
     const low_instance = try loader.loadInstanceApi(low.vulkan.toInstance(instance.handle));
     const offscreen = context.backendKind() == .offscreen;
-    const first_window = try context.createWindow(.{
-        .title = "low Vulkan — first window",
-        .size = .{ .width = 640, .height = 480 },
-    });
-    var selection_surface: ?low.vulkan.PresentationSurface = null;
-    if (!offscreen) {
-        selection_surface = try context.createVulkanPresentationSurface(&low_instance, first_window);
-    }
-    defer if (selection_surface) |*surface| surface.deinit();
     const recording_request: video.RecordingRequest = if (!recording_requested)
         .off
     else if (app_options.record_codec) |codec|
@@ -394,7 +403,7 @@ pub fn main(init: std.process.Init) !void {
         gpa,
         instance,
         low_instance,
-        if (selection_surface) |surface| surface.handle else null,
+        context.vulkanPresentationSupport(),
         recording_request,
     ) catch |err| {
         if (recording_requested) {
@@ -404,10 +413,21 @@ pub fn main(init: std.process.Init) !void {
     };
     defer renderer.deinit();
     if (recording_requested) try renderer.initVideo();
+    const first_window = try context.createWindow(.{
+        .title = "low Vulkan — first window",
+        .size = .{ .width = 640, .height = 480 },
+        .vulkan = &low_instance,
+    });
+    var first_window_cleanup_pending = true;
+    defer if (first_window_cleanup_pending) first_window.deinit();
+    try renderer.initPipeline(first_window.vulkanSurface());
     const second_window = try context.createWindow(.{
         .title = "low Vulkan — second window",
         .size = .{ .width = 320, .height = 240 },
+        .vulkan = &low_instance,
     });
+    var second_window_cleanup_pending = true;
+    defer if (second_window_cleanup_pending) second_window.deinit();
     var first: ?AppWindow = try AppWindow.init(
         gpa,
         &renderer,
@@ -419,6 +439,7 @@ pub fn main(init: std.process.Init) !void {
         "tmp/first.mkv",
         app_options.dump,
     );
+    first_window_cleanup_pending = false;
     defer if (first) |*app_window| app_window.deinit(init.io);
     var second: ?AppWindow = try AppWindow.init(
         gpa,
@@ -431,6 +452,7 @@ pub fn main(init: std.process.Init) !void {
         "tmp/second.mkv",
         app_options.dump,
     );
+    second_window_cleanup_pending = false;
     defer if (second) |*app_window| app_window.deinit(init.io);
     const windows = [_]*?AppWindow{ &first, &second };
     first.?.installCallbacks();
@@ -487,8 +509,10 @@ pub fn main(init: std.process.Init) !void {
                 app_window.update(dt);
                 var path_buffer: [64]u8 = undefined;
                 const path = if (app_options.dump) try app_window.dumpPath(&path_buffer, rendered_frames + 1) else null;
-                try app_window.draw(&renderer, init.io, path);
-                rendered = true;
+                if (try app_window.draw(&renderer, init.io, path)) {
+                    app_window.updateFps(now.nanoseconds);
+                    rendered = true;
+                }
             }
         }
         if (!rendered) continue;
@@ -625,7 +649,11 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
         if (std.mem.startsWith(u8, arg, "--desktop=")) {
             if (desktop_selected) return error.ConflictingDesktopArguments;
             const name = arg["--desktop=".len..];
-            result.backend = std.meta.stringToEnum(low.BackendRequest, name) orelse return error.InvalidDesktop;
+            const backend = std.meta.stringToEnum(std.meta.Tag(low.BackendRequest), name) orelse return error.InvalidDesktop;
+            result.backend = switch (backend) {
+                .offscreen => .{ .offscreen = .{ .frame_mode = .{ .continuous = .{} } } },
+                inline else => |tag| @unionInit(low.BackendRequest, @tagName(tag), {}),
+            };
             desktop_selected = true;
         } else if (std.mem.eql(u8, arg, "--screencap")) {
             result.screencap = true;
@@ -645,8 +673,54 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
 }
 
 fn onMouseButton(window: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {
+    if (button == .middle) {
+        window.setMouseCaptured(action == .press);
+        return;
+    }
     if (button != .left or action != .press) return;
     const self: *AppWindow = @ptrCast(@alignCast(window.getUserData() orelse return));
     self.velocity = .{ -self.velocity[0], -self.velocity[1] };
     self.color = .{ self.color[1], self.color[2], self.color[0] };
+}
+
+fn onCursorDelta(window: *low.Window, x: f64, y: f64) void {
+    if (!window.isMouseCaptured()) return;
+    const self: *AppWindow = @ptrCast(@alignCast(window.getUserData() orelse return));
+    const size = window.getSize();
+    if (size.width <= 0 or size.height <= 0) return;
+
+    // Position is normalized to the same -1..1 space used by the vertex
+    // shader. Screen-space Y grows downward, while the render coordinates grow
+    // upward, so vertical drag motion is inverted.
+    self.position[0] += @floatCast(x * 2.0 / @as(f64, @floatFromInt(size.width)));
+    self.position[1] -= @floatCast(y * 2.0 / @as(f64, @floatFromInt(size.height)));
+
+    const framebuffer_size = window.getFramebufferSize();
+    const width: f32 = @floatFromInt(@max(framebuffer_size.width, 1));
+    const height: f32 = @floatFromInt(@max(framebuffer_size.height, 1));
+    const bounds = [2]f32{
+        @max(0.0, 1.0 - 2.0 * triangle_half_size_px / width),
+        @max(0.0, 1.0 - 2.0 * triangle_half_size_px / height),
+    };
+    self.position[0] = std.math.clamp(self.position[0], -bounds[0], bounds[0]);
+    self.position[1] = std.math.clamp(self.position[1], -bounds[1], bounds[1]);
+}
+
+fn onKey(window: *low.Window, key: low.Key, _: u32, action: low.Action, _: low.Modifiers) void {
+    if (action != .press) return;
+    const self: *AppWindow = @ptrCast(@alignCast(window.getUserData() orelse return));
+    switch (key) {
+        .f => window.toggleFullscreen(),
+        .v => {
+            const next: Targets.VSync = if (self.vsync == .on) .off else .on;
+            self.target.setVSync(next) catch |err| {
+                log.err("{s} could not change vsync: {s}", .{ self.dump_prefix, @errorName(err) });
+                return;
+            };
+            self.vsync = next;
+            self.updateTitle();
+        },
+        .m => window.setCursorVisible(!window.isCursorVisible()),
+        else => {},
+    }
 }

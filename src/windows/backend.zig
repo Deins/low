@@ -34,10 +34,16 @@ const WindowData = struct {
     handle: win32.HWND,
     /// The style and bounds to reinstate after borderless fullscreen.
     windowed: ?WindowedState = null,
+    capture_center: win32.POINT = .{ .x = 0, .y = 0 },
+    capture_screen_center: win32.POINT = .{ .x = 0, .y = 0 },
 };
 
 pub fn initState(allocator: std.mem.Allocator, options: InitOptions) Error!*runtime.State {
-    if (options.backend == .offscreen) return offscreen_backend.init(allocator, options);
+    switch (options.backend) {
+        .offscreen => |offscreen| return offscreen_backend.init(allocator, offscreen),
+        .auto => {},
+        .wayland, .x11 => return error.UnsupportedPlatform,
+    }
 
     if (!class_registered) {
         // This is process-wide and deliberately best-effort: a host may have
@@ -99,6 +105,10 @@ fn deinit(state: *runtime.State) void {
 
 fn nativeDisplay(_: *runtime.State) *anyopaque {
     return @ptrCast(win32.GetModuleHandleW(null));
+}
+
+fn vulkanVisualId(_: *runtime.State) usize {
+    return 0;
 }
 
 fn requiredVulkanExtensions(_: *runtime.State) []const [*:0]const u8 {
@@ -296,6 +306,26 @@ fn setCursorVisible(window: *Window, _: bool) void {
 fn setCursor(window: *Window, _: runtime.CursorShape) void {
     applyCursor(window);
 }
+fn setMouseCaptured(window: *Window, captured: bool) bool {
+    if (captured) {
+        var rect: win32.RECT = undefined;
+        _ = win32.GetClientRect(windowHandle(window), &rect);
+        const native = windowData(window);
+        native.capture_center = .{
+            .x = @divTrunc(rect.right - rect.left, 2),
+            .y = @divTrunc(rect.bottom - rect.top, 2),
+        };
+        var screen_center = native.capture_center;
+        _ = win32.ClientToScreen(windowHandle(window), &screen_center);
+        native.capture_screen_center = screen_center;
+        _ = win32.SetCapture(windowHandle(window));
+        _ = win32.SetCursorPos(screen_center.x, screen_center.y);
+        return win32.GetCapture() == windowHandle(window);
+    } else {
+        _ = win32.ReleaseCapture();
+        return false;
+    }
+}
 
 fn windowStyle(decorated: bool, resizable: bool) win32.WINDOW_STYLE {
     if (!decorated) return win32.WS_POPUP;
@@ -391,6 +421,7 @@ fn cancelFrameRequest(_: *Window) void {}
 const vtable: runtime.VTable = .{
     .deinit = deinit,
     .native_display = nativeDisplay,
+    .vulkan_visual_id = vulkanVisualId,
     .required_vulkan_extensions = requiredVulkanExtensions,
     .create_window = createWindow,
     .pump_events = pumpEvents,
@@ -412,6 +443,7 @@ const vtable: runtime.VTable = .{
     .set_resizable = setResizable,
     .set_cursor_visible = setCursorVisible,
     .set_cursor = setCursor,
+    .set_mouse_captured = setMouseCaptured,
     .apply_scale = applyScale,
     .request_frame = requestFrame,
     .cancel_frame_request = cancelFrameRequest,
@@ -466,9 +498,26 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             runtime.windowUpdateFocus(window, true);
         },
         win32.WM_KILLFOCUS => {
+            if (window.isMouseCaptured()) window.setMouseCaptured(false);
             runtime.windowUpdateFocus(window, false);
         },
+        win32.WM_CAPTURECHANGED => {
+            window.mouse_captured = false;
+        },
         win32.WM_MOUSEMOVE => {
+            if (window.isMouseCaptured()) {
+                const center = windowData(window).capture_center;
+                const x = win32.xFromLparam(lparam);
+                const y = win32.yFromLparam(lparam);
+                const dx = x - center.x;
+                const dy = y - center.y;
+                if (dx != 0 or dy != 0) {
+                    runtime.windowUpdateCursorDelta(window, @floatFromInt(dx), @floatFromInt(dy));
+                    const screen_center = windowData(window).capture_screen_center;
+                    _ = win32.SetCursorPos(screen_center.x, screen_center.y);
+                }
+                return 0;
+            }
             const p = Point{ .x = @floatFromInt(win32.xFromLparam(lparam)), .y = @floatFromInt(win32.yFromLparam(lparam)) };
             runtime.windowUpdateCursorMotion(window, p.x, p.y);
         },

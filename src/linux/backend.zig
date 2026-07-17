@@ -37,7 +37,7 @@ pub fn initState(allocator: std.mem.Allocator, options: InitOptions) Error!*runt
         .display = environmentValue("DISPLAY"),
     };
     const selected = switch (options.backend) {
-        .offscreen => return initBackend(allocator, options, .offscreen),
+        .offscreen => |offscreen| return offscreen_backend.init(allocator, offscreen),
         .wayland => return initBackend(allocator, options, .wayland),
         .x11 => return initBackend(allocator, options, .x11),
         .auto => types.detectBackend(env),
@@ -67,7 +67,7 @@ fn initBackend(allocator: std.mem.Allocator, options: InitOptions, selected: Bac
     return switch (selected) {
         .wayland => if (build_options.wayland) wayland_backend.init(allocator, options) else error.UnsupportedPlatform,
         .x11 => if (build_options.x11) x11_backend.init(allocator, options) else error.UnsupportedPlatform,
-        .offscreen => offscreen_backend.init(allocator, options),
+        .offscreen => unreachable,
         .windows => error.UnsupportedPlatform,
     };
 }

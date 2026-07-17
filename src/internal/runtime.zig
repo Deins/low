@@ -35,6 +35,7 @@ pub const Error = error{
     SystemResources,
     NotOffscreen,
     ManualFrameStepping,
+    PresentationSurfaceCreationFailed,
     WindowClassRegistrationFailed,
     WindowCreationFailed,
 };
@@ -58,6 +59,12 @@ pub const WindowCallbacks = struct {
     /// Scroll delta in platform-defined scroll units; it is neither content
     /// units nor physical pixels.
     scroll: ?*const fn (*Window, f64, f64) void = null,
+    /// Pointer location in logical content units, relative to the content
+    /// area's top-left corner.
+    cursor_motion: ?*const fn (*Window, ContentOffset) void = null,
+    /// Relative pointer movement in logical content units. This is emitted
+    /// while a backend supports relative/captured pointer motion.
+    cursor_delta: ?*const fn (*Window, f64, f64) void = null,
     key: ?*const fn (*Window, Key, u32, Action, Modifiers) void = null,
     text: ?*const fn (*Window, []const u8) void = null,
 };
@@ -65,6 +72,7 @@ pub const WindowCallbacks = struct {
 pub const VTable = struct {
     deinit: *const fn (*State) void,
     native_display: *const fn (*State) *anyopaque,
+    vulkan_visual_id: *const fn (*State) usize,
     required_vulkan_extensions: *const fn (*State) []const [*:0]const u8,
     create_window: *const fn (*State, WindowOptions) Error!*Window,
     pump_events: *const fn (*State, i32) Error!bool,
@@ -87,6 +95,7 @@ pub const VTable = struct {
     set_resizable: *const fn (*Window, bool) void,
     set_cursor_visible: *const fn (*Window, bool) void,
     set_cursor: *const fn (*Window, CursorShape) void,
+    set_mouse_captured: *const fn (*Window, bool) bool,
     apply_scale: *const fn (*Window, f32) void,
     request_frame: *const fn (*Window) bool,
     cancel_frame_request: *const fn (*Window) void,
@@ -124,6 +133,10 @@ pub const State = struct {
 
     pub fn nativeDisplay(self: *State) *anyopaque {
         return self.vtable.native_display(self);
+    }
+
+    pub fn vulkanVisualId(self: *State) usize {
+        return self.vtable.vulkan_visual_id(self);
     }
 
     pub fn backendKind(self: *State) BackendKind {
@@ -185,8 +198,20 @@ pub const State = struct {
 };
 
 pub const Window = struct {
+    const VulkanSurface = struct {
+        handle: u64,
+        context: *const anyopaque,
+        destroy_fn: *const fn (*const anyopaque, u64) void,
+
+        fn deinit(self: *@This()) void {
+            if (self.handle != 0) self.destroy_fn(self.context, self.handle);
+            self.* = undefined;
+        }
+    };
+
     ctx: *State,
     backend_data: *anyopaque,
+    vulkan_surface: ?VulkanSurface = null,
     callbacks: WindowCallbacks = .{},
     user_data: ?*anyopaque = null,
 
@@ -205,6 +230,7 @@ pub const Window = struct {
     decorated: bool = true,
     decoration_mode: DecorationMode = .auto,
     cursor_visible: bool = true,
+    mouse_captured: bool = false,
     cursor_shape: CursorShape = .arrow,
     size: ContentSize,
     framebuffer_size: PixelSize,
@@ -215,7 +241,16 @@ pub const Window = struct {
     pressed_buttons: std.EnumSet(MouseButton) = .empty,
 
     pub fn deinit(self: *Window) void {
+        if (self.mouse_captured) self.setMouseCaptured(false);
+        if (self.vulkan_surface) |*surface| surface.deinit();
+        self.vulkan_surface = null;
         self.ctx.vtable.destroy_window(self);
+    }
+
+    /// Returns the Vulkan presentation surface created with this window, or
+    /// null when Vulkan presentation was not requested or is offscreen.
+    pub fn vulkanSurface(self: *const Window) ?u64 {
+        return if (self.vulkan_surface) |surface| surface.handle else null;
     }
 
     pub fn nativeSurface(self: *Window) usize {
@@ -339,6 +374,24 @@ pub const Window = struct {
         return self.minimized;
     }
 
+    pub fn isCursorVisible(self: *const Window) bool {
+        return self.cursor_visible;
+    }
+
+    /// Requests pointer capture for this window until released. This is
+    /// intended for drag interactions. On Wayland this uses the optional
+    /// pointer-constraints protocol when the compositor advertises it.
+    /// `isMouseCaptured` remains false when the backend cannot establish the
+    /// request.
+    pub fn setMouseCaptured(self: *Window, captured: bool) void {
+        if (self.mouse_captured == captured) return;
+        self.mouse_captured = self.ctx.vtable.set_mouse_captured(self, captured);
+    }
+
+    pub fn isMouseCaptured(self: *const Window) bool {
+        return self.mouse_captured;
+    }
+
     /// Returns whether the platform currently advises pausing rendering for
     /// this window.  It is a best-effort signal, not an exact visibility test.
     pub fn isRenderSuspended(self: *const Window) bool {
@@ -407,6 +460,11 @@ pub const Window = struct {
         self.fullscreen = true;
         self.minimized = false;
         if (self.ctx.backend_kind != .offscreen) self.updateRenderSuspended(false);
+    }
+
+    /// Toggles between the current windowed state and fullscreen.
+    pub fn toggleFullscreen(self: *Window) void {
+        if (self.fullscreen) self.restore() else self.setFullscreen();
     }
 
     pub fn restore(self: *Window) void {
@@ -493,6 +551,11 @@ pub const Window = struct {
 
     fn updateCursorMotion(self: *Window, x: f64, y: f64) void {
         self.cursor_pos = .{ .x = x, .y = y };
+        if (self.callbacks.cursor_motion) |cb| cb(self, self.cursor_pos);
+    }
+
+    fn updateCursorDelta(self: *Window, x: f64, y: f64) void {
+        if (self.callbacks.cursor_delta) |cb| cb(self, x, y);
     }
 
     fn updateMouseButton(self: *Window, button: MouseButton, action: Action, mods: Modifiers) void {
@@ -546,6 +609,9 @@ pub fn windowUpdateClose(window: *Window) void {
 }
 pub fn windowUpdateCursorMotion(window: *Window, x: f64, y: f64) void {
     window.updateCursorMotion(x, y);
+}
+pub fn windowUpdateCursorDelta(window: *Window, x: f64, y: f64) void {
+    window.updateCursorDelta(x, y);
 }
 pub fn windowUpdateMouseButton(window: *Window, button: MouseButton, action: Action, mods: Modifiers) void {
     window.updateMouseButton(button, action, mods);

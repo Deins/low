@@ -359,7 +359,7 @@ pub fn main(init: std.process.Init) !void {
     const window = try context.createWindow(.{
         .title = "low raw Vulkan setup",
         .size = .{ .width = 800, .height = 600 },
-        .vulkan = .{ .instance = &low_instance },
+        .vulkan = &low_instance,
     });
     defer window.deinit();
     window.setCallbacks(.{

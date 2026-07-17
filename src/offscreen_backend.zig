@@ -30,6 +30,7 @@ pub const Backend = struct {
         focus: bool,
         cursor_enter: bool,
         cursor_motion: api.Point,
+        cursor_delta: api.Point,
         mouse_button: struct { button: api.MouseButton, action: api.Action, mods: api.Modifiers },
         scroll: struct { x: f64, y: f64 },
         key: struct { key: api.Key, raw_keycode: u32, action: api.Action, mods: api.Modifiers },
@@ -43,10 +44,10 @@ pub const Backend = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, options: api.InitOptions) api.Error!*api.State {
+    pub fn init(allocator: std.mem.Allocator, options: api.OffscreenOptions) api.Error!*api.State {
         const backend_data = allocator.create(Data) catch return error.OutOfMemory;
         errdefer allocator.destroy(backend_data);
-        backend_data.* = .{ .allocator = allocator, .mode = options.offscreen.frame_mode };
+        backend_data.* = .{ .allocator = allocator, .mode = options.frame_mode };
         const state = allocator.create(api.State) catch return error.OutOfMemory;
         state.* = .{ .allocator = allocator, .backend_kind = .offscreen, .backend_data = backend_data, .vtable = &vtable };
         return state;
@@ -70,6 +71,10 @@ pub const Backend = struct {
 
     fn nativeDisplay(state: *api.State) *anyopaque {
         return state.backend_data;
+    }
+
+    fn vulkanVisualId(_: *api.State) usize {
+        return 0;
     }
     fn requiredVulkanExtensions(_: *api.State) []const [*:0]const u8 {
         return &.{};
@@ -129,6 +134,9 @@ pub const Backend = struct {
     fn setResizable(_: *api.Window, _: bool) void {}
     fn setCursorVisible(_: *api.Window, _: bool) void {}
     fn setCursor(_: *api.Window, _: api.CursorShape) void {}
+    fn setMouseCaptured(_: *api.Window, captured: bool) bool {
+        return captured;
+    }
     fn applyScale(_: *api.Window, _: f32) void {}
     fn requestFrame(_: *api.Window) bool {
         return true;
@@ -181,6 +189,7 @@ pub const Backend = struct {
             .focus => |v| .{ .focus = v },
             .cursor_enter => |v| .{ .cursor_enter = v },
             .cursor_motion => |v| .{ .cursor_motion = v },
+            .cursor_delta => |v| .{ .cursor_delta = v },
             .mouse_button => |v| .{ .mouse_button = .{
                 .button = v.button,
                 .action = v.action,
@@ -218,6 +227,7 @@ pub const Backend = struct {
             .focus => |value| api.windowUpdateFocus(window, value),
             .cursor_enter => |value| api.windowUpdateCursorEnter(window, value),
             .cursor_motion => |value| api.windowUpdateCursorMotion(window, value.x, value.y),
+            .cursor_delta => |value| api.windowUpdateCursorDelta(window, value.x, value.y),
             .mouse_button => |value| api.windowUpdateMouseButton(window, value.button, value.action, value.mods),
             .scroll => |value| api.windowUpdateScroll(window, value.x, value.y),
             .key => |value| api.windowUpdateKey(window, value.key, value.raw_keycode, value.action, value.mods),
@@ -228,6 +238,7 @@ pub const Backend = struct {
     const vtable: api.VTable = .{
         .deinit = deinit,
         .native_display = nativeDisplay,
+        .vulkan_visual_id = vulkanVisualId,
         .required_vulkan_extensions = requiredVulkanExtensions,
         .create_window = createWindow,
         .pump_events = pumpEvents,
@@ -249,13 +260,14 @@ pub const Backend = struct {
         .set_resizable = setResizable,
         .set_cursor_visible = setCursorVisible,
         .set_cursor = setCursor,
+        .set_mouse_captured = setMouseCaptured,
         .apply_scale = applyScale,
         .request_frame = requestFrame,
         .cancel_frame_request = cancelFrameRequest,
     };
 
     test "offscreen queues events until a step" {
-        var context = try init(std.testing.allocator, .{ .backend = .offscreen });
+        var context = try init(std.testing.allocator, .{});
         defer context.deinit();
         const window = try context.createWindow(.{ .title = "test" });
         try window.injectEvent(.{ .key = .{ .key = .a, .action = .press } });
@@ -265,22 +277,67 @@ pub const Backend = struct {
     }
 
     test "offscreen manual mode rejects timed frames" {
-        var context = try init(std.testing.allocator, .{ .backend = .offscreen });
+        var context = try init(std.testing.allocator, .{});
         defer context.deinit();
         try std.testing.expectError(error.ManualFrameStepping, context.nextFrame());
     }
 
     test "offscreen continuous mode advances a frame" {
-        var context = try init(std.testing.allocator, .{ .backend = .offscreen, .offscreen = .{ .frame_mode = .{ .continuous = .{} } } });
+        var context = try init(std.testing.allocator, .{ .frame_mode = .{ .continuous = .{} } });
         defer context.deinit();
         try context.nextFrame();
     }
 
     test "offscreen applies the requested initial window state" {
-        var context = try init(std.testing.allocator, .{ .backend = .offscreen });
+        var context = try init(std.testing.allocator, .{});
         defer context.deinit();
         const window = try context.createWindow(.{ .title = "test", .state = .fullscreen });
         try std.testing.expect(window.fullscreen);
         try std.testing.expect(!window.maximized);
+    }
+
+    test "offscreen toggles fullscreen state" {
+        var context = try init(std.testing.allocator, .{});
+        defer context.deinit();
+        const window = try context.createWindow(.{ .title = "test" });
+        try std.testing.expect(!window.isFullscreen());
+        window.toggleFullscreen();
+        try std.testing.expect(window.isFullscreen());
+        window.toggleFullscreen();
+        try std.testing.expect(!window.isFullscreen());
+    }
+
+    test "offscreen tracks capture and cursor visibility state" {
+        var context = try init(std.testing.allocator, .{});
+        defer context.deinit();
+        const window = try context.createWindow(.{ .title = "test" });
+        window.setMouseCaptured(true);
+        try std.testing.expect(window.isMouseCaptured());
+        window.setMouseCaptured(false);
+        try std.testing.expect(!window.isMouseCaptured());
+        window.setCursorVisible(false);
+        try std.testing.expect(!window.isCursorVisible());
+    }
+
+    test "offscreen delivers relative motion without changing absolute position" {
+        const Callbacks = struct {
+            fn cursorDelta(window: *api.Window, x: f64, y: f64) void {
+                const received: *api.Point = @ptrCast(@alignCast(window.getUserData().?));
+                received.* = .{ .x = x, .y = y };
+            }
+        };
+
+        var context = try init(std.testing.allocator, .{});
+        defer context.deinit();
+        const window = try context.createWindow(.{ .title = "test" });
+        api.windowUpdateCursorMotion(window, 10, 20);
+        var received: api.Point = .{ .x = 0, .y = 0 };
+        window.setUserData(&received);
+        window.setCallbacks(.{ .cursor_delta = Callbacks.cursorDelta });
+
+        try window.injectEvent(.{ .cursor_delta = .{ .x = 3, .y = -4 } });
+        try context.step();
+        try std.testing.expectEqualDeep(api.Point{ .x = 3, .y = -4 }, received);
+        try std.testing.expectEqualDeep(api.Point{ .x = 10, .y = 20 }, window.getCursorPos());
     }
 };

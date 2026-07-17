@@ -145,6 +145,8 @@ fn addLinuxSupport(
     scanner.addCustomProtocol(b.path("src/wayland/protocols/xdg-shell.xml"));
     scanner.addCustomProtocol(b.path("src/wayland/protocols/xdg-decoration-unstable-v1.xml"));
     scanner.addCustomProtocol(b.path("src/wayland/protocols/cursor-shape-v1.xml"));
+    scanner.addCustomProtocol(b.path("src/wayland/protocols/pointer-constraints-unstable-v1.xml"));
+    scanner.addCustomProtocol(b.path("src/wayland/protocols/relative-pointer-unstable-v1.xml"));
     scanner.addCustomProtocol(b.path("src/wayland/protocols/tablet-v2.xml"));
     scanner.generate("wl_compositor", 5);
     scanner.generate("wl_seat", 5);
@@ -152,6 +154,8 @@ fn addLinuxSupport(
     scanner.generate("xdg_wm_base", 6);
     scanner.generate("zxdg_decoration_manager_v1", 2);
     scanner.generate("wp_cursor_shape_manager_v1", 1);
+    scanner.generate("zwp_pointer_constraints_v1", 1);
+    scanner.generate("zwp_relative_pointer_manager_v1", 1);
 
     const wayland_ffi = b.createModule(.{
         .root_source_file = b.path("src/linux/wayland_ffi.zig"),

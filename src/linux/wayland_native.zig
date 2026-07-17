@@ -9,6 +9,8 @@ const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 const zxdg = wayland.client.zxdg;
 const cursor_shape = wayland.client.wp;
+const pointer_constraints = wayland.client.zwp;
+const relative_pointer = wayland.client.zwp;
 
 const c = struct {
     pub const wl_display = wl.Display;
@@ -31,6 +33,10 @@ const c = struct {
     pub const wp_cursor_shape_manager_v1 = cursor_shape.CursorShapeManagerV1;
     pub const wp_cursor_shape_device_v1 = cursor_shape.CursorShapeDeviceV1;
     pub const wp_cursor_shape_device_v1_Shape = cursor_shape.CursorShapeDeviceV1.Shape;
+    pub const zwp_pointer_constraints_v1 = pointer_constraints.PointerConstraintsV1;
+    pub const zwp_locked_pointer_v1 = pointer_constraints.LockedPointerV1;
+    pub const zwp_relative_pointer_manager_v1 = relative_pointer.RelativePointerManagerV1;
+    pub const zwp_relative_pointer_v1 = relative_pointer.RelativePointerV1;
 
     pub const wl_registry_listener = struct {
         global: ?*const fn (?*anyopaque, ?*wl_registry, u32, [*c]const u8, u32) callconv(.c) void = null,
@@ -607,6 +613,7 @@ pub const WindowCallbacks = struct {
     frame: ?*const fn (*Window, u32) void = null,
     cursor_enter: ?*const fn (*Window, bool) void = null,
     cursor_motion: ?*const fn (*Window, Point) void = null,
+    cursor_delta: ?*const fn (*Window, f64, f64) void = null,
     mouse_button: ?*const fn (*Window, MouseButton, Action, Modifiers) void = null,
     scroll: ?*const fn (*Window, f64, f64) void = null,
     key: ?*const fn (*Window, Key, u32, Action, Modifiers) void = null,
@@ -632,6 +639,8 @@ pub const State = struct {
     decoration_manager: ?*c.zxdg_decoration_manager_v1 = null,
     cursor_shape_manager: ?*c.wp_cursor_shape_manager_v1 = null,
     cursor_shape_device: ?*c.wp_cursor_shape_device_v1 = null,
+    pointer_constraints: ?*c.zwp_pointer_constraints_v1 = null,
+    relative_pointer_manager: ?*c.zwp_relative_pointer_manager_v1 = null,
     wm_base: ?*c.xdg_wm_base = null,
     seat: ?*c.wl_seat = null,
     pointer: ?*c.wl_pointer = null,
@@ -723,6 +732,8 @@ pub const State = struct {
         if (self.seat) |seat| c.wl_seat_destroy(seat);
         if (self.decoration_manager) |manager| c.zxdg_decoration_manager_v1_destroy(manager);
         if (self.cursor_shape_manager) |manager| c.wp_cursor_shape_manager_v1_destroy(manager);
+        if (self.pointer_constraints) |constraints| constraints.destroy();
+        if (self.relative_pointer_manager) |manager| manager.destroy();
         if (self.wm_base) |wm_base| c.xdg_wm_base_destroy(wm_base);
         if (self.compositor) |compositor| c.wl_compositor_destroy(compositor);
         if (self.registry) |registry| c.wl_registry_destroy(registry);
@@ -1078,6 +1089,8 @@ pub const Window = struct {
     decoration: ?*c.zxdg_toplevel_decoration_v1 = null,
     frame_callback: ?*c.wl_callback = null,
     cursor_visible: bool = true,
+    locked_pointer: ?*c.zwp_locked_pointer_v1 = null,
+    relative_pointer: ?*c.zwp_relative_pointer_v1 = null,
     cursor_shape: CursorShape = .arrow,
 
     size: Size,
@@ -1099,6 +1112,10 @@ pub const Window = struct {
     fn deinitNative(self: *Window) void {
         if (self.ctx.pointer_window == self) self.ctx.pointer_window = null;
         if (self.ctx.keyboard_window == self) self.ctx.keyboard_window = null;
+        if (self.relative_pointer) |relative| relative.destroy();
+        self.relative_pointer = null;
+        if (self.locked_pointer) |locked| locked.destroy();
+        self.locked_pointer = null;
         if (self.decoration) |decoration| c.zxdg_toplevel_decoration_v1_destroy(decoration);
         if (self.frame_callback) |callback| c.wl_callback_destroy(callback);
         c.xdg_toplevel_destroy(self.xdg_toplevel);
@@ -1285,6 +1302,35 @@ pub const Window = struct {
         self.applyCursor();
     }
 
+    pub fn setMouseCaptured(self: *Window, captured: bool) bool {
+        if (captured) {
+            if (self.locked_pointer != null) return true;
+            const constraints = self.ctx.pointer_constraints orelse return false;
+            const manager = self.ctx.relative_pointer_manager orelse return false;
+            const pointer = self.ctx.pointer orelse return false;
+            const relative = manager.getRelativePointer(pointer) catch return false;
+            const locked = constraints.lockPointer(
+                self.surface,
+                pointer,
+                null,
+                .persistent,
+            ) catch {
+                relative.destroy();
+                return false;
+            };
+            self.relative_pointer = relative;
+            self.locked_pointer = locked;
+            relative.setListener(?*anyopaque, relativePointerDispatch, self);
+            return true;
+        } else {
+            if (self.relative_pointer) |relative| relative.destroy();
+            self.relative_pointer = null;
+            if (self.locked_pointer) |locked| locked.destroy();
+            self.locked_pointer = null;
+            return false;
+        }
+    }
+
     fn applyCursor(self: *Window) void {
         if (self.ctx.pointer == null or self.ctx.pointer_window != self) return;
         if (!self.cursor_visible) {
@@ -1341,6 +1387,10 @@ pub const Window = struct {
     fn updateCursorMotion(self: *Window, x: f64, y: f64) void {
         self.cursor_pos = .{ .x = x, .y = y };
         if (self.callbacks.cursor_motion) |cb| cb(self, self.cursor_pos);
+    }
+
+    fn updateCursorDelta(self: *Window, x: f64, y: f64) void {
+        if (self.callbacks.cursor_delta) |cb| cb(self, x, y);
     }
 
     fn updateMouseButton(self: *Window, button: MouseButton, action: Action, mods: Modifiers) void {
@@ -1533,6 +1583,14 @@ fn registryGlobal(data: ?*anyopaque, registry: ?*c.wl_registry, name: u32, inter
         }
         return;
     }
+    if (std.mem.eql(u8, iface, "zwp_pointer_constraints_v1")) {
+        self.pointer_constraints = self.registry.?.bind(name, c.zwp_pointer_constraints_v1, @min(version, 1)) catch return;
+        return;
+    }
+    if (std.mem.eql(u8, iface, "zwp_relative_pointer_manager_v1")) {
+        self.relative_pointer_manager = self.registry.?.bind(name, c.zwp_relative_pointer_manager_v1, @min(version, 1)) catch return;
+        return;
+    }
     if (std.mem.eql(u8, iface, "xdg_wm_base")) {
         // `xdg_toplevel.state.suspended` was added in version 6, which is the
         // newest xdg-shell version generated by this backend.
@@ -1649,6 +1707,18 @@ fn pointerMotion(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, sx: c.wl
     const self = @as(*State, @ptrCast(@alignCast(data.?)));
     if (self.pointer_window) |window| {
         window.updateCursorMotion(sx.toDouble(), sy.toDouble());
+    }
+}
+
+fn relativePointerDispatch(
+    relative: *c.zwp_relative_pointer_v1,
+    event: relative_pointer.RelativePointerV1.Event,
+    data: ?*anyopaque,
+) void {
+    _ = relative;
+    const window = @as(*Window, @ptrCast(@alignCast(data.?)));
+    switch (event) {
+        .relative_motion => |motion| window.updateCursorDelta(motion.dx_unaccel.toDouble(), motion.dy_unaccel.toDouble()),
     }
 }
 

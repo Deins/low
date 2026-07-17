@@ -91,6 +91,9 @@ pub const Instance = struct {
         get_physical_device_surface_capabilities_khr: ?api.PfnGetPhysicalDeviceSurfaceCapabilitiesKHR,
         get_physical_device_surface_formats_khr: ?api.PfnGetPhysicalDeviceSurfaceFormatsKHR,
         get_physical_device_surface_present_modes_khr: ?api.PfnGetPhysicalDeviceSurfacePresentModesKHR,
+        get_physical_device_wayland_presentation_support_khr: ?api.PfnGetPhysicalDeviceWaylandPresentationSupportKHR = null,
+        get_physical_device_win32_presentation_support_khr: ?api.PfnGetPhysicalDeviceWin32PresentationSupportKHR = null,
+        get_physical_device_xlib_presentation_support_khr: ?api.PfnGetPhysicalDeviceXlibPresentationSupportKHR = null,
         create_win32_surface_khr: ?api.PfnCreateWin32SurfaceKHR = null,
         create_wayland_surface_khr: ?api.PfnCreateWaylandSurfaceKHR = null,
         create_xlib_surface_khr: ?api.PfnCreateXlibSurfaceKHR = null,
@@ -114,6 +117,9 @@ pub const Instance = struct {
                 .get_physical_device_surface_capabilities_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceCapabilitiesKHR, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"),
                 .get_physical_device_surface_formats_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfaceFormatsKHR, "vkGetPhysicalDeviceSurfaceFormatsKHR"),
                 .get_physical_device_surface_present_modes_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceSurfacePresentModesKHR, "vkGetPhysicalDeviceSurfacePresentModesKHR"),
+                .get_physical_device_wayland_presentation_support_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceWaylandPresentationSupportKHR, "vkGetPhysicalDeviceWaylandPresentationSupportKHR"),
+                .get_physical_device_win32_presentation_support_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceWin32PresentationSupportKHR, "vkGetPhysicalDeviceWin32PresentationSupportKHR"),
+                .get_physical_device_xlib_presentation_support_khr = loadOptionalInstance(loader, handle, api.PfnGetPhysicalDeviceXlibPresentationSupportKHR, "vkGetPhysicalDeviceXlibPresentationSupportKHR"),
                 .create_win32_surface_khr = loadOptionalInstance(loader, handle, api.PfnCreateWin32SurfaceKHR, "vkCreateWin32SurfaceKHR"),
                 .create_wayland_surface_khr = loadOptionalInstance(loader, handle, api.PfnCreateWaylandSurfaceKHR, "vkCreateWaylandSurfaceKHR"),
                 .create_xlib_surface_khr = loadOptionalInstance(loader, handle, api.PfnCreateXlibSurfaceKHR, "vkCreateXlibSurfaceKHR"),
@@ -146,9 +152,52 @@ pub const Instance = struct {
     /// caller supplies the number of families obtained from its Vulkan
     /// binding. A null result means no family in that range supports the
     /// surface.
-    pub fn findPresentQueueFamilyKHR(self: *const Self, physical_device: api.PhysicalDevice, surface: api.SurfaceKHR, queue_family_count: u32) !?u32 {
+    pub fn findSurfacePresentQueueFamilyKHR(self: *const Self, physical_device: api.PhysicalDevice, surface: api.SurfaceKHR, queue_family_count: u32) !?u32 {
         for (0..queue_family_count) |index| {
             if (try self.getPhysicalDeviceSurfaceSupportKHR(physical_device, @intCast(index), surface) == api.TRUE) {
+                return @intCast(index);
+            }
+        }
+        return null;
+    }
+
+    /// Tests presentation support without creating a native window or Vulkan
+    /// surface. Xlib uses the context's default visual.
+    pub fn getPhysicalDevicePresentationSupportKHR(
+        self: *const Self,
+        physical_device: api.PhysicalDevice,
+        queue_family: u32,
+        presentation: PresentationSupport,
+    ) !api.Bool32 {
+        return switch (presentation) {
+            .wayland => |display| (self.dispatch.get_physical_device_wayland_presentation_support_khr orelse return error.VulkanFunctionUnavailable)(
+                physical_device,
+                queue_family,
+                display,
+            ),
+            .xlib => |xlib| (self.dispatch.get_physical_device_xlib_presentation_support_khr orelse return error.VulkanFunctionUnavailable)(
+                physical_device,
+                queue_family,
+                xlib.display,
+                xlib.visual_id,
+            ),
+            .win32 => (self.dispatch.get_physical_device_win32_presentation_support_khr orelse return error.VulkanFunctionUnavailable)(
+                physical_device,
+                queue_family,
+            ),
+        };
+    }
+
+    /// Returns the first queue family with platform presentation support,
+    /// without requiring a window or surface.
+    pub fn findPresentQueueFamilyKHR(
+        self: *const Self,
+        physical_device: api.PhysicalDevice,
+        presentation: PresentationSupport,
+        queue_family_count: u32,
+    ) !?u32 {
+        for (0..queue_family_count) |index| {
+            if (try self.getPhysicalDevicePresentationSupportKHR(physical_device, @intCast(index), presentation) == api.TRUE) {
                 return @intCast(index);
             }
         }
@@ -231,11 +280,22 @@ pub const Instance = struct {
     }
 };
 
+/// Native context state needed by Vulkan's platform presentation-support
+/// queries. Obtain this from `Context.vulkanPresentationSupport()`.
+pub const PresentationSupport = union(enum) {
+    wayland: *anyopaque,
+    win32: void,
+    xlib: struct {
+        display: *anyopaque,
+        visual_id: c_ulong,
+    },
+};
+
 /// An owned Vulkan presentation surface created for a low window.
 ///
 /// The Vulkan instance must outlive this value. A `RenderTarget` can borrow
-/// the `handle` while the surface remains alive; deinitialize the target
-/// before deinitializing this surface.
+/// the `handle` through `Options.surface`, or take ownership of this value
+/// through `Options.presentation_surface`.
 pub const PresentationSurface = struct {
     instance: Instance,
     handle: api.SurfaceKHR,
@@ -747,6 +807,21 @@ const VulkanTestStubs = struct {
         return .success;
     }
 
+    fn waylandPresentationSupport(_: api.PhysicalDevice, queue_family: u32, display: *anyopaque) callconv(api.call_conv) api.Bool32 {
+        std.debug.assert(@intFromPtr(display) == 0x1234);
+        return if (queue_family == 2) api.TRUE else api.FALSE;
+    }
+
+    fn win32PresentationSupport(_: api.PhysicalDevice, queue_family: u32) callconv(api.call_conv) api.Bool32 {
+        return if (queue_family == 2) api.TRUE else api.FALSE;
+    }
+
+    fn xlibPresentationSupport(_: api.PhysicalDevice, queue_family: u32, display: *anyopaque, visual_id: c_ulong) callconv(api.call_conv) api.Bool32 {
+        std.debug.assert(@intFromPtr(display) == 0x5678);
+        std.debug.assert(visual_id == 42);
+        return if (queue_family == 2) api.TRUE else api.FALSE;
+    }
+
     fn beginWithInheritance(_: api.CommandBuffer, info: *const api.CommandBufferBeginInfo) callconv(api.call_conv) api.Result {
         std.debug.assert(info.p_inheritance_info != null);
         std.debug.assert(info.p_inheritance_info.?.s_type == .command_buffer_inheritance_info);
@@ -782,7 +857,7 @@ test "acquireNextImageKHR returns an index only after acquisition" {
     try std.testing.expectEqual(@as(u32, 7), acquired.image_index);
 }
 
-test "findPresentQueueFamilyKHR returns the first supported family" {
+test "findSurfacePresentQueueFamilyKHR returns the first supported family" {
     var dispatch: Instance.Dispatch = undefined;
     dispatch.get_physical_device_surface_support_khr = VulkanTestStubs.presentSupport;
     const instance = Instance{
@@ -790,8 +865,49 @@ test "findPresentQueueFamilyKHR returns the first supported family" {
         .get_instance_proc_addr = undefined,
         .dispatch = dispatch,
     };
-    try std.testing.expectEqual(@as(?u32, 2), try instance.findPresentQueueFamilyKHR(null, 1, 4));
-    try std.testing.expectEqual(@as(?u32, null), try instance.findPresentQueueFamilyKHR(null, 1, 2));
+    try std.testing.expectEqual(@as(?u32, 2), try instance.findSurfacePresentQueueFamilyKHR(null, 1, 4));
+    try std.testing.expectEqual(@as(?u32, null), try instance.findSurfacePresentQueueFamilyKHR(null, 1, 2));
+}
+
+test "findPresentQueueFamilyKHR uses native platform queries" {
+    var wayland_dispatch: Instance.Dispatch = undefined;
+    wayland_dispatch.get_physical_device_wayland_presentation_support_khr = VulkanTestStubs.waylandPresentationSupport;
+    const wayland_instance = Instance{
+        .handle = null,
+        .get_instance_proc_addr = undefined,
+        .dispatch = wayland_dispatch,
+    };
+    try std.testing.expectEqual(@as(?u32, 2), try wayland_instance.findPresentQueueFamilyKHR(
+        null,
+        .{ .wayland = @ptrFromInt(0x1234) },
+        4,
+    ));
+
+    var win32_dispatch: Instance.Dispatch = undefined;
+    win32_dispatch.get_physical_device_win32_presentation_support_khr = VulkanTestStubs.win32PresentationSupport;
+    const win32_instance = Instance{
+        .handle = null,
+        .get_instance_proc_addr = undefined,
+        .dispatch = win32_dispatch,
+    };
+    try std.testing.expectEqual(@as(?u32, 2), try win32_instance.findPresentQueueFamilyKHR(
+        null,
+        .{ .win32 = {} },
+        4,
+    ));
+
+    var xlib_dispatch: Instance.Dispatch = undefined;
+    xlib_dispatch.get_physical_device_xlib_presentation_support_khr = VulkanTestStubs.xlibPresentationSupport;
+    const xlib_instance = Instance{
+        .handle = null,
+        .get_instance_proc_addr = undefined,
+        .dispatch = xlib_dispatch,
+    };
+    try std.testing.expectEqual(@as(?u32, 2), try xlib_instance.findPresentQueueFamilyKHR(
+        null,
+        .{ .xlib = .{ .display = @ptrFromInt(0x5678), .visual_id = 42 } },
+        4,
+    ));
 }
 
 test "beginCommandBufferWithInfo accepts secondary inheritance" {

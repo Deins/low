@@ -10,13 +10,15 @@ const recording_submit = @import("recording_submit.zig");
 const build_options = @import("build_options");
 const log = std.log.scoped(.low);
 const Video = if (build_options.vk_video) @import("video.zig") else struct {
-    pub const SelectedVideoFormat = opaque {};
+    pub const RecordingRequest = enum { off };
+    pub const SelectedVideoFormat = struct {};
     pub const VideoDevice = opaque {};
     pub const VideoRecorder = struct {};
     pub const RecordingOptions = void;
     pub const RecordingStatus = void;
 };
 const Window = runtime.Window;
+const swapchain_extension: [*:0]const u8 = "VK_KHR_swapchain";
 
 pub const RecordingRateLimit = recording_submit.RateLimit;
 pub const RecordingFrameOptions = recording_submit.RecordingOptions;
@@ -37,9 +39,76 @@ pub const default_color_formats: []const vk.Format = &.{
 pub fn DeviceSelection(comptime Vk: type) type {
     return struct {
         physical_device: Vk.PhysicalDevice,
+        requirements: DeviceRequirements(Vk),
         graphics_queue_family: u32,
+        present_queue_family: ?u32 = null,
+        transfer_queue_family: ?u32 = null,
+        compute_queue_family: ?u32 = null,
         encode_queue_family: ?u32 = null,
         selected_video_format: ?Video.SelectedVideoFormat = null,
+    };
+}
+
+/// How an optional queue family must relate to the graphics family.
+///
+/// Every value other than `.none` is required: a device without a matching
+/// family is skipped. `.separate` permits a transfer and compute queue to
+/// share a family with each other, but never with graphics. For transfer
+/// queues, `.dedicated` additionally excludes compute capability. A dedicated
+/// compute queue only needs to exclude graphics; transfer capability is
+/// commonly implicit or also advertised for compute families.
+pub const QueuePreference = enum {
+    none,
+    any,
+    separate,
+    dedicated,
+};
+
+/// Vulkan capabilities that must be both available on a physical device and
+/// enabled while creating its logical device.
+///
+/// `extra_features` is the head of a caller-owned extension-feature pNext
+/// chain. Use `extra_feature_support` to query and validate that chain during
+/// selection. This keeps the API binding-aware without constraining callers to
+/// a particular generated Vulkan binding or to a fixed extension list.
+pub fn DeviceRequirements(comptime Vk: type) type {
+    return struct {
+        /// Null keeps the render-target helper's Vulkan 1.3 baseline.
+        required_api_version: ?Vk.Version = null,
+        required_extensions: []const [*:0]const u8 = &.{},
+        required_features: Vk.PhysicalDeviceFeatures = .{},
+        required_features_11: ?Vk.PhysicalDeviceVulkan11Features = null,
+        required_features_12: ?Vk.PhysicalDeviceVulkan12Features = null,
+        required_features_13: ?Vk.PhysicalDeviceVulkan13Features = .{
+            .synchronization_2 = .true,
+            .dynamic_rendering = .true,
+        },
+        /// Extra, extension-defined feature structs to enable at device
+        /// creation. The caller owns their storage until `createDevice`
+        /// returns.
+        extra_features: ?*anyopaque = null,
+        /// Validates `extra_features` for a candidate. It may query any
+        /// binding-specific pNext chain through `instance`.
+        extra_feature_support: ?*const fn (Vk.InstanceProxy, Vk.PhysicalDevice) anyerror!bool = null,
+    };
+}
+
+/// Complete physical-device selection policy.
+///
+/// Queue policies deliberately mirror the useful distinction made by Vulkan
+/// bootstrap libraries while returning only native handles and family indices.
+/// That lets an application retain its own device/ownership model when needed.
+pub fn DeviceSelectionSettings(comptime Vk: type) type {
+    return struct {
+        /// Native platform data used to require a present-capable queue
+        /// without creating a window or Vulkan surface first. Requesting
+        /// presentation also enables and checks `VK_KHR_swapchain`
+        /// automatically.
+        presentation: ?Vulkan.PresentationSupport = null,
+        requirements: DeviceRequirements(Vk) = .{},
+        transfer_queue: QueuePreference = .none,
+        compute_queue: QueuePreference = .none,
+        recording: Video.RecordingRequest = .off,
     };
 }
 
@@ -101,6 +170,9 @@ pub fn DeviceResources(comptime Vk: type) type {
         device: Vk.DeviceProxy,
         low_device: Vulkan.Device,
         graphics_queue: Vk.Queue,
+        present_queue: Vk.Queue,
+        transfer_queue: Vk.Queue,
+        compute_queue: Vk.Queue,
         encode_queue: Vk.Queue,
 
         pub fn deinit(self: *Self) void {
@@ -112,48 +184,88 @@ pub fn DeviceResources(comptime Vk: type) type {
 }
 
 /// Creates a logical device for a previous `findDevice` result.
+///
+/// The selection's requirements are enabled here. Core and Vulkan-versioned
+/// feature structs are chained ahead of `extra_features`; command pools remain
+/// deliberately application owned.
 pub fn createDevice(
     comptime Vk: type,
     allocator: std.mem.Allocator,
     instance: anytype,
     low_instance: *const Vulkan.Instance,
     selection: DeviceSelection(Vk),
-    features: anytype,
-    extensions: []const [*:0]const u8,
 ) !DeviceResources(Vk) {
     const queue_priority = [_]f32{1.0};
-    var queue_infos: [2]Vk.DeviceQueueCreateInfo = undefined;
-    queue_infos[0] = .{
-        .queue_family_index = selection.graphics_queue_family,
+    var queue_families: std.ArrayListUnmanaged(u32) = .empty;
+    defer queue_families.deinit(allocator);
+    try appendQueueFamily(&queue_families, allocator, selection.graphics_queue_family);
+    if (selection.present_queue_family) |family| try appendQueueFamily(&queue_families, allocator, family);
+    if (selection.transfer_queue_family) |family| try appendQueueFamily(&queue_families, allocator, family);
+    if (selection.compute_queue_family) |family| try appendQueueFamily(&queue_families, allocator, family);
+    if (selection.encode_queue_family) |family| try appendQueueFamily(&queue_families, allocator, family);
+
+    const queue_infos = try allocator.alloc(Vk.DeviceQueueCreateInfo, queue_families.items.len);
+    defer allocator.free(queue_infos);
+    for (queue_families.items, 0..) |family, index| queue_infos[index] = .{
+        .queue_family_index = family,
         .queue_count = 1,
         .p_queue_priorities = &queue_priority,
     };
-    var queue_info_count: u32 = 1;
+
+    var extensions: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+    defer extensions.deinit(allocator);
+    for (selection.requirements.required_extensions) |extension| try appendExtension(&extensions, allocator, extension);
+    if (selection.present_queue_family != null) try appendExtension(&extensions, allocator, swapchain_extension);
     if (build_options.vk_video) {
         if (selection.selected_video_format) |selected| {
-            var requirements = try selected.deviceRequirements(.{
-                .allocator = allocator,
-                .graphics_queue_family = selection.graphics_queue_family,
-                .queue_priority = 1.0,
-            });
-            defer requirements.deinit();
-            queue_info_count = @intCast(requirements.queue_create_infos.len);
-            for (requirements.queue_create_infos, 0..) |requirement, index| {
-                queue_infos[index] = .{
-                    .queue_family_index = requirement.queue_family_index,
-                    .queue_count = 1,
-                    .p_queue_priorities = &queue_priority,
-                };
+            for (selected.deviceExtensions()) |extension| {
+                try appendExtension(&extensions, allocator, extension);
             }
         }
     }
 
+    var features_11: Vk.PhysicalDeviceVulkan11Features = undefined;
+    var features_12: Vk.PhysicalDeviceVulkan12Features = undefined;
+    var features_13: Vk.PhysicalDeviceVulkan13Features = undefined;
+    var feature_next = selection.requirements.extra_features;
+    var av1_features: if (build_options.vk_video) Vk.PhysicalDeviceVideoEncodeAV1FeaturesKHR else void = undefined;
+    if (comptime build_options.vk_video) {
+        if (selection.selected_video_format) |selected| {
+            if (selected.codec() == .av1) {
+                // selectVideoFormat already queried this feature while proving
+                // that the selected AV1 format is usable. Preserve the caller's
+                // extra feature chain behind the codec feature we must enable.
+                av1_features = .{
+                    .p_next = feature_next,
+                    .video_encode_av1 = .true,
+                };
+                feature_next = @ptrCast(&av1_features);
+            }
+        }
+    }
+    if (selection.requirements.required_features_13) |required| {
+        features_13 = required;
+        features_13.p_next = feature_next;
+        feature_next = @ptrCast(&features_13);
+    }
+    if (selection.requirements.required_features_12) |required| {
+        features_12 = required;
+        features_12.p_next = feature_next;
+        feature_next = @ptrCast(&features_12);
+    }
+    if (selection.requirements.required_features_11) |required| {
+        features_11 = required;
+        features_11.p_next = feature_next;
+        feature_next = @ptrCast(&features_11);
+    }
+
     const device_info = Vk.DeviceCreateInfo{
-        .p_next = @ptrCast(features),
-        .queue_create_info_count = queue_info_count,
-        .p_queue_create_infos = &queue_infos,
-        .enabled_extension_count = @intCast(extensions.len),
-        .pp_enabled_extension_names = extensions.ptr,
+        .p_next = feature_next,
+        .queue_create_info_count = @intCast(queue_infos.len),
+        .p_queue_create_infos = queue_infos.ptr,
+        .enabled_extension_count = @intCast(extensions.items.len),
+        .pp_enabled_extension_names = extensions.items.ptr,
+        .p_enabled_features = &selection.requirements.required_features,
     };
     const handle = try instance.createDevice(selection.physical_device, &device_info, null);
     const wrapper = try allocator.create(Vk.DeviceWrapper);
@@ -168,13 +280,16 @@ pub fn createDevice(
         .device = device,
         .low_device = low_device,
         .graphics_queue = device.getDeviceQueue(selection.graphics_queue_family, 0),
+        .present_queue = device.getDeviceQueue(selection.present_queue_family orelse selection.graphics_queue_family, 0),
+        .transfer_queue = device.getDeviceQueue(selection.transfer_queue_family orelse selection.graphics_queue_family, 0),
+        .compute_queue = device.getDeviceQueue(selection.compute_queue_family orelse selection.graphics_queue_family, 0),
         .encode_queue = device.getDeviceQueue(selection.encode_queue_family orelse selection.graphics_queue_family, 0),
     };
 }
 
-/// Selects a Vulkan 1.3 physical device with a graphics queue and, when a
-/// surface is supplied, presentation support. If video recording is enabled,
-/// the first device supporting the requested codec policy is selected too.
+/// Selects a physical device that satisfies all requested features,
+/// extensions, and queue-family policies. Presentation, graphics, compute,
+/// transfer, and video encode queues are selected independently.
 ///
 /// The generated Vulkan binding is passed as `Vk` so the returned handles and
 /// structures remain native to the application's binding.
@@ -183,58 +298,196 @@ pub fn findDevice(
     allocator: std.mem.Allocator,
     instance: anytype,
     low_instance: *const Vulkan.Instance,
-    presentation_surface: ?vk.SurfaceKHR,
-    recording: anytype,
+    settings: DeviceSelectionSettings(Vk),
 ) !DeviceSelection(Vk) {
     const physical_devices = try instance.enumeratePhysicalDevicesAlloc(allocator);
     defer allocator.free(physical_devices);
 
+    var required_extensions: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+    defer required_extensions.deinit(allocator);
+    for (settings.requirements.required_extensions) |extension| try appendExtension(&required_extensions, allocator, extension);
+    if (settings.presentation != null) try appendExtension(&required_extensions, allocator, swapchain_extension);
+
     for (physical_devices) |physical_device| {
         const version: Vk.Version = @bitCast(instance.getPhysicalDeviceProperties(physical_device).api_version);
-        if (version.major < 1 or (version.major == 1 and version.minor < 3)) continue;
+        if (!meetsVersion(version, settings.requirements.required_api_version)) continue;
 
-        var features_13 = Vk.PhysicalDeviceVulkan13Features{};
-        var features_2 = Vk.PhysicalDeviceFeatures2{ .p_next = @ptrCast(&features_13), .features = .{} };
+        var available_features_11: Vk.PhysicalDeviceVulkan11Features = .{};
+        var available_features_12: Vk.PhysicalDeviceVulkan12Features = .{};
+        var available_features_13: Vk.PhysicalDeviceVulkan13Features = .{};
+        var feature_next: ?*anyopaque = null;
+        if (settings.requirements.required_features_13 != null) {
+            available_features_13.p_next = feature_next;
+            feature_next = @ptrCast(&available_features_13);
+        }
+        if (settings.requirements.required_features_12 != null) {
+            available_features_12.p_next = feature_next;
+            feature_next = @ptrCast(&available_features_12);
+        }
+        if (settings.requirements.required_features_11 != null) {
+            available_features_11.p_next = feature_next;
+            feature_next = @ptrCast(&available_features_11);
+        }
+        var features_2 = Vk.PhysicalDeviceFeatures2{ .p_next = feature_next, .features = .{} };
         instance.getPhysicalDeviceFeatures2(physical_device, &features_2);
-        if (features_13.synchronization_2 != .true or features_13.dynamic_rendering != .true) continue;
+        if (!featuresSupported(Vk.PhysicalDeviceFeatures, settings.requirements.required_features, features_2.features)) continue;
+        if (settings.requirements.required_features_11) |required| {
+            if (!featuresSupported(Vk.PhysicalDeviceVulkan11Features, required, available_features_11)) continue;
+        }
+        if (settings.requirements.required_features_12) |required| {
+            if (!featuresSupported(Vk.PhysicalDeviceVulkan12Features, required, available_features_12)) continue;
+        }
+        if (settings.requirements.required_features_13) |required| {
+            if (!featuresSupported(Vk.PhysicalDeviceVulkan13Features, required, available_features_13)) continue;
+        }
+        if (!try hasRequiredExtensions(Vk, allocator, instance, physical_device, required_extensions.items)) continue;
+        if (settings.requirements.extra_feature_support) |validate| {
+            if (!try validate(instance, physical_device)) continue;
+        }
 
         const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, allocator);
         defer allocator.free(families);
 
-        var graphics_queue_family: ?u32 = null;
-        for (families, 0..) |family, index| {
-            if (!family.queue_flags.graphics_bit) continue;
-            if (presentation_surface) |surface| {
-                if (try low_instance.getPhysicalDeviceSurfaceSupportKHR(
-                    Vulkan.toPhysicalDevice(physical_device),
-                    @intCast(index),
-                    surface,
-                ) != vk.TRUE) continue;
-            }
-            graphics_queue_family = @intCast(index);
-            break;
-        }
+        const graphics_queue_family = findQueueFamily(families, .graphics_bit, .any, null);
         const graphics_family = graphics_queue_family orelse continue;
+
+        const present_family = if (settings.presentation) |presentation|
+            try low_instance.findPresentQueueFamilyKHR(Vulkan.toPhysicalDevice(physical_device), presentation, @intCast(families.len)) orelse continue
+        else
+            null;
+        const transfer_family = findQueueFamily(families, .transfer_bit, settings.transfer_queue, graphics_family) orelse switch (settings.transfer_queue) {
+            .none => null,
+            else => continue,
+        };
+        const compute_family = findQueueFamily(families, .compute_bit, settings.compute_queue, graphics_family) orelse switch (settings.compute_queue) {
+            .none => null,
+            else => continue,
+        };
 
         var selection = DeviceSelection(Vk){
             .physical_device = physical_device,
+            .requirements = settings.requirements,
             .graphics_queue_family = graphics_family,
+            .present_queue_family = present_family,
+            .transfer_queue_family = transfer_family,
+            .compute_queue_family = compute_family,
         };
         if (build_options.vk_video) {
-            if (recording.enabled()) {
+            if (settings.recording.enabled()) {
                 const selected = try Video.selectVideoFormat(.{
                     .instance = low_instance,
                     .physical_device = Vulkan.toPhysicalDevice(physical_device),
                     .extent = .{ .width = 640, .height = 480 },
                     .allocator = allocator,
-                }, recording) orelse continue;
+                }, settings.recording) orelse continue;
                 selection.encode_queue_family = selected.encodeQueueFamily();
                 selection.selected_video_format = selected;
             }
         }
         return selection;
     }
-    return error.NoVulkan13PresentDevice;
+    return error.NoCompatibleVulkanDevice;
+}
+
+fn meetsVersion(available: anytype, required: ?@TypeOf(available)) bool {
+    if (required) |minimum| {
+        return @as(u32, @bitCast(available)) >= @as(u32, @bitCast(minimum));
+    }
+    return available.major > 1 or (available.major == 1 and available.minor >= 3);
+}
+
+fn featuresSupported(comptime Features: type, required: Features, available: Features) bool {
+    inline for (@typeInfo(Features).@"struct".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "s_type") or std.mem.eql(u8, field.name, "p_next")) continue;
+        if (@field(required, field.name) == .true and @field(available, field.name) != .true) return false;
+    }
+    return true;
+}
+
+fn hasRequiredExtensions(
+    comptime Vk: type,
+    allocator: std.mem.Allocator,
+    instance: anytype,
+    physical_device: Vk.PhysicalDevice,
+    required_extensions: []const [*:0]const u8,
+) !bool {
+    if (required_extensions.len == 0) return true;
+    const available = try instance.enumerateDeviceExtensionPropertiesAlloc(physical_device, null, allocator);
+    defer allocator.free(available);
+    for (required_extensions) |required| {
+        for (available) |extension| {
+            if (std.mem.eql(u8, std.mem.span(required), std.mem.sliceTo(&extension.extension_name, 0))) break;
+        } else return false;
+    }
+    return true;
+}
+
+fn findQueueFamily(families: anytype, comptime wanted: anytype, preference: QueuePreference, graphics_family: ?u32) ?u32 {
+    if (preference == .none) return null;
+    var separate_fallback: ?u32 = null;
+    for (families, 0..) |family, index| {
+        if (family.queue_count == 0 or !@field(family.queue_flags, @tagName(wanted))) continue;
+        const family_index: u32 = @intCast(index);
+        switch (preference) {
+            .none => unreachable,
+            .any => return family_index,
+            .separate, .dedicated => {
+                if (graphics_family != null and family_index == graphics_family.?) continue;
+                if (comptime std.mem.eql(u8, @tagName(wanted), "compute_bit")) return family_index;
+                if (!family.queue_flags.compute_bit) return family_index;
+                if (preference == .separate and separate_fallback == null) separate_fallback = family_index;
+            },
+        }
+    }
+    return separate_fallback;
+}
+
+fn appendQueueFamily(list: *std.ArrayListUnmanaged(u32), allocator: std.mem.Allocator, family: u32) !void {
+    for (list.items) |existing| if (existing == family) return;
+    try list.append(allocator, family);
+}
+
+fn appendExtension(list: *std.ArrayListUnmanaged([*:0]const u8), allocator: std.mem.Allocator, extension: [*:0]const u8) !void {
+    for (list.items) |existing| if (std.mem.eql(u8, std.mem.span(existing), std.mem.span(extension))) return;
+    try list.append(allocator, extension);
+}
+
+test "device requirements check requested feature bits" {
+    const Bool32 = enum(u32) { false, true };
+    const Features = struct {
+        s_type: u32 = 0,
+        p_next: ?*anyopaque = null,
+        alpha: Bool32 = .false,
+        beta: Bool32 = .false,
+    };
+    try std.testing.expect(featuresSupported(Features, .{ .alpha = .true }, .{ .alpha = .true }));
+    try std.testing.expect(featuresSupported(Features, .{ .alpha = .true }, .{ .alpha = .true, .beta = .true }));
+    try std.testing.expect(!featuresSupported(Features, .{ .alpha = .true }, .{}));
+}
+
+test "queue preferences distinguish shared and dedicated families" {
+    const Flag = enum { graphics_bit, transfer_bit, compute_bit };
+    const Flags = struct {
+        graphics_bit: bool = false,
+        transfer_bit: bool = false,
+        compute_bit: bool = false,
+    };
+    const Family = struct {
+        queue_count: u32 = 1,
+        queue_flags: Flags,
+    };
+    const families = [_]Family{
+        .{ .queue_flags = .{ .graphics_bit = true, .transfer_bit = true, .compute_bit = true } },
+        .{ .queue_flags = .{ .transfer_bit = true, .compute_bit = true } },
+        .{ .queue_flags = .{ .transfer_bit = true } },
+        .{ .queue_flags = .{ .transfer_bit = true, .compute_bit = true } },
+    };
+    try std.testing.expectEqual(@as(?u32, 0), findQueueFamily(&families, Flag.transfer_bit, .any, 0));
+    try std.testing.expectEqual(@as(?u32, 2), findQueueFamily(&families, Flag.transfer_bit, .separate, 0));
+    try std.testing.expectEqual(@as(?u32, 2), findQueueFamily(&families, Flag.transfer_bit, .dedicated, 0));
+    try std.testing.expectEqual(@as(?u32, 1), findQueueFamily(&families, Flag.compute_bit, .separate, 0));
+    try std.testing.expectEqual(@as(?u32, 1), findQueueFamily(&families, Flag.compute_bit, .dedicated, 0));
+    try std.testing.expectEqual(@as(?u32, null), findQueueFamily(families[0..1], Flag.compute_bit, .separate, 0));
 }
 
 /// Presentation preferences used by the three standard vsync policies.
@@ -380,11 +633,13 @@ pub const RenderTarget = struct {
         window: *Window,
         context: *const RenderContext,
         /// An existing surface owned by the caller. When omitted, the target
-        /// creates and owns a surface from the low window handles.
+        /// uses the window-owned surface when available, otherwise it creates
+        /// and owns a surface from the low window handles.
         surface: ?vk.SurfaceKHR = null,
         /// An already-created low surface whose ownership moves to this
-        /// target. This supports device selection before target creation
-        /// without leaving surface lifetime management to the application.
+        /// target when `init` is called, including when initialization fails.
+        /// This supports device selection before target creation without
+        /// leaving surface lifetime management to the application.
         presentation_surface: ?Vulkan.PresentationSurface = null,
         /// Render-target formats in preference order. The first format
         /// supported by the surface or offscreen device is selected.
@@ -516,6 +771,8 @@ pub const RenderTarget = struct {
     recording_extent_fn: *const fn (*anyopaque, *anyopaque) void,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !Self {
+        var transferred_surface = options.presentation_surface;
+        errdefer if (transferred_surface) |*surface| surface.deinit();
         if (options.frames_in_flight == 0) return error.InvalidFramesInFlight;
 
         const State = struct {
@@ -1145,9 +1402,13 @@ pub const RenderTarget = struct {
             }
         };
 
+        const window_surface = options.window.vulkanSurface();
+        if ((options.surface != null and transferred_surface != null) or
+            (window_surface != null and (options.surface != null or transferred_surface != null)))
+            return error.ConflictingSurfaceOwnership;
         const backend_kind = options.window.ctx.backendKind();
-        if (options.surface != null and options.presentation_surface != null) unreachable;
-        if (backend_kind == .offscreen and options.presentation_surface != null) unreachable;
+        if (backend_kind == .offscreen and (options.surface != null or transferred_surface != null))
+            return error.PresentationSurfaceUnsupported;
 
         const state = try allocator.create(State);
         const present_queue = options.context.present_queue orelse PresentQueue{
@@ -1172,7 +1433,10 @@ pub const RenderTarget = struct {
             .memory_allocator = options.memory_allocator,
             .frames_in_flight = options.frames_in_flight,
             .video_device = if (comptime build_options.vk_video) options.context.video_device else null,
+            .surface = if (transferred_surface) |surface| surface.handle else 0,
+            .owned_surface = transferred_surface,
         };
+        transferred_surface = null;
         errdefer State.deinitOpaque(@ptrCast(state));
         state.color_formats = try allocator.dupe(vk.Format, options.color_formats);
         if (backend_kind != .offscreen) {
@@ -1191,12 +1455,11 @@ pub const RenderTarget = struct {
 
         state.memory_properties = state.instance.getPhysicalDeviceMemoryProperties(state.physical_device);
         if (backend_kind != .offscreen) {
-            if (options.presentation_surface) |surface| {
-                state.owned_surface = surface;
-                state.surface = surface.handle;
+            if (window_surface) |surface| {
+                state.surface = surface;
             } else if (options.surface) |surface| {
                 state.surface = surface;
-            } else {
+            } else if (state.owned_surface == null) {
                 state.owned_surface = try Vulkan.PresentationSurface.init(
                     state.instance,
                     options.window.ctx.backendKind(),

@@ -33,6 +33,21 @@ pub const Context = struct {
         return self.state.get().requiredVulkanInstanceExtensions();
     }
 
+    /// Returns the native context data used to select a Vulkan queue with
+    /// presentation support before creating a window or surface. Offscreen
+    /// contexts do not require presentation support and return null.
+    pub fn vulkanPresentationSupport(self: *const @This()) ?Vulkan.PresentationSupport {
+        return switch (self.backendKind()) {
+            .wayland => .{ .wayland = self.nativeDisplay() },
+            .x11 => .{ .xlib = .{
+                .display = self.nativeDisplay(),
+                .visual_id = @intCast(self.state.get().vulkanVisualId()),
+            } },
+            .windows => .{ .win32 = {} },
+            .offscreen => null,
+        };
+    }
+
     /// Creates a Vulkan presentation surface for a low window.
     ///
     /// The Vulkan instance must already have been created with
@@ -45,8 +60,9 @@ pub const Context = struct {
     /// Creates an owned Vulkan presentation surface for a low window.
     ///
     /// The returned surface may be borrowed by `vulkan.targets().RenderTarget`
-    /// through `RenderTarget.Options.surface`. Destroy the render target before
-    /// calling `PresentationSurface.deinit`.
+    /// through `RenderTarget.Options.surface`; destroy the target before calling
+    /// `PresentationSurface.deinit`. Alternatively, pass the value through
+    /// `RenderTarget.Options.presentation_surface` to transfer ownership.
     pub fn createVulkanPresentationSurface(self: *const @This(), instance: *const Vulkan.Instance, window: *Window) !Vulkan.PresentationSurface {
         return Vulkan.PresentationSurface.init(instance, self.backendKind(), self.nativeDisplay(), window.nativeSurface());
     }
@@ -56,7 +72,24 @@ pub const Context = struct {
     }
 
     pub fn createWindow(self: *const @This(), options: WindowOptions) Error!*Window {
-        return self.state.get().createWindow(options);
+        const window = try self.state.get().createWindow(options.runtimeOptions());
+        errdefer window.deinit();
+        if (options.vulkan) |vulkan_options| {
+            if (self.backendKind() != .offscreen) {
+                const surface = Vulkan.createSurface(
+                    vulkan_options,
+                    self.backendKind(),
+                    self.nativeDisplay(),
+                    window.nativeSurface(),
+                ) catch return error.PresentationSurfaceCreationFailed;
+                window.vulkan_surface = .{
+                    .handle = surface,
+                    .context = vulkan_options,
+                    .destroy_fn = destroyWindowVulkanSurface,
+                };
+            }
+        }
+        return window;
     }
 
     pub fn pollEvents(self: *const @This()) void {
@@ -110,12 +143,50 @@ pub const Context = struct {
         return self.state.get().preferredColorScheme();
     }
 };
+
+fn destroyWindowVulkanSurface(context: *const anyopaque, surface: u64) void {
+    const instance: *const Vulkan.Instance = @ptrCast(@alignCast(context));
+    instance.destroySurfaceKHR(surface);
+}
+
 pub const Window = platform.Window;
 pub const Error = runtime.Error;
 pub const WindowCallbacks = runtime.WindowCallbacks;
 
 pub const InitOptions = types.InitOptions;
-pub const WindowOptions = types.WindowOptions;
+/// Native window configuration. Supplying `.vulkan` creates a window-owned
+/// presentation surface automatically on desktop backends.
+pub const WindowOptions = struct {
+    title: [:0]const u8,
+    size: ContentSize = .{ .width = 1280, .height = 720 },
+    app_id: ?[:0]const u8 = null,
+    resizable: bool = true,
+    decorated: bool = true,
+    titlebar: DecorationMode = .auto,
+    state: WindowState = .normal,
+    visible: bool = true,
+    min_size: ?ContentSize = null,
+    max_size: ?ContentSize = null,
+    /// The Vulkan instance used to create a window-owned presentation surface.
+    /// The instance must outlive the window and must enable the extensions
+    /// returned by `Context.requiredVulkanInstanceExtensions()`.
+    vulkan: ?*const Vulkan.Instance = null,
+
+    fn runtimeOptions(self: @This()) types.WindowOptions {
+        return .{
+            .title = self.title,
+            .size = self.size,
+            .app_id = self.app_id,
+            .resizable = self.resizable,
+            .decorated = self.decorated,
+            .titlebar = self.titlebar,
+            .state = self.state,
+            .visible = self.visible,
+            .min_size = self.min_size,
+            .max_size = self.max_size,
+        };
+    }
+};
 pub const BackendRequest = types.BackendRequest;
 pub const BackendKind = types.BackendKind;
 pub const Environment = types.Environment;
@@ -157,15 +228,22 @@ test "root API exposes the supported contract" {
     _ = Context.init;
     _ = Context.waitForRender;
     _ = Context.waitForAnyRender;
+    _ = Context.vulkanPresentationSupport;
     _ = Context.createVulkanSurface;
     _ = Context.createVulkanPresentationSurface;
     _ = Window.requestFrame;
     _ = Window.cancelFrameRequest;
+    _ = Window.toggleFullscreen;
+    _ = Window.vulkanSurface;
+    _ = Window.setMouseCaptured;
+    _ = Window.isMouseCaptured;
+    _ = Window.isCursorVisible;
     _ = Window.deinit;
     _ = Error;
     _ = InitOptions{};
+    _ = InitOptions{ .backend = .{ .offscreen = .{} } };
     _ = WindowOptions;
-    _ = BackendRequest.auto;
+    _ = BackendRequest{ .auto = {} };
     _ = BackendKind.offscreen;
     _ = Environment{};
     _ = detectBackend;
@@ -190,6 +268,7 @@ test "root API exposes the supported contract" {
     _ = CursorShape.arrow;
     _ = Key.unknown;
     _ = vulkan;
+    _ = vulkan.PresentationSupport;
     try @import("std").testing.expect(@hasDecl(@This(), "Error"));
     try @import("std").testing.expect(@hasDecl(@This(), "WindowCallbacks"));
     try @import("std").testing.expect(!@hasField(WindowCallbacks, "close"));
@@ -198,7 +277,8 @@ test "root API exposes the supported contract" {
     try @import("std").testing.expect(!@hasField(WindowCallbacks, "scale"));
     try @import("std").testing.expect(!@hasField(WindowCallbacks, "focus"));
     try @import("std").testing.expect(!@hasField(WindowCallbacks, "cursor_enter"));
-    try @import("std").testing.expect(!@hasField(WindowCallbacks, "cursor_motion"));
+    try @import("std").testing.expect(@hasField(WindowCallbacks, "cursor_motion"));
+    try @import("std").testing.expect(@hasField(WindowCallbacks, "cursor_delta"));
     try @import("std").testing.expect(!@hasField(WindowCallbacks, "render_suspended"));
     try @import("std").testing.expect(!@hasField(WindowCallbacks, "frame"));
     try @import("std").testing.expect(!@hasDecl(@This(), "State"));

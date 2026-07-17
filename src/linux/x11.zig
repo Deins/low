@@ -8,6 +8,8 @@ const std = @import("std");
 pub const Error = error{ LibraryNotFound, MissingSymbol };
 
 pub const Display = opaque {};
+pub const Visual = opaque {};
+pub const VisualID = c_ulong;
 pub const XID = c_ulong;
 pub const Window = XID;
 pub const Drawable = XID;
@@ -234,6 +236,9 @@ pub const SubstructureNotifyMask: c_long = 1 << 19;
 pub const SubstructureRedirectMask: c_long = 1 << 20;
 pub const FocusChangeMask: c_long = 1 << 21;
 pub const PropertyChangeMask: c_long = 1 << 22;
+pub const CurrentTime: c_ulong = 0;
+pub const GrabModeAsync: c_int = 1;
+pub const GrabSuccess: c_int = 0;
 
 pub const ShiftMask: c_uint = 1 << 0;
 pub const LockMask: c_uint = 1 << 1;
@@ -280,6 +285,8 @@ pub const XC_xterm: c_uint = 152;
 const XOpenDisplayFn = *const fn (?[*:0]const u8) callconv(.c) ?*Display;
 const XCloseDisplayFn = *const fn (*Display) callconv(.c) c_int;
 const XDefaultScreenFn = *const fn (*Display) callconv(.c) c_int;
+const XDefaultVisualFn = *const fn (*Display, c_int) callconv(.c) *Visual;
+const XVisualIDFromVisualFn = *const fn (*Visual) callconv(.c) VisualID;
 const XRootWindowFn = *const fn (*Display, c_int) callconv(.c) Window;
 const XConnectionNumberFn = *const fn (*Display) callconv(.c) c_int;
 const XInternAtomFn = *const fn (*Display, [*:0]const u8, c_int) callconv(.c) Atom;
@@ -305,12 +312,17 @@ const XStoreNameFn = *const fn (*Display, Window, [*:0]const u8) callconv(.c) c_
 const XSendEventFn = *const fn (*Display, Window, c_int, c_long, *XEvent) callconv(.c) c_int;
 const XIconifyWindowFn = *const fn (*Display, Window, c_int) callconv(.c) c_int;
 const XFreeCursorFn = *const fn (*Display, Cursor) callconv(.c) c_int;
+const XGrabPointerFn = *const fn (*Display, Window, c_int, c_uint, c_int, c_int, Window, Cursor, c_ulong) callconv(.c) c_int;
+const XUngrabPointerFn = *const fn (*Display, c_ulong) callconv(.c) c_int;
+const XWarpPointerFn = *const fn (*Display, Window, Window, c_int, c_int, c_uint, c_uint, c_int, c_int) callconv(.c) c_int;
 const XkbSetDetectableAutoRepeatFn = *const fn (*Display, c_int, ?*c_int) callconv(.c) c_int;
 
 const Api = struct {
     open_display: XOpenDisplayFn,
     close_display: XCloseDisplayFn,
     default_screen: XDefaultScreenFn,
+    default_visual: XDefaultVisualFn,
+    visual_id_from_visual: XVisualIDFromVisualFn,
     root_window: XRootWindowFn,
     connection_number: XConnectionNumberFn,
     intern_atom: XInternAtomFn,
@@ -336,6 +348,9 @@ const Api = struct {
     send_event: XSendEventFn,
     iconify_window: XIconifyWindowFn,
     free_cursor: XFreeCursorFn,
+    grab_pointer: XGrabPointerFn,
+    ungrab_pointer: XUngrabPointerFn,
+    warp_pointer: XWarpPointerFn,
     set_detectable_auto_repeat: XkbSetDetectableAutoRepeatFn,
 };
 
@@ -360,6 +375,8 @@ pub fn ensureLoaded() Error!void {
         .open_display = loaded_library.lookup(XOpenDisplayFn, "XOpenDisplay") orelse return error.MissingSymbol,
         .close_display = loaded_library.lookup(XCloseDisplayFn, "XCloseDisplay") orelse return error.MissingSymbol,
         .default_screen = loaded_library.lookup(XDefaultScreenFn, "XDefaultScreen") orelse return error.MissingSymbol,
+        .default_visual = loaded_library.lookup(XDefaultVisualFn, "XDefaultVisual") orelse return error.MissingSymbol,
+        .visual_id_from_visual = loaded_library.lookup(XVisualIDFromVisualFn, "XVisualIDFromVisual") orelse return error.MissingSymbol,
         .root_window = loaded_library.lookup(XRootWindowFn, "XRootWindow") orelse return error.MissingSymbol,
         .connection_number = loaded_library.lookup(XConnectionNumberFn, "XConnectionNumber") orelse return error.MissingSymbol,
         .intern_atom = loaded_library.lookup(XInternAtomFn, "XInternAtom") orelse return error.MissingSymbol,
@@ -385,6 +402,9 @@ pub fn ensureLoaded() Error!void {
         .send_event = loaded_library.lookup(XSendEventFn, "XSendEvent") orelse return error.MissingSymbol,
         .iconify_window = loaded_library.lookup(XIconifyWindowFn, "XIconifyWindow") orelse return error.MissingSymbol,
         .free_cursor = loaded_library.lookup(XFreeCursorFn, "XFreeCursor") orelse return error.MissingSymbol,
+        .grab_pointer = loaded_library.lookup(XGrabPointerFn, "XGrabPointer") orelse return error.MissingSymbol,
+        .ungrab_pointer = loaded_library.lookup(XUngrabPointerFn, "XUngrabPointer") orelse return error.MissingSymbol,
+        .warp_pointer = loaded_library.lookup(XWarpPointerFn, "XWarpPointer") orelse return error.MissingSymbol,
         .set_detectable_auto_repeat = loaded_library.lookup(XkbSetDetectableAutoRepeatFn, "XkbSetDetectableAutoRepeat") orelse return error.MissingSymbol,
     };
     library = loaded_library;
@@ -402,6 +422,12 @@ pub fn XCloseDisplay(display: *Display) c_int {
 }
 pub fn XDefaultScreen(display: *Display) c_int {
     return loaded().default_screen(display);
+}
+pub fn XDefaultVisual(display: *Display, screen: c_int) *Visual {
+    return loaded().default_visual(display, screen);
+}
+pub fn XVisualIDFromVisual(visual: *Visual) VisualID {
+    return loaded().visual_id_from_visual(visual);
 }
 pub fn XRootWindow(display: *Display, screen: c_int) Window {
     return loaded().root_window(display, screen);
@@ -477,6 +503,15 @@ pub fn XIconifyWindow(display: *Display, window: Window, screen: c_int) c_int {
 }
 pub fn XFreeCursor(display: *Display, cursor: Cursor) c_int {
     return loaded().free_cursor(display, cursor);
+}
+pub fn XGrabPointer(display: *Display, grab_window: Window, owner_events: c_int, event_mask: c_uint, pointer_mode: c_int, keyboard_mode: c_int, confine_to: Window, cursor: Cursor, time: c_ulong) c_int {
+    return loaded().grab_pointer(display, grab_window, owner_events, event_mask, pointer_mode, keyboard_mode, confine_to, cursor, time);
+}
+pub fn XUngrabPointer(display: *Display, time: c_ulong) c_int {
+    return loaded().ungrab_pointer(display, time);
+}
+pub fn XWarpPointer(display: *Display, source: Window, destination: Window, source_x: c_int, source_y: c_int, source_width: c_uint, source_height: c_uint, destination_x: c_int, destination_y: c_int) c_int {
+    return loaded().warp_pointer(display, source, destination, source_x, source_y, source_width, source_height, destination_x, destination_y);
 }
 pub fn XkbSetDetectableAutoRepeat(display: *Display, detectable: c_int, supported: ?*c_int) c_int {
     return loaded().set_detectable_auto_repeat(display, detectable, supported);

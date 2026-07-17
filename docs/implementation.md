@@ -6,11 +6,21 @@ the platform boundary. The supported application API is documented in the
 
 ## Backend selection and loading
 
-On Linux, `InitOptions.backend` accepts `.auto`, `.wayland`, `.x11`, or
-`.offscreen`. Automatic selection gives `XDG_SESSION_TYPE` precedence. When it
-is unset, `WAYLAND_DISPLAY` and `DISPLAY` are used. If both desktop sockets are
-available, automatic selection may try the other enabled backend after a
-library or connection failure; explicit backend requests remain strict.
+On Linux, `InitOptions.backend` is a tagged union accepting `.auto`, `.wayland`,
+`.x11`, or `.offscreen`. The offscreen variant carries its `OffscreenOptions`;
+the other variants currently have no backend-specific settings. Automatic
+selection gives `XDG_SESSION_TYPE` precedence. When it is unset,
+`WAYLAND_DISPLAY` and `DISPLAY` are used. If both desktop sockets are available,
+automatic selection may try the other enabled backend after a library or
+connection failure; explicit backend requests remain strict.
+
+```zig
+var context = try low.Context.init(allocator, .{
+    .backend = .{ .offscreen = .{
+        .frame_mode = .{ .continuous = .{ .interval_ns = 16_666_667 } },
+    } },
+});
+```
 
 The Linux desktop backends load their system libraries at runtime:
 
@@ -43,9 +53,24 @@ selection, queues, command pool, and rendering commands. Use
 targets. Set its optional `present_queue` when presentation uses a queue family
 different from graphics; the target configures concurrent
 swapchain sharing in that case. It can use any Vulkan binding alongside low's
-binding-agnostic ABI.
+binding-agnostic ABI. When `DeviceSelectionSettings.presentation` is set, the
+helper automatically checks and enables `VK_KHR_swapchain`; list it manually
+only when using a custom selection path.
 
-The normal per-window setup uses only the window and shared render context:
+Create Vulkan windows with the low instance after enabling the context's
+required instance extensions:
+
+```zig
+const window = try context.createWindow(.{
+    .title = "low Vulkan window",
+    .vulkan = &low_instance,
+});
+const surface = @enumFromInt(window.vulkanSurface().?);
+```
+
+The window owns this surface and destroys it before its native handle. The low
+Vulkan instance must outlive the window. A render target automatically borrows
+the window surface:
 
 ```zig
 var target = try RenderTarget.init(allocator, .{
@@ -55,12 +80,12 @@ var target = try RenderTarget.init(allocator, .{
 defer target.deinit();
 ```
 
-Onscreen targets create a surface from the low window handles by default. Set
-`RenderTarget.Options.surface` to supply an existing surface instead; the
-caller retains ownership and must destroy it after the target is deinitialized.
-When a surface must exist for device selection before the target is created,
-pass `Context.createVulkanPresentationSurface()` through
-`RenderTarget.Options.presentation_surface`; ownership transfers to the target.
+When `WindowOptions.vulkan` is omitted, onscreen targets create and own a surface
+from the low window handles as a fallback. Set `RenderTarget.Options.surface`
+to supply another existing surface instead; the caller retains ownership and
+must destroy it after the target is deinitialized. The advanced
+`presentation_surface` option still transfers an existing low surface to the
+target, but cannot be combined with a window-owned surface.
 
 `RenderTarget.Options.color_formats` is an ordered preference slice. WSI
 targets choose the first requested surface format, while offscreen targets
@@ -78,21 +103,64 @@ replaces it with a raw preference list for a later swapchain recreation. Screens
 readback is disabled by default; set `Options.readback` when it is needed. A
 configured Vulkan Video device enables the required transfer usage independently.
 
-`Context.createVulkanSurface()` is the raw-handle convenience for applications
-that need a surface before device or queue-family selection.
-`Context.createVulkanPresentationSurface()` adds ownership and a `deinit`
-method for that explicit pre-target workflow. `Instance.findPresentQueueFamilyKHR()`
-scans the surface support bits when an application chooses a separate present queue.
+`Context.createVulkanSurface()` and `createVulkanPresentationSurface()` remain
+advanced explicit helpers. Normal applications request the surface through
+`WindowOptions.vulkan`. Before creating a window,
+`Context.vulkanPresentationSupport()` supplies the backend-native descriptor
+used by `Instance.findPresentQueueFamilyKHR()`. The latter calls
+`vkGetPhysicalDeviceWaylandPresentationSupportKHR`,
+`vkGetPhysicalDeviceWin32PresentationSupportKHR`, or
+`vkGetPhysicalDeviceXlibPresentationSupportKHR` as appropriate. Xlib uses the
+context's default visual. This lets device and queue selection precede native
+window and Vulkan surface creation. A target still validates the selected queue
+against its actual surface with `vkGetPhysicalDeviceSurfaceSupportKHR`.
 `low.vulkan` also exposes handle conversion helpers for bridging generated
 Vulkan bindings to its ABI.
 
 For projects using a generated Vulkan binding, `targets()` also provides
 binding-aware bootstrap helpers. `createInstance` loads an owned instance
-wrapper, `findDevice` selects a compatible physical device, and `createDevice`
-creates the logical device, required queues, generated dispatch wrapper, and
-low ABI device view. Pass the generated binding as the `Vk` comptime argument;
-the helpers do not impose a specific binding on the application. Use
+wrapper. `findDevice` accepts `DeviceSelectionSettings(Vk)`, whose
+`requirements` validate and enable core/Vulkan-versioned features and required
+extensions. It independently selects graphics, presentation, compute,
+transfer, and optional video-encode families. `createDevice` consumes that
+selection, enables the same requirements (including selected video extensions),
+and returns every selected queue plus the generated dispatch wrapper and low ABI
+device view. `extra_features` and `extra_feature_support` cover arbitrary
+extension feature pNext chains without coupling low to one Vulkan binding.
+Pass the generated binding as the `Vk` comptime argument; the helpers do not
+impose a particular binding or command-pool ownership model. Use
 `RenderContext.init` to assemble the low render context from those resources.
+
+For example, an application that needs independent asynchronous queues and
+specific renderer capabilities can express all of them in the one selection
+value:
+
+```zig
+const selection = try Targets.findDevice(vk, allocator, instance, &low_instance, .{
+    .presentation = context.vulkanPresentationSupport(),
+    .requirements = .{
+        .required_extensions = &.{
+            vk.extensions.khr_fragment_shader_barycentric.name,
+        },
+        .required_features = .{
+            .multi_draw_indirect = .true,
+            .wide_lines = .true,
+            .geometry_shader = .true,
+        },
+        .required_features_12 = .{ .timeline_semaphore = .true },
+    },
+    .transfer_queue = .separate,
+    .compute_queue = .separate,
+});
+var device_resources = try Targets.createDevice(vk, allocator, instance, &low_instance, selection);
+```
+
+The default Vulkan 1.3 requirements enable synchronization2 and dynamic
+rendering. Add extension feature structs through `extra_features`, and validate
+them through `extra_feature_support`, when an extension requires a feature bit.
+When video selection chooses AV1, `selectVideoFormat` has already validated its
+required feature and `createDevice` enables it without replacing the caller's
+extra feature chain.
 
 `Device.acquireNextImageKHR()` returns `null` for `VK_NOT_READY` and
 `VK_TIMEOUT`; neither outcome acquires an image or supplies an image index.

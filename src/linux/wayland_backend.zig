@@ -67,6 +67,10 @@ fn nativeDisplay(state: *api.State) *anyopaque {
     return data(state).native_state.nativeDisplay();
 }
 
+fn vulkanVisualId(_: *api.State) usize {
+    return 0;
+}
+
 fn requiredVulkanExtensions(state: *api.State) []const [*:0]const u8 {
     return data(state).native_state.requiredVulkanInstanceExtensions();
 }
@@ -180,6 +184,9 @@ fn setCursorVisible(window: *api.Window, visible: bool) void {
 fn setCursor(window: *api.Window, shape: api.CursorShape) void {
     nativeWindow(window).setCursor(@enumFromInt(@intFromEnum(shape)));
 }
+fn setMouseCaptured(window: *api.Window, captured: bool) bool {
+    return nativeWindow(window).setMouseCaptured(captured);
+}
 fn applyScale(_: *api.Window, _: f32) void {}
 fn requestFrame(window: *api.Window) bool {
     return nativeWindow(window).requestFrame();
@@ -231,6 +238,9 @@ fn cursorEnter(inner: *native.Window, entered: bool) void {
 fn cursorMotion(inner: *native.Window, point: native.Point) void {
     api.windowUpdateCursorMotion(publicWindow(inner), point.x, point.y);
 }
+fn cursorDelta(inner: *native.Window, x: f64, y: f64) void {
+    api.windowUpdateCursorDelta(publicWindow(inner), x, y);
+}
 fn mouseButton(inner: *native.Window, button: native.MouseButton, action: native.Action, mods: native.Modifiers) void {
     api.windowUpdateMouseButton(publicWindow(inner), @enumFromInt(@intFromEnum(button)), @enumFromInt(@intFromEnum(action)), mods);
 }
@@ -254,6 +264,7 @@ const callbacks: native.WindowCallbacks = .{
     .frame = frame,
     .cursor_enter = cursorEnter,
     .cursor_motion = cursorMotion,
+    .cursor_delta = cursorDelta,
     .mouse_button = mouseButton,
     .scroll = scroll,
     .key = key,
@@ -263,6 +274,7 @@ const callbacks: native.WindowCallbacks = .{
 const vtable: api.VTable = .{
     .deinit = deinit,
     .native_display = nativeDisplay,
+    .vulkan_visual_id = vulkanVisualId,
     .required_vulkan_extensions = requiredVulkanExtensions,
     .create_window = createWindow,
     .pump_events = pumpEvents,
@@ -284,6 +296,7 @@ const vtable: api.VTable = .{
     .set_resizable = setResizable,
     .set_cursor_visible = setCursorVisible,
     .set_cursor = setCursor,
+    .set_mouse_captured = setMouseCaptured,
     .apply_scale = applyScale,
     .request_frame = requestFrame,
     .cancel_frame_request = cancelFrameRequest,

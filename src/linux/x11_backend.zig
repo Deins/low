@@ -7,6 +7,7 @@ const Data = struct {
     allocator: std.mem.Allocator,
     display: *x11.Display,
     screen: c_int,
+    visual_id: x11.VisualID,
     root: x11.Window,
     fd: c_int,
     wake_fd: std.posix.fd_t,
@@ -16,7 +17,10 @@ const Data = struct {
     windows: std.ArrayListUnmanaged(*api.Window) = .empty,
 };
 
-const WindowData = struct { handle: x11.Window };
+const WindowData = struct {
+    handle: x11.Window,
+    capture_center: [2]c_int = .{ 0, 0 },
+};
 const NetWmState = enum { maximize, fullscreen };
 
 pub fn init(allocator: std.mem.Allocator, options: api.InitOptions) api.Error!*api.State {
@@ -37,6 +41,7 @@ pub fn init(allocator: std.mem.Allocator, options: api.InitOptions) api.Error!*a
         .allocator = allocator,
         .display = display,
         .screen = screen,
+        .visual_id = x11.XVisualIDFromVisual(x11.XDefaultVisual(display, screen)),
         .root = x11.XRootWindow(display, screen),
         .fd = x11.XConnectionNumber(display),
         .wake_fd = wake_fd,
@@ -97,6 +102,10 @@ fn deinit(state: *api.State) void {
 
 fn nativeDisplay(state: *api.State) *anyopaque {
     return stateData(state).display;
+}
+
+fn vulkanVisualId(state: *api.State) usize {
+    return @intCast(stateData(state).visual_id);
 }
 
 fn requiredVulkanExtensions(_: *api.State) []const [*:0]const u8 {
@@ -223,6 +232,31 @@ fn setCursor(window: *api.Window, shape: api.CursorShape) void {
     window.cursor_visible = shape != .hidden;
     applyCursor(window);
 }
+fn setMouseCaptured(window: *api.Window, captured: bool) bool {
+    const data = stateData(window.ctx);
+    if (captured) {
+        const size = window.getSize();
+        const center = [2]c_int{ @divTrunc(size.width, 2), @divTrunc(size.height, 2) };
+        windowData(window).capture_center = center;
+        const result = x11.XGrabPointer(
+            data.display,
+            windowData(window).handle,
+            1,
+            x11.PointerMotionMask | x11.ButtonPressMask | x11.ButtonReleaseMask | x11.EnterWindowMask | x11.LeaveWindowMask,
+            x11.GrabModeAsync,
+            x11.GrabModeAsync,
+            windowData(window).handle,
+            0,
+            x11.CurrentTime,
+        );
+        if (result != x11.GrabSuccess) return false;
+        _ = x11.XWarpPointer(data.display, 0, windowData(window).handle, 0, 0, 0, 0, center[0], center[1]);
+    } else {
+        _ = x11.XUngrabPointer(data.display, x11.CurrentTime);
+    }
+    _ = x11.XFlush(data.display);
+    return captured;
+}
 fn applyScale(_: *api.Window, _: f32) void {}
 fn requestFrame(_: *api.Window) bool {
     return true;
@@ -271,13 +305,30 @@ fn handleEvent(data: *Data, event: *x11.XEvent) void {
         },
         x11.ConfigureNotify => if (findWindow(data, event.xconfigure.window)) |w| api.windowUpdateSize(w, .{ .width = event.xconfigure.width, .height = event.xconfigure.height }),
         x11.FocusIn => if (findWindow(data, event.xfocus.window)) |w| api.windowUpdateFocus(w, true),
-        x11.FocusOut => if (findWindow(data, event.xfocus.window)) |w| api.windowUpdateFocus(w, false),
+        x11.FocusOut => if (findWindow(data, event.xfocus.window)) |w| {
+            if (w.isMouseCaptured()) w.setMouseCaptured(false);
+            api.windowUpdateFocus(w, false);
+        },
         x11.EnterNotify => if (findWindow(data, event.xcrossing.window)) |w| {
             api.windowUpdateCursorEnter(w, true);
             applyCursor(w);
         },
         x11.LeaveNotify => if (findWindow(data, event.xcrossing.window)) |w| api.windowUpdateCursorEnter(w, false),
-        x11.MotionNotify => if (findWindow(data, event.xmotion.window)) |w| api.windowUpdateCursorMotion(w, @floatFromInt(event.xmotion.x), @floatFromInt(event.xmotion.y)),
+        x11.MotionNotify => if (findWindow(data, event.xmotion.window)) |w| {
+            if (w.isMouseCaptured()) {
+                const center = windowData(w).capture_center;
+                const dx = event.xmotion.x - center[0];
+                const dy = event.xmotion.y - center[1];
+                if (dx != 0 or dy != 0) {
+                    api.windowUpdateCursorDelta(w, @floatFromInt(dx), @floatFromInt(dy));
+                    const d = stateData(w.ctx);
+                    _ = x11.XWarpPointer(d.display, 0, windowData(w).handle, 0, 0, 0, 0, center[0], center[1]);
+                    _ = x11.XFlush(d.display);
+                }
+            } else {
+                api.windowUpdateCursorMotion(w, @floatFromInt(event.xmotion.x), @floatFromInt(event.xmotion.y));
+            }
+        },
         x11.ButtonPress => handleButton(data, event.xbutton, true),
         x11.ButtonRelease => handleButton(data, event.xbutton, false),
         x11.KeyPress => handleKey(data, event.xkey, true),
@@ -522,6 +573,7 @@ test "X11 maps alphanumeric keysyms" {
 const vtable: api.VTable = .{
     .deinit = deinit,
     .native_display = nativeDisplay,
+    .vulkan_visual_id = vulkanVisualId,
     .required_vulkan_extensions = requiredVulkanExtensions,
     .create_window = createWindow,
     .pump_events = pumpEvents,
@@ -543,6 +595,7 @@ const vtable: api.VTable = .{
     .set_resizable = setResizable,
     .set_cursor_visible = setCursorVisible,
     .set_cursor = setCursor,
+    .set_mouse_captured = setMouseCaptured,
     .apply_scale = applyScale,
     .request_frame = requestFrame,
     .cancel_frame_request = cancelFrameRequest,

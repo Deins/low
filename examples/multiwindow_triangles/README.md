@@ -6,6 +6,11 @@ Close either window independently, or click one to reverse and recolour its
 bouncing triangle. With Vulkan Video support, `--screencap` saves each window to
 as encoded .mkv file.
 
+Press F in a window to toggle fullscreen, V to toggle that window's vsync, and
+M to toggle cursor visibility. Hold the middle mouse button to capture relative
+pointer motion for camera-style controls without hitting the window edge. Each
+titlebar reports the window's current FPS and vsync mode.
+
 ## Run
 
 The Vulkan SDK supplies the registry and `glslc`:
@@ -23,11 +28,13 @@ zig build run
 zig build run -- --desktop=x11
 ```
 
-Each window uses the default-first target setup: the application supplies its
-window and shared render context, and `low` creates the surface, chooses the
-presentation mode, and owns the swapchain and synchronization. The example
-creates one temporary owned surface only because its custom Vulkan renderer
-selects a physical device and graphics queue before creating its first target.
+Each window is created with the low Vulkan instance, so `low` creates and owns
+its presentation surface together with the native window. `RenderTarget` then
+uses that surface and owns the swapchain and synchronization. Physical-device
+and presentation-queue selection happens before either window is created by
+using the active backend's native Vulkan presentation-support query. The first
+window's real surface is needed only to choose the shared pipeline format and
+is validated against the previously selected presentation queue.
 The render format prefers packed 10-bit UNORM targets and falls back to 8-bit
 BGRA when the surface or device does not advertise a supported 10-bit format.
 Presentation uses `low`'s default `.vsync = .on` policy. Applications can
@@ -108,7 +115,8 @@ lazy headers dependency.
 
 `low.vulkan.Loader` dynamically opens the system Vulkan loader.
 `Context.requiredVulkanInstanceExtensions()` supplies backend-specific instance
-extensions. `Context.createVulkanPresentationSurface()` hides the Wayland,
-Xlib, and Win32 details needed by the one device-selection probe. Each
-`RenderTarget` then creates and owns its actual window surface, swapchain, and
-synchronization/recreation resources.
+extensions. `Context.vulkanPresentationSupport()` hides the Wayland, Xlib, and
+Win32 presentation-query details so device selection does not require a window.
+`WindowOptions.vulkan` then creates a window-owned surface. Each `RenderTarget`
+borrows that surface and owns its swapchain and synchronization/recreation
+resources.
