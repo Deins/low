@@ -205,10 +205,6 @@ fn nextFrame(_: *runtime.State) Error!void {
     return error.NotOffscreen;
 }
 
-fn injectEvent(_: *Window, _: runtime.Event) Error!void {
-    return error.NotOffscreen;
-}
-
 fn setTitle(window: *Window, title: [:0]const u8) void {
     const allocator = window.ctx.allocator;
     const wide = std.unicode.utf8ToUtf16LeAllocZ(allocator, title) catch return;
@@ -428,7 +424,6 @@ const vtable: runtime.VTable = .{
     .wake = wake,
     .step = step,
     .next_frame = nextFrame,
-    .inject_event = injectEvent,
     .destroy_window = destroyWindow,
     .native_surface = nativeSurface,
     .set_title = setTitle,

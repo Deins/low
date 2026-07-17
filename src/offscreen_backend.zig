@@ -1,5 +1,4 @@
 const std = @import("std");
-const common = @import("internal/types.zig");
 const api = @import("internal/runtime.zig");
 
 /// The in-process backend deliberately has no OS, display-server, or
@@ -10,38 +9,6 @@ pub const Backend = struct {
         mode: api.FrameMode,
         last_frame_ns: ?i128 = null,
         windows: std.ArrayListUnmanaged(*api.Window) = .empty,
-        events: std.ArrayListUnmanaged(Queued) = .empty,
-    };
-
-    const Queued = struct {
-        window: *api.Window,
-        event: QueuedEvent,
-
-        fn deinit(self: *Queued, allocator: std.mem.Allocator) void {
-            self.event.deinit(allocator);
-        }
-    };
-
-    const QueuedEvent = union(enum) {
-        close: void,
-        resize: api.Size,
-        framebuffer_resize: api.Size,
-        scale: api.ContentScale,
-        focus: bool,
-        cursor_enter: bool,
-        cursor_motion: api.Point,
-        cursor_delta: api.Point,
-        mouse_button: struct { button: api.MouseButton, action: api.Action, mods: api.Modifiers },
-        scroll: struct { x: f64, y: f64 },
-        key: struct { key: api.Key, raw_keycode: u32, action: api.Action, mods: api.Modifiers },
-        text: []u8,
-
-        fn deinit(self: *QueuedEvent, allocator: std.mem.Allocator) void {
-            switch (self.*) {
-                .text => |bytes| allocator.free(bytes),
-                else => {},
-            }
-        }
     };
 
     pub fn init(allocator: std.mem.Allocator, options: api.OffscreenOptions) api.Error!*api.State {
@@ -60,8 +27,6 @@ pub const Backend = struct {
     fn deinit(state: *api.State) void {
         const d = data(state);
         while (d.windows.items.len != 0) d.windows.items[d.windows.items.len - 1].deinit();
-        for (d.events.items) |*event| event.deinit(d.allocator);
-        d.events.deinit(d.allocator);
         d.windows.deinit(d.allocator);
         const allocator = d.allocator;
         state.clipboard.deinit(allocator);
@@ -108,14 +73,6 @@ pub const Backend = struct {
     fn destroyWindow(window: *api.Window) void {
         const d = data(window.ctx);
         if (std.mem.indexOfScalar(*api.Window, d.windows.items, window)) |i| _ = d.windows.swapRemove(i);
-        var i = d.events.items.len;
-        while (i != 0) {
-            i -= 1;
-            if (d.events.items[i].window == window) {
-                var event = d.events.swapRemove(i);
-                event.deinit(d.allocator);
-            }
-        }
         d.allocator.destroy(window);
     }
 
@@ -143,22 +100,12 @@ pub const Backend = struct {
     }
     fn cancelFrameRequest(_: *api.Window) void {}
 
-    fn pumpEvents(state: *api.State, _: i32) api.Error!bool {
-        try step(state);
+    fn pumpEvents(_: *api.State, _: i32) api.Error!bool {
         return true;
     }
     fn wake(_: *api.State) void {}
 
-    fn step(state: *api.State) api.Error!void {
-        const d = data(state);
-        var events = d.events;
-        d.events = .empty;
-        defer events.deinit(d.allocator);
-        for (events.items) |*event| {
-            dispatch(event.window, &event.event);
-            event.deinit(d.allocator);
-        }
-    }
+    fn step(_: *api.State) api.Error!void {}
 
     fn nextFrame(state: *api.State) api.Error!void {
         const d = data(state);
@@ -175,64 +122,7 @@ pub const Backend = struct {
                 }).sleep(std.Options.debug_io) catch {};
             }
         };
-        try step(state);
         d.last_frame_ns = std.Io.Timestamp.now(std.Options.debug_io, .awake).nanoseconds;
-    }
-
-    fn injectEvent(window: *api.Window, event: api.Event) api.Error!void {
-        const d = data(window.ctx);
-        const queued: QueuedEvent = switch (event) {
-            .close => .{ .close = {} },
-            .resize => |v| .{ .resize = v },
-            .framebuffer_resize => |v| .{ .framebuffer_resize = v },
-            .scale => |v| .{ .scale = v },
-            .focus => |v| .{ .focus = v },
-            .cursor_enter => |v| .{ .cursor_enter = v },
-            .cursor_motion => |v| .{ .cursor_motion = v },
-            .cursor_delta => |v| .{ .cursor_delta = v },
-            .mouse_button => |v| .{ .mouse_button = .{
-                .button = v.button,
-                .action = v.action,
-                .mods = v.mods,
-            } },
-            .scroll => |v| .{ .scroll = .{ .x = v.x, .y = v.y } },
-            .key => |v| .{ .key = .{
-                .key = v.key,
-                .raw_keycode = v.raw_keycode,
-                .action = v.action,
-                .mods = v.mods,
-            } },
-            .text => |v| .{ .text = try d.allocator.dupe(u8, v) },
-        };
-        d.events.append(d.allocator, .{ .window = window, .event = queued }) catch |err| {
-            var owned = queued;
-            owned.deinit(d.allocator);
-            return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-            };
-        };
-    }
-
-    fn dispatch(window: *api.Window, event: *QueuedEvent) void {
-        switch (event.*) {
-            .close => api.windowUpdateClose(window),
-            .resize => |value| api.windowUpdateSize(window, value),
-            .framebuffer_resize => |value| {
-                window.framebuffer_size = value;
-            },
-            .scale => |value| {
-                window.content_scale = value;
-                window.framebuffer_size = common.scaledSize(window.size, value);
-            },
-            .focus => |value| api.windowUpdateFocus(window, value),
-            .cursor_enter => |value| api.windowUpdateCursorEnter(window, value),
-            .cursor_motion => |value| api.windowUpdateCursorMotion(window, value.x, value.y),
-            .cursor_delta => |value| api.windowUpdateCursorDelta(window, value.x, value.y),
-            .mouse_button => |value| api.windowUpdateMouseButton(window, value.button, value.action, value.mods),
-            .scroll => |value| api.windowUpdateScroll(window, value.x, value.y),
-            .key => |value| api.windowUpdateKey(window, value.key, value.raw_keycode, value.action, value.mods),
-            .text => |value| api.windowUpdateText(window, value),
-        }
     }
 
     const vtable: api.VTable = .{
@@ -245,7 +135,6 @@ pub const Backend = struct {
         .wake = wake,
         .step = step,
         .next_frame = nextFrame,
-        .inject_event = injectEvent,
         .destroy_window = destroyWindow,
         .native_surface = nativeSurface,
         .set_title = setTitle,
@@ -266,13 +155,11 @@ pub const Backend = struct {
         .cancel_frame_request = cancelFrameRequest,
     };
 
-    test "offscreen queues events until a step" {
+    test "synthetic events dispatch immediately" {
         var context = try init(std.testing.allocator, .{});
         defer context.deinit();
         const window = try context.createWindow(.{ .title = "test" });
         try window.injectEvent(.{ .key = .{ .key = .a, .action = .press } });
-        try std.testing.expect(!window.getKey(.a));
-        try context.step();
         try std.testing.expect(window.getKey(.a));
     }
 

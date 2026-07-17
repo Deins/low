@@ -73,6 +73,22 @@ recording lifecycle, timing, output formats, and quality tradeoffs. For
 platform and Vulkan-layer internals, including the Vulkan Video implementation
 invariants and validation guidance, see the [implementation notes](docs/implementation.md).
 
+## Deterministic input recording and replay
+
+`low.replay` records window events together with the frame deltas used by the
+application loop. Replaying the returned deltas instead of sampling wall time
+makes input-driven rendering reproducible, including screenshot and video
+capture when the application supplies `Frame.elapsed_ns` as its recording
+timestamp.
+
+The default scope includes every window in a context and maps windows by
+creation order. A window slice selects per-window recording or replay, so a
+tool can keep an editor window live while replaying its preview window.
+Recordings can also be written to and read from a versioned binary stream.
+
+See the [deterministic input replay guide](docs/input-replay.md) for the default
+loop, per-window use, persistence, custom timing, and event injection.
+
 ### Deployment & cross-compilation
 For portable deployments or cross-compilation, specify a target such as :
 - `-Dtarget=x86_64-windows-gnu`

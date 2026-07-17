@@ -34,7 +34,15 @@ the process lifetime because generated protocol calls and live windows retain
 function pointers into them.
 
 The offscreen backend is entirely in-process: it creates logical windows,
-queues synthetic events, and never loads or connects to a desktop library.
+dispatches synthetic events, and never loads or connects to a desktop library.
+
+All platform input and window-state notifications converge on the shared
+runtime event dispatcher. Deterministic recording observes events immediately
+before state/callback delivery. Replay uses that dispatcher directly and can
+suppress only native events for either selected windows or the full context;
+explicit synthetic injection remains available on every backend. The public
+frame timeline and persistence format are documented in
+[the input replay guide](input-replay.md).
 
 ## Vulkan layer
 

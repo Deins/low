@@ -211,6 +211,8 @@ pub const WindowState = types.WindowState;
 pub const FrameMode = types.FrameMode;
 pub const OffscreenOptions = types.OffscreenOptions;
 pub const Event = types.Event;
+/// Deterministic frame timing plus per-window or whole-context input capture.
+pub const replay = @import("replay.zig");
 
 pub const Action = input.Action;
 pub const MouseButton = input.MouseButton;
@@ -262,6 +264,9 @@ test "root API exposes the supported contract" {
     _ = FrameMode.manual;
     _ = OffscreenOptions{};
     _ = Event{ .close = {} };
+    _ = replay.Recorder;
+    _ = replay.Player;
+    _ = replay.Recording;
     _ = Action.press;
     _ = MouseButton.left;
     _ = Modifiers{};
@@ -289,4 +294,17 @@ test "root API exposes the supported contract" {
     try @import("std").testing.expect(!@hasDecl(Window, "updateClose"));
     try @import("std").testing.expect(!@hasDecl(Window, "updateKey"));
     try @import("std").testing.expect(!@hasDecl(Window, "updateText"));
+}
+
+test "public replay helpers accept a Context" {
+    var context = try Context.init(@import("std").testing.allocator, .{ .backend = .{ .offscreen = .{} } });
+    defer context.deinit();
+    var recorder = try replay.Recorder.init(@import("std").testing.allocator, &context, .{});
+    defer recorder.deinit();
+    _ = try recorder.nextFrame();
+    var recording = try recorder.finish();
+    defer recording.deinit();
+    var player = try replay.Player.init(@import("std").testing.allocator, &context, &recording, .{ .poll_live = false });
+    defer player.deinit();
+    _ = try player.nextFrame();
 }

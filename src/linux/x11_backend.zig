@@ -185,9 +185,6 @@ fn step(_: *api.State) api.Error!void {
 fn nextFrame(_: *api.State) api.Error!void {
     return error.NotOffscreen;
 }
-fn injectEvent(_: *api.Window, _: api.Event) api.Error!void {
-    return error.NotOffscreen;
-}
 fn setTitle(window: *api.Window, title: [:0]const u8) void {
     setTitleNative(stateData(window.ctx), windowData(window).handle, title);
 }
@@ -580,7 +577,6 @@ const vtable: api.VTable = .{
     .wake = wake,
     .step = step,
     .next_frame = nextFrame,
-    .inject_event = injectEvent,
     .destroy_window = destroyWindow,
     .native_surface = nativeSurface,
     .set_title = setTitle,

@@ -132,8 +132,8 @@ pub const WindowOptions = struct {
     max_size: ?ContentSize = null,
 };
 
-/// A synthetic event for an offscreen window. Text is copied by the offscreen
-/// backend when queued.
+/// A backend-neutral window event. Synthetic events can be dispatched on any
+/// backend with `Window.injectEvent`.
 pub const Event = union(enum) {
     close: void,
     /// Drawable content size changed, in logical content units.
@@ -153,6 +153,11 @@ pub const Event = union(enum) {
     scroll: struct { x: f64, y: f64 },
     key: struct { key: input.Key, raw_keycode: u32 = 0, action: input.Action, mods: input.Modifiers = .{} },
     text: []const u8,
+    /// Whether rendering should currently be paused for this window.
+    render_suspended: bool,
+    /// A native frame pacing boundary. The value is the backend timestamp when
+    /// one is available and zero otherwise.
+    frame_ready: u32,
 };
 
 /// A small, allocator-owned clipboard fallback.  Backends which have a native
