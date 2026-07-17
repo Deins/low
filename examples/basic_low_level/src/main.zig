@@ -7,6 +7,62 @@ const DeviceSelection = struct {
     queue_family: u32,
 };
 
+/// Retains the startup stages that exceeded 5 ms in the baseline profile,
+/// without logging until the first presentation.
+const StartupTrace = struct {
+    const capacity = 2;
+
+    const Event = struct {
+        label: []const u8,
+        elapsed_ns: i96,
+    };
+
+    io: std.Io,
+    started_at: std.Io.Timestamp,
+    events: [capacity]Event = undefined,
+    event_count: usize = 0,
+    active: bool = true,
+
+    fn init(io: std.Io) StartupTrace {
+        const now = std.Io.Timestamp.now(io, .awake);
+        return .{ .io = io, .started_at = now };
+    }
+
+    fn startStage(self: *const StartupTrace) std.Io.Timestamp {
+        return std.Io.Timestamp.now(self.io, .awake);
+    }
+
+    fn finishStage(self: *StartupTrace, label: []const u8, started_at: std.Io.Timestamp) void {
+        std.debug.assert(self.event_count < self.events.len);
+        const finished_at = std.Io.Timestamp.now(self.io, .awake);
+        self.events[self.event_count] = .{
+            .label = label,
+            .elapsed_ns = finished_at.nanoseconds - started_at.nanoseconds,
+        };
+        self.event_count += 1;
+    }
+
+    fn report(self: *StartupTrace) void {
+        if (!self.active) return;
+        self.active = false;
+        const total_ns = std.Io.Timestamp.now(self.io, .awake).nanoseconds - self.started_at.nanoseconds;
+        std.log.info("startup profile: first presentation queued after {d:.3} ms ({d} stages)", .{
+            milliseconds(total_ns),
+            self.event_count,
+        });
+        for (self.events[0..self.event_count]) |event| {
+            std.log.info("  {d:9.3} ms  {s}", .{
+                milliseconds(event.elapsed_ns),
+                event.label,
+            });
+        }
+    }
+
+    fn milliseconds(nanoseconds: i96) f64 {
+        return @as(f64, @floatFromInt(nanoseconds)) / std.time.ns_per_ms;
+    }
+};
+
 const RawTarget = struct {
     allocator: std.mem.Allocator,
     device: vk.DeviceProxy,
@@ -164,7 +220,7 @@ const RawTarget = struct {
         );
     }
 
-    fn draw(self: *RawTarget) !void {
+    fn draw(self: *RawTarget, startup_trace: ?*StartupTrace) !void {
         _ = try self.device.waitForFences(&.{self.in_flight}, .true, std.math.maxInt(u64));
         const acquired = try self.device.acquireNextImageKHR(
             self.swapchain,
@@ -242,11 +298,16 @@ const RawTarget = struct {
             self.window.cancelFrameRequest();
             return err;
         };
+        if (startup_trace) |trace| {
+            trace.report();
+            std.log.info("created raw Vulkan surface, swapchain, {d} image views", .{self.views.len});
+        }
         if (acquired.result == .suboptimal_khr or present == .suboptimal_khr) return error.SwapchainSuboptimal;
     }
 };
 
 pub fn main(init: std.process.Init) !void {
+    var startup_trace = StartupTrace.init(init.io);
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa_state.deinit() == .ok);
     const allocator = gpa_state.allocator();
@@ -265,27 +326,19 @@ pub fn main(init: std.process.Init) !void {
         .engine_version = 1,
         .api_version = @bitCast(vk.API_VERSION_1_0),
     };
+    const instance_creation_started = startup_trace.startStage();
     const instance_handle = try base.createInstance(&.{
         .p_application_info = &app_info,
         .enabled_extension_count = @intCast(extensions.len),
         .pp_enabled_extension_names = extensions.ptr,
     }, null);
+    startup_trace.finishStage("Vulkan instance created", instance_creation_started);
     var instance_wrapper = vk.InstanceWrapper.load(instance_handle, get_instance_proc_addr);
     const instance = vk.InstanceProxy.init(instance_handle, &instance_wrapper);
     defer instance.destroyInstance(null);
     const low_instance = try loader.loadInstanceApi(low.vulkan.toInstance(instance_handle));
-
-    const window = try context.createWindow(.{ .title = "low raw Vulkan setup", .size = .{ .width = 800, .height = 600 } });
-    window.setCallbacks(.{
-        .mouse_button = onMouseButton,
-        .scroll = onScroll,
-        .key = onKey,
-        .text = onText,
-    });
-    const low_surface = try context.createVulkanSurface(&low_instance, window);
-    const surface: vk.SurfaceKHR = @enumFromInt(low_surface);
-    defer instance.destroySurfaceKHR(surface, null);
-    const selection = try selectDevice(allocator, instance, surface);
+    const presentation = context.vulkanPresentationSupport() orelse return error.NoPresentDevice;
+    const selection = try selectDevice(allocator, instance, &low_instance, presentation, &startup_trace);
     const priority = [_]f32{1.0};
     const device_extensions = [_][*:0]const u8{"VK_KHR_swapchain"};
     const device_handle = try instance.createDevice(selection.physical_device, &.{
@@ -301,12 +354,28 @@ pub fn main(init: std.process.Init) !void {
     var device_wrapper = vk.DeviceWrapper.load(device_handle, instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
     const device = vk.DeviceProxy.init(device_handle, &device_wrapper);
     defer device.destroyDevice(null);
-    if (device_wrapper.dispatch.vkCreateSwapchainKHR == null) return error.SwapchainCommandsUnavailable;
 
     const graphics_queue = device.getDeviceQueue(selection.queue_family, 0);
+    const window = try context.createWindow(.{
+        .title = "low raw Vulkan setup",
+        .size = .{ .width = 800, .height = 600 },
+        .vulkan = .{ .instance = &low_instance },
+    });
+    defer window.deinit();
+    window.setCallbacks(.{
+        .mouse_button = onMouseButton,
+        .scroll = onScroll,
+        .key = onKey,
+        .text = onText,
+    });
+    const surface: vk.SurfaceKHR = @enumFromInt(window.vulkanSurface().?);
+    if (try low_instance.getPhysicalDeviceSurfaceSupportKHR(
+        low.vulkan.toPhysicalDevice(selection.physical_device),
+        selection.queue_family,
+        @intFromEnum(surface),
+    ) != low.vulkan.api.TRUE) return error.NoPresentDevice;
     var target = try RawTarget.init(allocator, instance, selection.physical_device, device, graphics_queue, selection.queue_family, surface, window);
     defer target.deinit();
-    std.log.info("created raw Vulkan surface, swapchain, {d} image views", .{target.views.len});
 
     while (!window.shouldClose()) {
         context.pollEvents();
@@ -327,7 +396,7 @@ pub fn main(init: std.process.Init) !void {
             try target.recreate(instance, selection.physical_device, selection.queue_family, surface);
             continue;
         }
-        target.draw() catch |err| switch (err) {
+        target.draw(if (startup_trace.active) &startup_trace else null) catch |err| switch (err) {
             error.OutOfDateKHR, error.SwapchainSuboptimal => try target.recreate(instance, selection.physical_device, selection.queue_family, surface),
             error.SurfaceLostKHR => break,
             else => return err,
@@ -351,15 +420,28 @@ fn onText(_: *low.Window, text: []const u8) void {
     std.log.info("text input: {s}", .{text});
 }
 
-fn selectDevice(allocator: std.mem.Allocator, instance: vk.InstanceProxy, surface: vk.SurfaceKHR) !DeviceSelection {
+fn selectDevice(
+    allocator: std.mem.Allocator,
+    instance: vk.InstanceProxy,
+    low_instance: *const low.vulkan.Instance,
+    presentation: low.vulkan.PresentationSupport,
+    startup_trace: ?*StartupTrace,
+) !DeviceSelection {
+    const enumeration_started = if (startup_trace) |trace| trace.startStage() else null;
     const physical_devices = try instance.enumeratePhysicalDevicesAlloc(allocator);
+    if (startup_trace) |trace| trace.finishStage("physical devices enumerated", enumeration_started.?);
     defer allocator.free(physical_devices);
     for (physical_devices) |physical_device| {
         const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, allocator);
         defer allocator.free(families);
         for (families, 0..) |family, index| {
             if (!family.queue_flags.graphics_bit) continue;
-            if (try instance.getPhysicalDeviceSurfaceSupportKHR(physical_device, @intCast(index), surface) != .true) continue;
+            const supports_presentation = try low_instance.getPhysicalDevicePresentationSupportKHR(
+                low.vulkan.toPhysicalDevice(physical_device),
+                @intCast(index),
+                presentation,
+            );
+            if (supports_presentation != low.vulkan.api.TRUE) continue;
             return .{ .physical_device = physical_device, .queue_family = @intCast(index) };
         }
     }
