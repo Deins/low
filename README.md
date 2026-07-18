@@ -1,13 +1,24 @@
 # low — let me open window
 
-A cross-platform desktop windowing library for Vulkan applications written in Zig.  
-With goal of being **portable** and **cross-compilable**.  
-Supports multiple windows, keyboard and mouse input, clipboard access etc.
+A cross-platform desktop windowing library for Vulkan applications written in Zig.
+With the goal of being **portable** and **cross-compilable**.
 
+## features
 
-Optionally provides vulkan swapchain management and useful window content features:
-* screenshot grabbing (raw image bytes on cpu and utils to write bmp image files)
-* recording encoded video streams of window contents (using vulkan video if supported by the gpu/driver), with av1, h265, or h264 codecs, either raw or packaged in mkv format.
+* multiple native windows and event loop
+* window management, keyboard, text input, mouse, scroll, cursor control
+* clipboard text access
+* Vulkan loader, instance extension, presentation support, and surface helpers
+
+## optional features
+
+* Vulkan render targets with `-Dvk_extras=true`
+  * surface, swapchain, synchronization, resize, and vsync
+  * screenshot readback as raw BGRA8 CPU pixels and utilities to write BMP files
+  * video capture with `-Dvk_video=true`: encode submitted render-target frames
+    using Vulkan Video, with AV1, H.265, or H.264, either raw or in Matroska
+* deterministic event recording and replay with frame timing, per-window
+  scopes, persistence, custom clocks, and event injection
 
 ## Platforms
 
@@ -24,13 +35,12 @@ Optionally provides vulkan swapchain management and useful window content featur
   - X11: `libX11`
 - For GNU/Linux targets, `glibc` at least as new as the version specified by `-Dtarget`
   (for example, `x86_64-linux-gnu.2.17` requires glibc 2.17+).
-- On windows: win32, dwmapi
+- On Windows: Win32 system APIs and `dwmapi.dll`
 #### Build-time
 See [build.zig.zon](./build.zig.zon). Depends on configuration.
 For full additional functionality:
-- With `-Dvk_video=true`:
-  - [vulkan-zig](https://github.com/Snektron/vulkan-zig)
-  - Vulkan-Headers if vulkan registries can't be found and are not provided
+- With `-Dvk_video=true`, the build lazily fetches [vulkan-zig](https://github.com/Snektron/vulkan-zig)
+  and Vulkan-Headers to generate the Vulkan Video bindings.
 
 ## Build and examples
 
@@ -48,18 +58,18 @@ The examples are standalone Zig packages. See their READMEs for Vulkan SDK,
 shader compiler, and run instructions.
 
 Optional Vulkan render-target helpers are enabled with `-Dvk_extras=true`.
-Vulkan Video H.264 recording is a separate, lazy feature and implies those
-helpers:
+Vulkan Video recording is a separate, lazy feature and implies those helpers:
 
 ```sh
-zig build -Dvk_video=true
+zig build test -Dvk_video=true
 zig build run --build-file ./examples/multiwindow_triangles/build.zig \
-  -- --frames 300 --screencap
+  -- --frames 300 --record-video
 ```
 
-The recorder keeps rendered pixels on the GPU, converts BGRA to BT.709 NV12,
-and writes streaming Matroska by default (or raw Annex-B H.264 when selected)
-through a caller-owned `std.Io.Writer`. Vulkan Video dependencies are not
+The video recorder keeps rendered pixels on the GPU, converts BGRA to BT.709 NV12, encodes and pulls stream to cpu,
+then writes streaming Matroska by default (or the selected codec's raw
+elementary stream when requested) through a caller-owned `std.Io.Writer`.
+Vulkan Video dependencies are not
 resolved by normal builds.
 
 Request recording support with `video.selectVideoFormat(..., .on)` during
@@ -90,7 +100,9 @@ See the [deterministic input replay guide](docs/input-replay.md) for the default
 loop, per-window use, persistence, custom timing, and event injection.
 
 ### Deployment & cross-compilation
-For portable deployments or cross-compilation, specify a target such as :
+For portable deployments or cross-compilation, specify a target such as:
 - `-Dtarget=x86_64-windows-gnu`
-- `-Dtarget=x86_64-linux-gnu.2.17`   
-    For GNU/Linux targets, the version suffix specifies the minimum supported glibc version. For example, gnu.2.17 targets glibc 2.17 or newer. Choose the version according to the compatibility requirements of your deployment.
+- `-Dtarget=x86_64-linux-gnu.2.17`
+For GNU/Linux targets, the version suffix specifies the minimum supported glibc
+version. For example, gnu.2.17 targets glibc 2.17 or newer. Choose the version
+according to the compatibility requirements of your deployment.

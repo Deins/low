@@ -10,6 +10,7 @@ const RenderContext = Targets.RenderContext;
 const vertex_spv align(@alignOf(u32)) = @embedFile("triangle_vert").*;
 const fragment_spv align(@alignOf(u32)) = @embedFile("triangle_frag").*;
 const triangle_half_size_px: f32 = 70.0;
+const default_input_recording_path = "tmp/input.lowrpl";
 
 const PushConstants = extern struct {
     offset: [2]f32,
@@ -39,7 +40,7 @@ const Renderer = struct {
         instance: vk.InstanceProxy,
         low_instance_input: low.vulkan.Instance,
         presentation: ?low.vulkan.PresentationSupport,
-        recording: video.RecordingRequest,
+        video_recording: video.RecordingRequest,
     ) !Renderer {
         const selection = try Targets.findDevice(
             vk,
@@ -48,7 +49,7 @@ const Renderer = struct {
             &low_instance_input,
             .{
                 .presentation = presentation,
-                .recording = recording,
+                .recording = video_recording,
             },
         );
         if (selection.selected_video_format) |selected| {
@@ -174,15 +175,15 @@ const AppWindow = struct {
     position: [2]f32,
     velocity: [2]f32,
     color: [3]f32,
-    dump_prefix: []const u8,
-    recording_path: []const u8,
+    window_name: []const u8,
+    video_path: []const u8,
     vsync: Targets.VSync = .on,
     fps_frames: u32 = 0,
-    fps_started_ns: ?i128 = null,
+    fps_started_ns: ?u64 = null,
     fps: f32 = 0,
-    record_file: ?std.Io.File = null,
-    record_buffer: [64 * 1024]u8 = undefined,
-    record_writer: ?std.Io.File.Writer = null,
+    video_file: ?std.Io.File = null,
+    video_buffer: [64 * 1024]u8 = undefined,
+    video_writer: ?std.Io.File.Writer = null,
 
     fn init(
         gpa: std.mem.Allocator,
@@ -191,8 +192,8 @@ const AppWindow = struct {
         position: [2]f32,
         velocity: [2]f32,
         color: [3]f32,
-        dump_prefix: []const u8,
-        recording_path: []const u8,
+        window_name: []const u8,
+        video_path: []const u8,
         readback: bool,
     ) !AppWindow {
         const target = try RenderTarget.init(gpa, .{
@@ -209,8 +210,8 @@ const AppWindow = struct {
             .position = position,
             .velocity = velocity,
             .color = color,
-            .dump_prefix = dump_prefix,
-            .recording_path = recording_path,
+            .window_name = window_name,
+            .video_path = video_path,
         };
     }
 
@@ -224,30 +225,30 @@ const AppWindow = struct {
     }
 
     fn deinit(self: *AppWindow, io: std.Io) void {
-        self.target.endRecording() catch |err| std.log.err("failed to finalize recording: {s}", .{@errorName(err)});
+        self.target.endRecording() catch |err| std.log.err("failed to finalize video recording: {s}", .{@errorName(err)});
         self.target.deinit();
         self.window.deinit();
-        if (self.record_file) |*file| file.close(io);
+        if (self.video_file) |*file| file.close(io);
         self.* = undefined;
     }
 
-    fn startRecording(self: *AppWindow, io: std.Io) !void {
-        self.record_file = try std.Io.Dir.cwd().createFile(io, self.recording_path, .{});
+    fn startVideoRecording(self: *AppWindow, io: std.Io) !void {
+        self.video_file = try std.Io.Dir.cwd().createFile(io, self.video_path, .{});
         errdefer {
-            self.record_file.?.close(io);
-            self.record_file = null;
+            self.video_file.?.close(io);
+            self.video_file = null;
         }
-        self.record_writer = self.record_file.?.writer(io, &self.record_buffer);
-        errdefer self.record_writer = null;
-        if (self.record_writer) |*writer| try self.target.beginRecording(.{
+        self.video_writer = self.video_file.?.writer(io, &self.video_buffer);
+        errdefer self.video_writer = null;
+        if (self.video_writer) |*writer| try self.target.beginRecording(.{
             .io = io,
             .writer = &writer.interface,
             .resize = .change_resolution,
         });
     }
 
-    fn dumpPath(self: *const AppWindow, buffer: []u8, frame: u32) ![]const u8 {
-        return std.fmt.bufPrint(buffer, "tmp/{s}-{d:0>4}.bmp", .{ self.dump_prefix, frame });
+    fn frameDumpPath(self: *const AppWindow, buffer: []u8, frame: u32) ![]const u8 {
+        return std.fmt.bufPrint(buffer, "tmp/{s}-{d:0>4}.bmp", .{ self.window_name, frame });
     }
 
     fn update(self: *AppWindow, dt: f32) void {
@@ -271,7 +272,7 @@ const AppWindow = struct {
         }
     }
 
-    fn updateFps(self: *AppWindow, now_ns: i128) void {
+    fn updateFps(self: *AppWindow, now_ns: u64) void {
         if (self.fps_started_ns == null) self.fps_started_ns = now_ns;
         self.fps_frames += 1;
         const elapsed_ns = now_ns - self.fps_started_ns.?;
@@ -287,7 +288,7 @@ const AppWindow = struct {
     fn updateTitle(self: *AppWindow) void {
         var buffer: [128:0]u8 = undefined;
         const title = std.fmt.bufPrint(buffer[0 .. buffer.len - 1], "low Vulkan — {s} window | {d:.1} FPS | vsync {s}", .{
-            self.dump_prefix,
+            self.window_name,
             self.fps,
             if (self.vsync == .on) "on" else "off",
         }) catch return;
@@ -295,7 +296,7 @@ const AppWindow = struct {
         self.window.setTitle(buffer[0..title.len :0]);
     }
 
-    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8) !bool {
+    fn draw(self: *AppWindow, renderer: *const Renderer, io: std.Io, dump_path: ?[]const u8, timestamp_ns: ?u64) !bool {
         var frame = self.target.acquire() catch |err| switch (err) {
             error.FrameSkipped, error.FrameOutOfDate => return false,
             else => return err,
@@ -341,11 +342,15 @@ const AppWindow = struct {
         renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
         renderer.device.cmdEndRendering(command_buffer);
         if (dump_path) |path| {
-            var readback = try frame.submitAndReadback(renderer.gpa, .{});
+            var readback = try frame.submitAndReadback(renderer.gpa, .{
+                .recording = .{ .timestamp_ns = timestamp_ns },
+            });
             defer readback.deinit();
             try readback.writeBmp(io, path);
         } else {
-            try frame.submitAndPresent(.{});
+            try frame.submitAndPresent(.{
+                .recording = .{ .timestamp_ns = timestamp_ns },
+            });
         }
         return true;
     }
@@ -358,7 +363,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     const app_options = try parseOptions(args);
-    const recording_requested = app_options.screencap or app_options.record_codec != null;
+    const video_recording_requested = app_options.record_video;
 
     var loader = try low.vulkan.Loader.init();
     defer loader.deinit();
@@ -393,9 +398,9 @@ pub fn main(init: std.process.Init) !void {
 
     const low_instance = try loader.loadInstanceApi(low.vulkan.toInstance(instance.handle));
     const offscreen = context.backendKind() == .offscreen;
-    const recording_request: video.RecordingRequest = if (!recording_requested)
+    const video_recording_request: video.RecordingRequest = if (!video_recording_requested)
         .off
-    else if (app_options.record_codec) |codec|
+    else if (app_options.video_codec) |codec|
         .{ .codec = codec }
     else
         .on;
@@ -404,15 +409,15 @@ pub fn main(init: std.process.Init) !void {
         instance,
         low_instance,
         context.vulkanPresentationSupport(),
-        recording_request,
+        video_recording_request,
     ) catch |err| {
-        if (recording_requested) {
+        if (video_recording_requested) {
             std.log.err("no device can render and encode the requested video format: {s}", .{@errorName(err)});
         }
         return err;
     };
     defer renderer.deinit();
-    if (recording_requested) try renderer.initVideo();
+    if (video_recording_requested) try renderer.initVideo();
     const first_window = try context.createWindow(.{
         .title = "low Vulkan — first window",
         .size = .{ .width = 640, .height = 480 },
@@ -437,7 +442,7 @@ pub fn main(init: std.process.Init) !void {
         .{ 1.0, 0.30, 0.20 },
         "first",
         "tmp/first.mkv",
-        app_options.dump,
+        app_options.dump_frames,
     );
     first_window_cleanup_pending = false;
     defer if (first) |*app_window| app_window.deinit(init.io);
@@ -450,28 +455,65 @@ pub fn main(init: std.process.Init) !void {
         .{ 0.18, 0.90, 0.95 },
         "second",
         "tmp/second.mkv",
-        app_options.dump,
+        app_options.dump_frames,
     );
     second_window_cleanup_pending = false;
     defer if (second) |*app_window| app_window.deinit(init.io);
     const windows = [_]*?AppWindow{ &first, &second };
     first.?.installCallbacks();
     second.?.installCallbacks();
-    if (recording_requested) {
+
+    var input_recording: ?low.replay.Recording = null;
+    defer if (input_recording) |*recording| recording.deinit();
+    var input_recorder: ?low.replay.Recorder = null;
+    defer if (input_recorder) |*recorder| recorder.deinit();
+    var input_replayer: ?low.replay.Replayer = null;
+    defer if (input_replayer) |*replayer| replayer.deinit();
+    switch (app_options.input_timeline) {
+        .none => {},
+        .record => |path| {
+            input_recorder = try low.replay.Recorder.init(gpa, &context, .{});
+            log.info("recording input timeline to {s}", .{path});
+        },
+        .replay => |path| {
+            input_recording = try loadInputRecording(gpa, init.io, path);
+            input_replayer = try low.replay.Replayer.init(gpa, &context, &input_recording.?, .{});
+            log.info("replaying input timeline with {d} frames and {d} events from {s}", .{
+                input_recording.?.frames.len,
+                input_recording.?.events.len,
+                path,
+            });
+        },
+    }
+    if (video_recording_requested) {
         try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
         for (windows) |window_slot| {
-            if (window_slot.*) |*app_window| app_window.startRecording(init.io) catch |err| {
-                std.log.err("{s} stream could not start: {s}", .{ app_window.dump_prefix, @errorName(err) });
+            if (window_slot.*) |*app_window| app_window.startVideoRecording(init.io) catch |err| {
+                std.log.err("{s} video recording could not start: {s}", .{ app_window.window_name, @errorName(err) });
             };
         }
     }
 
-    var previous = std.Io.Timestamp.now(std.Options.debug_io, .awake);
+    var previous = monotonicNow();
     var rendered_frames: u32 = 0;
-    if (app_options.dump) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
+    if (app_options.dump_frames) try std.Io.Dir.cwd().createDirPath(init.io, "tmp");
     while (first != null or second != null) {
-        if (offscreen) try context.nextFrame();
-        context.pollEvents();
+        const timeline_frame: ?low.replay.Frame = if (input_replayer) |*replayer|
+            try replayer.nextFrame() orelse break
+        else if (input_recorder) |*recorder| frame: {
+            const now = monotonicNow();
+            try recorder.beginFrame(now -| previous);
+            previous = now;
+            errdefer _ = recorder.endFrame() catch {};
+            if (offscreen) try context.nextFrame();
+            context.pollEvents();
+            _ = try waitIfAllFramesBlocked(&context, windows, offscreen);
+            break :frame try recorder.endFrame();
+        } else frame: {
+            if (offscreen) try context.nextFrame();
+            context.pollEvents();
+            break :frame null;
+        };
 
         for (windows) |window_slot| {
             if (window_slot.*) |*app_window| {
@@ -483,34 +525,26 @@ pub fn main(init: std.process.Init) !void {
         }
         if (first == null and second == null) break;
 
-        const all_frames_blocked = !offscreen and
-            (first == null or !first.?.window.shouldRender()) and
-            (second == null or !second.?.window.shouldRender());
-        if (all_frames_blocked) {
-            var render_windows: [2]*low.Window = undefined;
-            var render_window_count: usize = 0;
-            for (windows) |window_slot| {
-                if (window_slot.*) |app_window| {
-                    render_windows[render_window_count] = app_window.window;
-                    render_window_count += 1;
-                }
-            }
-            try context.waitForAnyRender(render_windows[0..render_window_count]);
+        const waited_for_compositor = try waitIfAllFramesBlocked(&context, windows, offscreen);
+        if (timeline_frame == null and waited_for_compositor) {
             continue;
         }
 
-        const now = std.Io.Timestamp.now(std.Options.debug_io, .awake);
-        const dt: f32 = @min(0.05, @as(f32, @floatFromInt(now.nanoseconds - previous.nanoseconds)) / 1_000_000_000);
-        previous = now;
+        const now = monotonicNow();
+        const delta_ns = if (timeline_frame) |frame| frame.delta_ns else now -| previous;
+        const timestamp_ns = if (timeline_frame) |frame| frame.elapsed_ns else null;
+        const app_time_ns = timestamp_ns orelse now;
+        const dt: f32 = @min(0.05, @as(f32, @floatFromInt(delta_ns)) / 1_000_000_000);
+        if (timeline_frame == null) previous = now;
         var rendered = false;
         for (windows) |window_slot| {
             if (window_slot.*) |*app_window| {
                 if (!app_window.window.shouldRender()) continue;
                 app_window.update(dt);
                 var path_buffer: [64]u8 = undefined;
-                const path = if (app_options.dump) try app_window.dumpPath(&path_buffer, rendered_frames + 1) else null;
-                if (try app_window.draw(&renderer, init.io, path)) {
-                    app_window.updateFps(now.nanoseconds);
+                const path = if (app_options.dump_frames) try app_window.frameDumpPath(&path_buffer, rendered_frames + 1) else null;
+                if (try app_window.draw(&renderer, init.io, path, timestamp_ns)) {
+                    app_window.updateFps(app_time_ns);
                     rendered = true;
                 }
             }
@@ -518,13 +552,59 @@ pub fn main(init: std.process.Init) !void {
         if (!rendered) continue;
         rendered_frames += 1;
         if (app_options.frames) |limit| {
-            if (rendered_frames == limit) {
-                for (windows) |window_slot| {
-                    if (window_slot.*) |app_window| app_window.window.setShouldClose(true);
-                }
-            }
+            if (rendered_frames == limit) break;
         }
     }
+
+    if (input_recorder) |*recorder| {
+        var recording = try recorder.finish();
+        defer recording.deinit();
+        const path = app_options.input_timeline.record;
+        try saveInputRecording(init.io, path, &recording);
+        log.info("wrote {d} frames and {d} events to {s}", .{ recording.frames.len, recording.events.len, path });
+    }
+}
+
+fn monotonicNow() u64 {
+    const value = std.Io.Timestamp.now(std.Options.debug_io, .awake).nanoseconds;
+    return if (value <= 0) 0 else @intCast(@min(value, std.math.maxInt(u64)));
+}
+
+fn waitIfAllFramesBlocked(context: *low.Context, windows: [2]*?AppWindow, offscreen: bool) !bool {
+    if (offscreen) return false;
+    var render_windows: [2]*low.Window = undefined;
+    var render_window_count: usize = 0;
+    var all_blocked = true;
+    for (windows) |window_slot| {
+        if (window_slot.*) |app_window| {
+            render_windows[render_window_count] = app_window.window;
+            render_window_count += 1;
+            if (app_window.window.shouldRender() or app_window.window.shouldClose()) all_blocked = false;
+        }
+    }
+    if (!all_blocked or render_window_count == 0) return false;
+    try context.waitForAnyRender(render_windows[0..render_window_count]);
+    return true;
+}
+
+fn loadInputRecording(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !low.replay.Recording {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    return low.replay.Recording.read(allocator, &reader.interface);
+}
+
+fn saveInputRecording(io: std.Io, path: []const u8, recording: *const low.replay.Recording) !void {
+    if (std.fs.path.dirname(path)) |directory| {
+        if (directory.len != 0) try std.Io.Dir.cwd().createDirPath(io, directory);
+    }
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [64 * 1024]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    try recording.write(&writer.interface);
+    try writer.interface.flush();
 }
 
 fn createPipelineLayout(device: vk.DeviceProxy) !vk.PipelineLayout {
@@ -634,10 +714,17 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
 
 const AppOptions = struct {
     backend: low.BackendRequest = .auto,
-    screencap: bool = false,
-    dump: bool = false,
-    record_codec: ?video.Codec = null,
+    record_video: bool = false,
+    dump_frames: bool = false,
+    video_codec: ?video.Codec = null,
     frames: ?u32 = null,
+    input_timeline: InputTimeline = .none,
+};
+
+const InputTimeline = union(enum) {
+    none,
+    record: []const u8,
+    replay: []const u8,
 };
 
 fn parseOptions(args: []const [:0]const u8) !AppOptions {
@@ -655,13 +742,23 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
                 inline else => |tag| @unionInit(low.BackendRequest, @tagName(tag), {}),
             };
             desktop_selected = true;
-        } else if (std.mem.eql(u8, arg, "--screencap")) {
-            result.screencap = true;
-        } else if (std.mem.eql(u8, arg, "--dump")) {
-            result.dump = true;
-        } else if (std.mem.startsWith(u8, arg, "--record-codec=")) {
-            const name = arg["--record-codec=".len..];
-            result.record_codec = std.meta.stringToEnum(video.Codec, name) orelse return error.InvalidRecordingCodec;
+        } else if (std.mem.eql(u8, arg, "--record-video")) {
+            result.record_video = true;
+        } else if (std.mem.eql(u8, arg, "--dump-frames")) {
+            result.dump_frames = true;
+        } else if (std.mem.eql(u8, arg, "--record") or std.mem.startsWith(u8, arg, "--record=")) {
+            if (result.input_timeline != .none) return error.ConflictingInputTimelineArguments;
+            const path = if (std.mem.eql(u8, arg, "--record")) default_input_recording_path else arg["--record=".len..];
+            if (path.len == 0) return error.InvalidInputRecordingPath;
+            result.input_timeline = .{ .record = path };
+        } else if (std.mem.eql(u8, arg, "--replay") or std.mem.startsWith(u8, arg, "--replay=")) {
+            if (result.input_timeline != .none) return error.ConflictingInputTimelineArguments;
+            const path = if (std.mem.eql(u8, arg, "--replay")) default_input_recording_path else arg["--replay=".len..];
+            if (path.len == 0) return error.InvalidInputRecordingPath;
+            result.input_timeline = .{ .replay = path };
+        } else if (std.mem.startsWith(u8, arg, "--video-codec=")) {
+            const name = arg["--video-codec=".len..];
+            result.video_codec = std.meta.stringToEnum(video.Codec, name) orelse return error.InvalidVideoCodec;
         } else if (std.mem.startsWith(u8, arg, "--frames=")) {
             result.frames = try std.fmt.parseInt(u32, arg["--frames=".len..], 10);
             if (result.frames.? == 0) return error.InvalidFrameCount;
@@ -669,6 +766,7 @@ fn parseOptions(args: []const [:0]const u8) !AppOptions {
             return error.UnknownArgument;
         }
     }
+    if (result.video_codec != null and !result.record_video) return error.VideoCodecWithoutVideoRecording;
     return result;
 }
 
@@ -714,7 +812,7 @@ fn onKey(window: *low.Window, key: low.Key, _: u32, action: low.Action, _: low.M
         .v => {
             const next: Targets.VSync = if (self.vsync == .on) .off else .on;
             self.target.setVSync(next) catch |err| {
-                log.err("{s} could not change vsync: {s}", .{ self.dump_prefix, @errorName(err) });
+                log.err("{s} could not change vsync: {s}", .{ self.window_name, @errorName(err) });
                 return;
             };
             self.vsync = next;

@@ -37,11 +37,13 @@ The offscreen backend is entirely in-process: it creates logical windows,
 dispatches synthetic events, and never loads or connects to a desktop library.
 
 All platform input and window-state notifications converge on the shared
-runtime event dispatcher. Deterministic recording observes events immediately
-before state/callback delivery. Replay uses that dispatcher directly and can
-suppress only native events for either selected windows or the full context;
-explicit synthetic injection remains available on every backend. The public
-frame timeline and persistence format are documented in
+runtime event dispatcher. Deterministic input recording observes replay-safe
+input events immediately before state/callback delivery. Replay uses that
+dispatcher directly and can suppress native input for either selected windows
+or the full context. Compositor-owned configure and frame-pacing events remain
+live and are never replayed; explicit synthetic injection remains available on
+every backend. The public frame timeline and persistence format are documented
+in
 [the input replay guide](input-replay.md).
 
 ## Vulkan layer

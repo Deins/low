@@ -79,14 +79,32 @@ pub const EventObserver = struct {
 };
 
 /// Marks a window (or every window in a context) as replay-controlled. Native
-/// events are ignored for controlled windows, while explicit injection remains
-/// available to callers.
+/// input is ignored for controlled windows, while live native-surface events
+/// and explicit injection remain available.
 pub const ReplayController = struct {
     context: *anyopaque,
     window_destroyed: ?*const fn (*anyopaque, *Window) void = null,
 };
 
 pub const EventOrigin = enum { native, injected, replay };
+
+/// Whether an event represents application-facing input that can safely be
+/// recorded and replayed independently of the active desktop compositor.
+///
+/// Configure, scale, suspension, and frame-pacing notifications describe the
+/// live native surface. Replaying old values while suppressing their live
+/// counterparts can desynchronize a Vulkan swapchain from that surface.
+pub fn isReplayableEvent(event: Event) bool {
+    return switch (event) {
+        .resize,
+        .framebuffer_resize,
+        .scale,
+        .render_suspended,
+        .frame_ready,
+        => false,
+        else => true,
+    };
+}
 
 pub const VTable = struct {
     deinit: *const fn (*State) void,
@@ -669,7 +687,8 @@ pub fn windowUpdateText(window: *Window, bytes: []const u8) void {
 /// uses this entry point to bypass native-event suppression without going
 /// through a platform queue.
 pub fn dispatchEvent(window: *Window, event: Event, origin: EventOrigin) void {
-    if (origin == .native and (window.replay_controller != null or window.ctx.replay_controller != null)) return;
+    const replay_controlled = window.replay_controller != null or window.ctx.replay_controller != null;
+    if (origin == .native and replay_controlled and isReplayableEvent(event)) return;
 
     if (origin != .replay) {
         if (window.event_observer) |observer| observer.event(observer.context, window, event);

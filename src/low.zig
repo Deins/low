@@ -265,7 +265,7 @@ test "root API exposes the supported contract" {
     _ = OffscreenOptions{};
     _ = Event{ .close = {} };
     _ = replay.Recorder;
-    _ = replay.Player;
+    _ = replay.Replayer;
     _ = replay.Recording;
     _ = Action.press;
     _ = MouseButton.left;
@@ -304,7 +304,7 @@ test "public replay helpers accept a Context" {
     _ = try recorder.nextFrame();
     var recording = try recorder.finish();
     defer recording.deinit();
-    var player = try replay.Player.init(@import("std").testing.allocator, &context, &recording, .{ .poll_live = false });
-    defer player.deinit();
-    _ = try player.nextFrame();
+    var replayer = try replay.Replayer.init(@import("std").testing.allocator, &context, &recording, .{ .poll_live = false });
+    defer replayer.deinit();
+    _ = try replayer.nextFrame();
 }

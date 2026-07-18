@@ -1,7 +1,7 @@
 //! Deterministic, frame-based input recording and replay.
 //!
 //! A recorder groups every observed window event into an application frame and
-//! stores the monotonic delta used by that frame. A player dispatches the same
+//! stores the monotonic delta used by that frame. A replayer dispatches the same
 //! events through low's normal state/callback path and returns the recorded
 //! delta, allowing simulation and rendering to use one deterministic clock.
 
@@ -178,6 +178,7 @@ pub const Recorder = struct {
         fn observe(observer_context: *anyopaque, window: *Window, event: Event) void {
             const self: *Inner = @ptrCast(@alignCast(observer_context));
             const frame_index = self.active_frame orelse return;
+            if (!runtime.isReplayableEvent(event)) return;
             const window_id: WindowId = switch (self.scope) {
                 .all => window.serial,
                 .windows => blk: {
@@ -282,7 +283,7 @@ pub const Recorder = struct {
 
     /// Samples the configured clock, opens a frame, non-blockingly polls the
     /// context, and closes the frame. Use the returned delta for application
-    /// update and recording timestamps.
+    /// update and video-recording timestamps.
     pub fn nextFrame(self: *Recorder) Error!Frame {
         const inner = self.inner;
         if (inner.sticky_error) |err| return @errorCast(err);
@@ -338,21 +339,22 @@ pub const ReplayScope = union(enum) {
     /// Match recorded window IDs to context creation indexes.
     all,
     /// Map IDs 0..N to the supplied windows. Other IDs may be assigned later
-    /// with `Player.mapWindow`.
+    /// with `Replayer.mapWindow`.
     windows: []const *Window,
 };
 
 pub const Pace = enum { unpaced, realtime };
 
-pub const PlayerOptions = struct {
+pub const ReplayerOptions = struct {
     scope: ReplayScope = .all,
     /// Pump native events before each replay frame. Replay-controlled windows
-    /// ignore them; other windows remain interactive.
+    /// ignore replayable input from this pump but retain live surface events;
+    /// other windows remain fully interactive.
     poll_live: bool = true,
     pace: Pace = .unpaced,
 };
 
-pub const Player = struct {
+pub const Replayer = struct {
     inner: *Inner,
 
     const Mapping = struct { id: WindowId, window: ?*Window };
@@ -407,7 +409,7 @@ pub const Player = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, context: anytype, recording: *const Recording, options: PlayerOptions) Error!Player {
+    pub fn init(allocator: std.mem.Allocator, context: anytype, recording: *const Recording, options: ReplayerOptions) Error!Replayer {
         try validate(recording);
         const state = contextState(context);
         const inner = try allocator.create(Inner);
@@ -439,7 +441,7 @@ pub const Player = struct {
         return .{ .inner = inner };
     }
 
-    pub fn deinit(self: *Player) void {
+    pub fn deinit(self: *Replayer) void {
         const inner = self.inner;
         inner.detach();
         inner.mappings.deinit(inner.allocator);
@@ -449,7 +451,7 @@ pub const Player = struct {
 
     /// Dispatches the next recorded frame and returns its deterministic time.
     /// `null` means the recording is complete.
-    pub fn nextFrame(self: *Player) Error!?Frame {
+    pub fn nextFrame(self: *Replayer) Error!?Frame {
         const inner = self.inner;
         if (inner.next_frame == inner.recording.frames.len) return null;
         const index = inner.next_frame;
@@ -477,33 +479,36 @@ pub const Player = struct {
 
     /// Dispatches a frame without moving the playback cursor. This is useful
     /// for custom schedulers, event filtering, and timeline editors.
-    pub fn dispatchFrame(self: *Player, index: usize) Error!void {
+    pub fn dispatchFrame(self: *Replayer, index: usize) Error!void {
         const inner = self.inner;
         if (index >= inner.recording.frames.len) return error.InvalidRecording;
         const frame = inner.recording.frames[index];
         for (inner.recording.events[frame.first_event..][0..frame.event_count]) |recorded| {
+            // Version 1 recordings may contain compositor-owned window events.
+            // Ignore them so older files cannot overwrite live surface state.
+            if (!runtime.isReplayableEvent(recorded.event)) continue;
             const window = inner.findWindow(recorded.window_id) orelse return error.MissingWindow;
             runtime.dispatchEvent(window, recorded.event, .replay);
         }
     }
 
     /// Overrides or adds a recorded-window mapping. This also makes the window
-    /// ignore native events until the player is deinitialized.
-    pub fn mapWindow(self: *Player, id: WindowId, window: *Window) Error!void {
+    /// ignore native input until the replayer is deinitialized.
+    pub fn mapWindow(self: *Replayer, id: WindowId, window: *Window) Error!void {
         if (window.ctx != self.inner.state) return error.DifferentContext;
         return attachMapping(self.inner, id, window);
     }
 
     /// Rewinds the timeline cursor. Reset application/window state separately
     /// when replaying the same recording again.
-    pub fn reset(self: *Player) void {
+    pub fn reset(self: *Replayer) void {
         self.inner.next_frame = 0;
         self.inner.elapsed_ns = 0;
         self.inner.pace_started_ns = null;
     }
 };
 
-fn attachMapping(inner: *Player.Inner, id: WindowId, window: *Window) Error!void {
+fn attachMapping(inner: *Replayer.Inner, id: WindowId, window: *Window) Error!void {
     if (window.replay_controller) |controller| {
         if (controller.context != @as(*anyopaque, @ptrCast(inner))) return error.AlreadyAttached;
     }
@@ -704,7 +709,7 @@ fn readEvent(allocator: std.mem.Allocator, reader: *std.Io.Reader) !Event {
     };
 }
 
-test "global recording round trips and replays window state with frame timing" {
+test "global recording round trips and replays input with frame timing" {
     const Offscreen = @import("offscreen_backend.zig").Backend;
     const allocator = std.testing.allocator;
 
@@ -722,6 +727,7 @@ test "global recording round trips and replays window state with frame timing" {
     try recorder.beginFrame(25);
     try first.injectEvent(.{ .key = .{ .key = .a, .raw_keycode = 38, .action = .release } });
     try second.injectEvent(.{ .resize = .{ .width = 800, .height = 450 } });
+    try second.injectEvent(.{ .focus = true });
     _ = try recorder.endFrame();
 
     var captured = try recorder.finish();
@@ -742,20 +748,46 @@ test "global recording round trips and replays window state with frame timing" {
 
     var replay_state = try Offscreen.init(allocator, .{});
     defer replay_state.deinit();
-    var player = try Player.init(allocator, replay_state, &loaded, .{ .poll_live = false });
-    defer player.deinit();
+    var replayer = try Replayer.init(allocator, replay_state, &loaded, .{ .poll_live = false });
+    defer replayer.deinit();
     const replay_first = try replay_state.createWindow(.{ .title = "first" });
     const replay_second = try replay_state.createWindow(.{ .title = "second" });
 
-    const frame0 = (try player.nextFrame()).?;
+    const frame0 = (try replayer.nextFrame()).?;
     try std.testing.expectEqual(@as(u64, 10), frame0.delta_ns);
     try std.testing.expect(replay_first.getKey(.a));
     try std.testing.expectEqualDeep(runtime.ContentOffset{ .x = 12.5, .y = 7.25 }, replay_second.getCursorPos());
-    const frame1 = (try player.nextFrame()).?;
+    const frame1 = (try replayer.nextFrame()).?;
     try std.testing.expectEqual(@as(u64, 35), frame1.elapsed_ns);
     try std.testing.expect(!replay_first.getKey(.a));
-    try std.testing.expectEqualDeep(runtime.ContentSize{ .width = 800, .height = 450 }, replay_second.getSize());
-    try std.testing.expect((try player.nextFrame()) == null);
+    try std.testing.expect(replay_second.isFocused());
+    try std.testing.expectEqualDeep(runtime.ContentSize{ .width = 1280, .height = 720 }, replay_second.getSize());
+    try std.testing.expect((try replayer.nextFrame()) == null);
+}
+
+test "replay ignores compositor-owned events from existing recordings" {
+    const Offscreen = @import("offscreen_backend.zig").Backend;
+    const allocator = std.testing.allocator;
+    var state = try Offscreen.init(allocator, .{});
+    defer state.deinit();
+    const window = try state.createWindow(.{ .title = "controlled" });
+
+    const frames = try allocator.dupe(FrameRecord, &.{.{ .delta_ns = 1, .first_event = 0, .event_count = 3 }});
+    const events = try allocator.dupe(RecordedEvent, &.{
+        .{ .window_id = 0, .event = .{ .resize = .{ .width = 3840, .height = 2160 } } },
+        .{ .window_id = 0, .event = .{ .frame_ready = 123 } },
+        .{ .window_id = 0, .event = .{ .key = .{ .key = .a, .action = .press } } },
+    });
+    var recording: Recording = .{ .allocator = allocator, .frames = frames, .events = events };
+    defer recording.deinit();
+    var replayer = try Replayer.init(allocator, state, &recording, .{ .poll_live = false });
+    defer replayer.deinit();
+
+    window.frame_ready = false;
+    _ = try replayer.nextFrame();
+    try std.testing.expectEqualDeep(runtime.ContentSize{ .width = 1280, .height = 720 }, window.getSize());
+    try std.testing.expect(!window.frame_ready);
+    try std.testing.expect(window.getKey(.a));
 }
 
 test "per-window recorder excludes unselected windows" {
@@ -793,17 +825,19 @@ test "per-window replay ignores native input only for the controlled window" {
     }});
     var recording: Recording = .{ .allocator = allocator, .frames = frames, .events = events };
     defer recording.deinit();
-    var player = try Player.init(allocator, state, &recording, .{
+    var replayer = try Replayer.init(allocator, state, &recording, .{
         .scope = .{ .windows = &.{controlled} },
         .poll_live = false,
     });
-    defer player.deinit();
+    defer replayer.deinit();
 
     runtime.windowUpdateKey(controlled, .b, 0, .press, .{});
     runtime.windowUpdateKey(live, .b, 0, .press, .{});
+    runtime.windowUpdateSize(controlled, .{ .width = 800, .height = 450 });
     try std.testing.expect(!controlled.getKey(.b));
     try std.testing.expect(live.getKey(.b));
-    _ = try player.nextFrame();
+    try std.testing.expectEqualDeep(runtime.ContentSize{ .width = 800, .height = 450 }, controlled.getSize());
+    _ = try replayer.nextFrame();
     try std.testing.expect(controlled.getKey(.a));
 
     // Explicit synthetic injection remains available while native input is

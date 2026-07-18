@@ -36,20 +36,24 @@ of all returned deltas and is the deterministic application timestamp.
 Replay uses the same loop shape and does not sleep by default:
 
 ```zig
-var player = try low.replay.Player.init(allocator, &context, &recording, .{});
-defer player.deinit();
+var replayer = try low.replay.Replayer.init(allocator, &context, &recording, .{});
+defer replayer.deinit();
 
-while (try player.nextFrame()) |frame| {
+while (try replayer.nextFrame()) |frame| {
     update(frame.deltaSeconds(f32));
     try draw();
 }
 ```
 
-Native events are ignored for replay-controlled windows. Explicit
-`Window.injectEvent` calls still work, allowing a debugger to change state or
-branch from the recorded timeline. Set `.pace = .realtime` to reproduce the
-wall-clock cadence as well; this does not change the deltas returned to the
-application.
+Native input events are ignored for replay-controlled windows. Live resize,
+framebuffer-size, content-scale, render-suspension, and frame-pacing events are
+still delivered because they describe the current native surface and are not
+recorded or replayed. In particular, an input callback may safely request
+fullscreen during replay without stale recorded configure events replacing the
+compositor's response. Explicit `Window.injectEvent` calls still work, allowing
+a debugger to change state or branch from the recorded timeline. Set
+`.pace = .realtime` to reproduce the wall-clock cadence as well; this does not
+change the deltas returned to the application.
 
 ## Per-window recording and mixed live/replay
 
@@ -65,14 +69,15 @@ var recorder = try low.replay.Recorder.init(allocator, &context, .{
 Use the matching scope during replay:
 
 ```zig
-var player = try low.replay.Player.init(allocator, &context, &recording, .{
+var replayer = try low.replay.Replayer.init(allocator, &context, &recording, .{
     .scope = .{ .windows = &.{preview_window} },
 });
 ```
 
-`Player.nextFrame` still pumps native events by default. Only
-`preview_window` suppresses them, so other editor windows remain interactive.
-For non-positional or dynamic mappings, call `player.mapWindow(id, window)`.
+`Replayer.nextFrame` still pumps native events by default. Only
+`preview_window` suppresses native input, so other editor windows remain
+interactive. Native surface/configuration events remain live for every window.
+For non-positional or dynamic mappings, call `replayer.mapWindow(id, window)`.
 
 Whole-context recordings identify windows by their context creation index.
 Creating windows in the same order maps a multi-window application
@@ -108,8 +113,8 @@ Events injected or dispatched between `beginFrame` and `endFrame` are captured
 in order. A custom `low.replay.Clock` can instead make `Recorder.nextFrame`
 sample an application-owned clock.
 
-For custom replay scheduling, `Player.dispatchFrame(index)` dispatches events
-without moving the playback cursor. `Player.reset()` rewinds the cursor but
+For custom replay scheduling, `Replayer.dispatchFrame(index)` dispatches events
+without moving the replay cursor. `Replayer.reset()` rewinds the cursor but
 intentionally does not reset application or window state.
 
 `Window.injectEvent` is backend-neutral and immediate. It uses the same state
@@ -122,7 +127,7 @@ Use the replay frame's delta for every simulation update that affects pixels.
 For Vulkan Video's monotonic timing, also pass the deterministic elapsed time:
 
 ```zig
-const frame = try recorder.nextFrame(); // or player.nextFrame().?
+const frame = try recorder.nextFrame(); // or replayer.nextFrame().?
 update(frame.deltaSeconds(f32));
 
 var render_frame = try target.acquire();
@@ -136,3 +141,10 @@ The same event sequence, update deltas, frame admission decisions, and video
 timestamps then reach screenshot/readback and recording paths. Fixed-rate video
 recording may use its normal fixed timestamp policy; the replay timestamp still
 drives identical rate admission.
+
+The [`multiwindow_triangles`](../examples/multiwindow_triangles/README.md#input-timeline-recording-and-replay)
+example is the complete reference implementation. Its `--record-input` path
+wraps polling and compositor waits with explicit frame boundaries, while
+`--replay-input` drives both windows until timeline exhaustion. Combining it
+with `--desktop=offscreen --dump-frames` demonstrates byte-identical frame
+output.
