@@ -404,21 +404,61 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn onMouseButton(_: *low.Window, button: low.MouseButton, action: low.Action, _: low.Modifiers) void {
-    std.log.info("mouse {s}: {s}", .{ @tagName(button), @tagName(action) });
+fn onMouseButton(_: *low.Window, button: low.MouseButton, action: low.Action, mods: low.Modifiers) void {
+    std.log.info("mouse {s}: {s} | {f}", .{ @tagName(button), @tagName(action), ModifierDebug{ .mods = mods } });
 }
 
 fn onScroll(_: *low.Window, x: f64, y: f64) void {
     std.log.info("scroll: x={d:.2}, y={d:.2}", .{ x, y });
 }
 
-fn onKey(_: *low.Window, key: low.Key, raw_keycode: u32, action: low.Action, _: low.Modifiers) void {
-    std.log.info("key {s} (code {d}): {s}", .{ @tagName(key), raw_keycode, @tagName(action) });
+fn onKey(_: *low.Window, key: low.Key, raw_keycode: u32, action: low.Action, mods: low.Modifiers) void {
+    std.log.info("key {s} (code {d}): {s} | {f}", .{ @tagName(key), raw_keycode, @tagName(action), ModifierDebug{ .mods = mods } });
 }
 
 fn onText(_: *low.Window, text: []const u8) void {
     std.log.info("text input: {s}", .{text});
 }
+
+const ModifierDebug = struct {
+    mods: low.Modifiers,
+
+    pub fn format(self: ModifierDebug, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeAll("mods[aggregate=");
+        var wrote = false;
+        try writeActive(writer, &wrote, self.mods.shift, "shift");
+        try writeActive(writer, &wrote, self.mods.control, "control");
+        try writeActive(writer, &wrote, self.mods.alt, "alt");
+        try writeActive(writer, &wrote, self.mods.super, "super");
+        if (!wrote) try writer.writeAll("none");
+
+        try writer.writeAll("; sides=");
+        wrote = false;
+        try writeActive(writer, &wrote, self.mods.left_shift, "left_shift");
+        try writeActive(writer, &wrote, self.mods.right_shift, "right_shift");
+        try writeActive(writer, &wrote, self.mods.left_control, "left_control");
+        try writeActive(writer, &wrote, self.mods.right_control, "right_control");
+        try writeActive(writer, &wrote, self.mods.left_alt, "left_alt");
+        try writeActive(writer, &wrote, self.mods.right_alt, "right_alt");
+        try writeActive(writer, &wrote, self.mods.left_super, "left_super");
+        try writeActive(writer, &wrote, self.mods.right_super, "right_super");
+        if (!wrote) try writer.writeAll("none");
+
+        try writer.writeAll("; locks=");
+        wrote = false;
+        try writeActive(writer, &wrote, self.mods.caps_lock, "caps_lock");
+        try writeActive(writer, &wrote, self.mods.num_lock, "num_lock");
+        if (!wrote) try writer.writeAll("none");
+        try writer.writeByte(']');
+    }
+
+    fn writeActive(writer: *std.Io.Writer, wrote: *bool, active: bool, name: []const u8) std.Io.Writer.Error!void {
+        if (!active) return;
+        if (wrote.*) try writer.writeByte(',');
+        try writer.writeAll(name);
+        wrote.* = true;
+    }
+};
 
 fn selectDevice(
     allocator: std.mem.Allocator,

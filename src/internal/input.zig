@@ -24,7 +24,43 @@ pub const Modifiers = packed struct {
     super: bool = false,
     caps_lock: bool = false,
     num_lock: bool = false,
+    left_shift: bool = false,
+    right_shift: bool = false,
+    left_control: bool = false,
+    right_control: bool = false,
+    left_alt: bool = false,
+    right_alt: bool = false,
+    left_super: bool = false,
+    right_super: bool = false,
 };
+
+/// Updates the physical side represented by a modifier key. Aggregate fields
+/// remain backend-owned because layouts can activate them through mechanisms
+/// such as AltGr and latched modifiers.
+pub fn setModifierSide(mods: *Modifiers, key: Key, active: bool) void {
+    switch (key) {
+        .left_shift => mods.left_shift = active,
+        .right_shift => mods.right_shift = active,
+        .left_control => mods.left_control = active,
+        .right_control => mods.right_control = active,
+        .left_alt => mods.left_alt = active,
+        .right_alt => mods.right_alt = active,
+        .left_command => mods.left_super = active,
+        .right_command => mods.right_super = active,
+        else => {},
+    }
+}
+
+pub fn clearModifierSides(mods: *Modifiers) void {
+    mods.left_shift = false;
+    mods.right_shift = false;
+    mods.left_control = false;
+    mods.right_control = false;
+    mods.left_alt = false;
+    mods.right_alt = false;
+    mods.left_super = false;
+    mods.right_super = false;
+}
 
 /// Keyboard text callbacks carry text input, not the control bytes generated
 /// by keys such as Backspace, Enter, and Tab.  Those keys are delivered by the
@@ -45,11 +81,28 @@ test "control bytes are not text input" {
     try std.testing.expect(!isPrintableText("\x7f"));
 }
 
+test "modifier side helpers preserve aggregate state" {
+    var mods: Modifiers = .{ .shift = true, .control = true };
+    setModifierSide(&mods, .right_shift, true);
+    setModifierSide(&mods, .left_alt, true);
+    try std.testing.expect(mods.right_shift);
+    try std.testing.expect(mods.left_alt);
+    try std.testing.expect(mods.shift);
+    try std.testing.expect(mods.control);
+    clearModifierSides(&mods);
+    try std.testing.expect(!mods.right_shift);
+    try std.testing.expect(!mods.left_alt);
+    try std.testing.expect(mods.shift);
+    try std.testing.expect(mods.control);
+}
+
 pub const CursorShape = enum {
     arrow,
     crosshair,
     hand,
     ibeam,
+    wait,
+    progress,
     hidden,
     not_allowed,
     resize_all,

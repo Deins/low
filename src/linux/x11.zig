@@ -156,6 +156,52 @@ pub const XVisibilityEvent = extern struct {
     state: c_int,
 };
 
+pub const XPropertyEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: ?*Display,
+    window: Window,
+    atom: Atom,
+    time: c_ulong,
+    state: c_int,
+};
+
+pub const XSelectionClearEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: ?*Display,
+    window: Window,
+    selection: Atom,
+    time: c_ulong,
+};
+
+pub const XSelectionRequestEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: ?*Display,
+    owner: Window,
+    requestor: Window,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: c_ulong,
+};
+
+pub const XSelectionEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: ?*Display,
+    requestor: Window,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: c_ulong,
+};
+
 pub const XClientMessageData = extern union {
     b: [20]u8,
     s: [10]c_short,
@@ -186,6 +232,10 @@ pub const XEvent = extern union {
     xmap: XMapEvent,
     xunmap: XUnmapEvent,
     xvisibility: XVisibilityEvent,
+    xproperty: XPropertyEvent,
+    xselectionclear: XSelectionClearEvent,
+    xselectionrequest: XSelectionRequestEvent,
+    xselection: XSelectionEvent,
     xclient: XClientMessageEvent,
     pad: [24]c_long,
 };
@@ -218,6 +268,13 @@ pub const Atoms = struct {
     net_wm_state_maximized_vert: Atom = 0,
     net_wm_name: Atom = 0,
     utf8_string: Atom = 0,
+    clipboard: Atom = 0,
+    clipboard_property: Atom = 0,
+    targets: Atom = 0,
+    text: Atom = 0,
+    text_plain: Atom = 0,
+    text_plain_utf8: Atom = 0,
+    incr: Atom = 0,
     net_wm_window_type: Atom = 0,
     net_wm_window_type_normal: Atom = 0,
     motif_wm_hints: Atom = 0,
@@ -259,6 +316,10 @@ pub const FocusOut: c_int = 10;
 pub const UnmapNotify: c_int = 18;
 pub const MapNotify: c_int = 19;
 pub const ConfigureNotify: c_int = 22;
+pub const PropertyNotify: c_int = 28;
+pub const SelectionClear: c_int = 29;
+pub const SelectionRequest: c_int = 30;
+pub const SelectionNotify: c_int = 31;
 pub const ClientMessage: c_int = 33;
 pub const VisibilityNotify: c_int = 15;
 
@@ -267,7 +328,12 @@ pub const VisibilityPartiallyObscured: c_int = 1;
 pub const VisibilityFullyObscured: c_int = 2;
 
 pub const PropModeReplace: c_int = 0;
+pub const PropertyNewValue: c_int = 0;
+pub const PropertyDelete: c_int = 1;
+pub const None: XID = 0;
+pub const AnyPropertyType: Atom = 0;
 pub const XA_ATOM: Atom = 4;
+pub const XA_STRING: Atom = 31;
 pub const PMinSize: c_long = 1 << 4;
 pub const PMaxSize: c_long = 1 << 5;
 
@@ -280,6 +346,7 @@ pub const XC_left_ptr: c_uint = 68;
 pub const XC_pirate: c_uint = 88;
 pub const XC_sb_h_double_arrow: c_uint = 108;
 pub const XC_sb_v_double_arrow: c_uint = 116;
+pub const XC_watch: c_uint = 150;
 pub const XC_xterm: c_uint = 152;
 
 const XOpenDisplayFn = *const fn (?[*:0]const u8) callconv(.c) ?*Display;
@@ -300,6 +367,7 @@ const XFlushFn = *const fn (*Display) callconv(.c) c_int;
 const XPendingFn = *const fn (*Display) callconv(.c) c_int;
 const XNextEventFn = *const fn (*Display, *XEvent) callconv(.c) c_int;
 const XLookupStringFn = *const fn (*XKeyEvent, [*]u8, c_int, ?*KeySym, ?*anyopaque) callconv(.c) c_int;
+const XQueryKeymapFn = *const fn (*Display, *[32]u8) callconv(.c) c_int;
 const XCreateBitmapFromDataFn = *const fn (*Display, Drawable, [*]const u8, c_uint, c_uint) callconv(.c) Pixmap;
 const XFreePixmapFn = *const fn (*Display, Pixmap) callconv(.c) c_int;
 const XCreatePixmapCursorFn = *const fn (*Display, Pixmap, Pixmap, *XColor, *XColor, c_uint, c_uint) callconv(.c) Cursor;
@@ -308,6 +376,12 @@ const XDefineCursorFn = *const fn (*Display, Window, Cursor) callconv(.c) c_int;
 const XUndefineCursorFn = *const fn (*Display, Window) callconv(.c) c_int;
 const XSetWMNormalHintsFn = *const fn (*Display, Window, *XSizeHints) callconv(.c) void;
 const XChangePropertyFn = *const fn (*Display, Window, Atom, Atom, c_int, c_int, ?*const anyopaque, c_int) callconv(.c) c_int;
+const XDeletePropertyFn = *const fn (*Display, Window, Atom) callconv(.c) c_int;
+const XGetWindowPropertyFn = *const fn (*Display, Window, Atom, c_long, c_long, c_int, Atom, *Atom, *c_int, *c_ulong, *c_ulong, *?[*]u8) callconv(.c) c_int;
+const XSetSelectionOwnerFn = *const fn (*Display, Atom, Window, c_ulong) callconv(.c) c_int;
+const XGetSelectionOwnerFn = *const fn (*Display, Atom) callconv(.c) Window;
+const XConvertSelectionFn = *const fn (*Display, Atom, Atom, Atom, Window, c_ulong) callconv(.c) c_int;
+const XFreeFn = *const fn (?*anyopaque) callconv(.c) c_int;
 const XStoreNameFn = *const fn (*Display, Window, [*:0]const u8) callconv(.c) c_int;
 const XSendEventFn = *const fn (*Display, Window, c_int, c_long, *XEvent) callconv(.c) c_int;
 const XIconifyWindowFn = *const fn (*Display, Window, c_int) callconv(.c) c_int;
@@ -336,6 +410,7 @@ const Api = struct {
     pending: XPendingFn,
     next_event: XNextEventFn,
     lookup_string: XLookupStringFn,
+    query_keymap: XQueryKeymapFn,
     create_bitmap_from_data: XCreateBitmapFromDataFn,
     free_pixmap: XFreePixmapFn,
     create_pixmap_cursor: XCreatePixmapCursorFn,
@@ -344,6 +419,12 @@ const Api = struct {
     undefine_cursor: XUndefineCursorFn,
     set_wm_normal_hints: XSetWMNormalHintsFn,
     change_property: XChangePropertyFn,
+    delete_property: XDeletePropertyFn,
+    get_window_property: XGetWindowPropertyFn,
+    set_selection_owner: XSetSelectionOwnerFn,
+    get_selection_owner: XGetSelectionOwnerFn,
+    convert_selection: XConvertSelectionFn,
+    free: XFreeFn,
     store_name: XStoreNameFn,
     send_event: XSendEventFn,
     iconify_window: XIconifyWindowFn,
@@ -390,6 +471,7 @@ pub fn ensureLoaded() Error!void {
         .pending = loaded_library.lookup(XPendingFn, "XPending") orelse return error.MissingSymbol,
         .next_event = loaded_library.lookup(XNextEventFn, "XNextEvent") orelse return error.MissingSymbol,
         .lookup_string = loaded_library.lookup(XLookupStringFn, "XLookupString") orelse return error.MissingSymbol,
+        .query_keymap = loaded_library.lookup(XQueryKeymapFn, "XQueryKeymap") orelse return error.MissingSymbol,
         .create_bitmap_from_data = loaded_library.lookup(XCreateBitmapFromDataFn, "XCreateBitmapFromData") orelse return error.MissingSymbol,
         .free_pixmap = loaded_library.lookup(XFreePixmapFn, "XFreePixmap") orelse return error.MissingSymbol,
         .create_pixmap_cursor = loaded_library.lookup(XCreatePixmapCursorFn, "XCreatePixmapCursor") orelse return error.MissingSymbol,
@@ -398,6 +480,12 @@ pub fn ensureLoaded() Error!void {
         .undefine_cursor = loaded_library.lookup(XUndefineCursorFn, "XUndefineCursor") orelse return error.MissingSymbol,
         .set_wm_normal_hints = loaded_library.lookup(XSetWMNormalHintsFn, "XSetWMNormalHints") orelse return error.MissingSymbol,
         .change_property = loaded_library.lookup(XChangePropertyFn, "XChangeProperty") orelse return error.MissingSymbol,
+        .delete_property = loaded_library.lookup(XDeletePropertyFn, "XDeleteProperty") orelse return error.MissingSymbol,
+        .get_window_property = loaded_library.lookup(XGetWindowPropertyFn, "XGetWindowProperty") orelse return error.MissingSymbol,
+        .set_selection_owner = loaded_library.lookup(XSetSelectionOwnerFn, "XSetSelectionOwner") orelse return error.MissingSymbol,
+        .get_selection_owner = loaded_library.lookup(XGetSelectionOwnerFn, "XGetSelectionOwner") orelse return error.MissingSymbol,
+        .convert_selection = loaded_library.lookup(XConvertSelectionFn, "XConvertSelection") orelse return error.MissingSymbol,
+        .free = loaded_library.lookup(XFreeFn, "XFree") orelse return error.MissingSymbol,
         .store_name = loaded_library.lookup(XStoreNameFn, "XStoreName") orelse return error.MissingSymbol,
         .send_event = loaded_library.lookup(XSendEventFn, "XSendEvent") orelse return error.MissingSymbol,
         .iconify_window = loaded_library.lookup(XIconifyWindowFn, "XIconifyWindow") orelse return error.MissingSymbol,
@@ -468,6 +556,9 @@ pub fn XNextEvent(display: *Display, event: *XEvent) c_int {
 pub fn XLookupString(event: *XKeyEvent, buffer: [*]u8, bytes_buffer: c_int, keysym: ?*KeySym, compose: ?*anyopaque) c_int {
     return loaded().lookup_string(event, buffer, bytes_buffer, keysym, compose);
 }
+pub fn XQueryKeymap(display: *Display, keys: *[32]u8) c_int {
+    return loaded().query_keymap(display, keys);
+}
 pub fn XCreateBitmapFromData(display: *Display, drawable: Drawable, data: [*]const u8, width: c_uint, height: c_uint) Pixmap {
     return loaded().create_bitmap_from_data(display, drawable, data, width, height);
 }
@@ -491,6 +582,24 @@ pub fn XSetWMNormalHints(display: *Display, window: Window, hints: *XSizeHints) 
 }
 pub fn XChangeProperty(display: *Display, window: Window, property: Atom, type_: Atom, format: c_int, mode: c_int, data: ?*const anyopaque, elements: c_int) c_int {
     return loaded().change_property(display, window, property, type_, format, mode, data, elements);
+}
+pub fn XDeleteProperty(display: *Display, window: Window, property: Atom) c_int {
+    return loaded().delete_property(display, window, property);
+}
+pub fn XGetWindowProperty(display: *Display, window: Window, property: Atom, offset: c_long, length: c_long, delete: c_int, requested_type: Atom, actual_type: *Atom, actual_format: *c_int, item_count: *c_ulong, bytes_after: *c_ulong, value: *?[*]u8) c_int {
+    return loaded().get_window_property(display, window, property, offset, length, delete, requested_type, actual_type, actual_format, item_count, bytes_after, value);
+}
+pub fn XSetSelectionOwner(display: *Display, selection: Atom, owner: Window, time: c_ulong) c_int {
+    return loaded().set_selection_owner(display, selection, owner, time);
+}
+pub fn XGetSelectionOwner(display: *Display, selection: Atom) Window {
+    return loaded().get_selection_owner(display, selection);
+}
+pub fn XConvertSelection(display: *Display, selection: Atom, target: Atom, property: Atom, requestor: Window, time: c_ulong) c_int {
+    return loaded().convert_selection(display, selection, target, property, requestor, time);
+}
+pub fn XFree(value: ?*anyopaque) c_int {
+    return loaded().free(value);
 }
 pub fn XStoreName(display: *Display, window: Window, name: [*:0]const u8) c_int {
     return loaded().store_name(display, window, name);

@@ -88,6 +88,21 @@ pub const ReplayController = struct {
 
 pub const EventOrigin = enum { native, injected, replay };
 
+fn fallbackClipboardText(state: *State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    return state.clipboard.get(allocator);
+}
+
+fn fallbackClipboardTextSet(state: *State, text: []const u8) std.mem.Allocator.Error!void {
+    return state.clipboard.set(state.allocator, text);
+}
+
+fn environmentPreferredColorScheme(_: *State) ?ColorScheme {
+    const value = std.mem.span(std.c.getenv("COLORSCHEME") orelse return null);
+    if (std.ascii.eqlIgnoreCase(value, "dark")) return .dark;
+    if (std.ascii.eqlIgnoreCase(value, "light")) return .light;
+    return null;
+}
+
 /// Whether an event represents application-facing input that can safely be
 /// recorded and replayed independently of the active desktop compositor.
 ///
@@ -134,6 +149,9 @@ pub const VTable = struct {
     apply_scale: *const fn (*Window, f32) void,
     request_frame: *const fn (*Window) bool,
     cancel_frame_request: *const fn (*Window) void,
+    clipboard_text: *const fn (*State, std.mem.Allocator) std.mem.Allocator.Error![]u8 = fallbackClipboardText,
+    clipboard_text_set: *const fn (*State, []const u8) std.mem.Allocator.Error!void = fallbackClipboardTextSet,
+    preferred_color_scheme: *const fn (*State) ?ColorScheme = environmentPreferredColorScheme,
 };
 
 pub const State = struct {
@@ -153,21 +171,15 @@ pub const State = struct {
     }
 
     pub fn clipboardText(self: *State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-        return self.clipboard.get(allocator);
+        return self.vtable.clipboard_text(self, allocator);
     }
 
     pub fn clipboardTextSet(self: *State, text: []const u8) std.mem.Allocator.Error!void {
-        return self.clipboard.set(self.allocator, text);
+        return self.vtable.clipboard_text_set(self, text);
     }
 
-    pub fn preferredColorScheme(_: *State) ?ColorScheme {
-        // Desktop portals and toolkit settings are backend-specific.  The
-        // explicit environment override is useful for minimal compositors and
-        // keeps the result deterministic for headless integration tests.
-        const value = std.mem.span(std.c.getenv("COLORSCHEME") orelse return null);
-        if (std.ascii.eqlIgnoreCase(value, "dark")) return .dark;
-        if (std.ascii.eqlIgnoreCase(value, "light")) return .light;
-        return null;
+    pub fn preferredColorScheme(self: *State) ?ColorScheme {
+        return self.vtable.preferred_color_scheme(self);
     }
 
     pub fn nativeDisplay(self: *State) *anyopaque {

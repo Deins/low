@@ -192,6 +192,14 @@ fn cancelFrameRequest(window: *api.Window) void {
     nativeWindow(window).cancelFrameRequest();
 }
 
+fn clipboardText(state: *api.State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    return data(state).native_state.clipboardText(allocator);
+}
+
+fn clipboardTextSet(state: *api.State, text_value: []const u8) std.mem.Allocator.Error!void {
+    return data(state).native_state.clipboardTextSet(text_value);
+}
+
 fn pumpEvents(state: *api.State, timeout_ms: i32) api.Error!bool {
     const inner = data(state).native_state;
     if (timeout_ms == 0) {
@@ -296,6 +304,8 @@ const vtable: api.VTable = .{
     .apply_scale = applyScale,
     .request_frame = requestFrame,
     .cancel_frame_request = cancelFrameRequest,
+    .clipboard_text = clipboardText,
+    .clipboard_text_set = clipboardTextSet,
 };
 
 test {

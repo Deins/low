@@ -151,6 +151,7 @@ fn addLinuxSupport(
     scanner.generate("wl_compositor", 5);
     scanner.generate("wl_seat", 5);
     scanner.generate("wl_output", 4);
+    scanner.generate("wl_data_device_manager", 3);
     scanner.generate("xdg_wm_base", 6);
     scanner.generate("zxdg_decoration_manager_v1", 2);
     scanner.generate("wp_cursor_shape_manager_v1", 1);

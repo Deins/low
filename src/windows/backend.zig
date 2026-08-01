@@ -4,6 +4,7 @@ const runtime = @import("../internal/runtime.zig");
 const input = @import("../internal/input.zig");
 const win32 = @import("win32").everything;
 const offscreen_backend = @import("../offscreen_backend.zig").Backend;
+const log = std.log.scoped(.low_windows);
 
 pub const BackendKind = types.BackendKind;
 pub const Error = runtime.Error;
@@ -36,6 +37,7 @@ const WindowData = struct {
     windowed: ?WindowedState = null,
     capture_center: win32.POINT = .{ .x = 0, .y = 0 },
     capture_screen_center: win32.POINT = .{ .x = 0, .y = 0 },
+    pending_high_surrogate: ?u16 = null,
 };
 
 pub fn initState(allocator: std.mem.Allocator, options: InitOptions) Error!*runtime.State {
@@ -166,6 +168,8 @@ fn createWindow(state: *runtime.State, options: WindowOptions) Error!*Window {
         window,
     ) orelse return error.WindowCreationFailed;
     native.handle = hwnd;
+    applyPreferredTitlebar(window);
+    placeInitialWindow(window, options);
     data.windows.append(data.allocator, window) catch {
         _ = win32.DestroyWindow(hwnd);
         return error.OutOfMemory;
@@ -186,6 +190,125 @@ fn destroyWindow(window: *Window) void {
 
 fn nativeSurface(window: *Window) usize {
     return @intFromPtr(windowHandle(window));
+}
+
+fn clipboardText(state: *runtime.State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    if (win32.OpenClipboard(null) == win32.FALSE) {
+        log.warn("system clipboard unavailable; using in-process text fallback", .{});
+        return state.clipboard.get(allocator);
+    }
+    defer _ = win32.CloseClipboard();
+
+    if (win32.IsClipboardFormatAvailable(@intFromEnum(win32.CF_UNICODETEXT)) == win32.FALSE) {
+        return emptyClipboardText(state, allocator);
+    }
+    const handle = win32.GetClipboardData(@intFromEnum(win32.CF_UNICODETEXT)) orelse {
+        log.warn("system clipboard text could not be retrieved; using in-process text fallback", .{});
+        return state.clipboard.get(allocator);
+    };
+    const global: isize = @bitCast(@intFromPtr(handle));
+    const raw = win32.GlobalLock(global) orelse {
+        log.warn("system clipboard text could not be locked; using in-process text fallback", .{});
+        return state.clipboard.get(allocator);
+    };
+    defer _ = win32.GlobalUnlock(global);
+    const capacity = win32.GlobalSize(global) / @sizeOf(u16);
+    if (capacity == 0) {
+        return emptyClipboardText(state, allocator);
+    }
+    const wide_buffer = @as([*]const u16, @ptrCast(@alignCast(raw)))[0..capacity];
+    const length = std.mem.indexOfScalar(u16, wide_buffer, 0) orelse {
+        log.warn("system clipboard text is not terminated; treating it as empty", .{});
+        return emptyClipboardText(state, allocator);
+    };
+    const text = std.unicode.utf16LeToUtf8Alloc(allocator, wide_buffer[0..length]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            log.warn("system clipboard contains invalid UTF-16; treating it as empty", .{});
+            return emptyClipboardText(state, allocator);
+        },
+    };
+    state.clipboard.set(state.allocator, text) catch {};
+    return text;
+}
+
+fn emptyClipboardText(state: *runtime.State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    state.clipboard.set(state.allocator, "") catch {};
+    return allocator.dupe(u8, "");
+}
+
+fn clipboardTextSet(state: *runtime.State, text: []const u8) std.mem.Allocator.Error!void {
+    // Keep a process-local copy for transient native clipboard failures.
+    try state.clipboard.set(state.allocator, text);
+
+    const windows = stateData(state).windows.items;
+    const owner = if (windows.len != 0) windowHandle(windows[0]) else {
+        log.warn("system clipboard needs a window owner; retained text in the in-process fallback", .{});
+        return;
+    };
+
+    const wide = std.unicode.utf8ToUtf16LeAllocZ(state.allocator, text) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidUtf8 => {
+            log.warn("clipboard text is invalid UTF-8; retained only in the in-process fallback", .{});
+            return;
+        },
+    };
+    defer state.allocator.free(wide);
+    const source = std.mem.sliceAsBytes(wide.ptr[0 .. wide.len + 1]);
+    const global = win32.GlobalAlloc(.{ .MEM_MOVEABLE = 1 }, source.len);
+    if (global == 0) {
+        log.warn("system clipboard allocation failed; retained text in the in-process fallback", .{});
+        return;
+    }
+    var owned = true;
+    defer if (owned) {
+        _ = win32.GlobalFree(global);
+    };
+    const raw = win32.GlobalLock(global) orelse {
+        log.warn("system clipboard allocation could not be locked; retained text in the in-process fallback", .{});
+        return;
+    };
+    @memcpy(@as([*]u8, @ptrCast(raw))[0..source.len], source);
+    _ = win32.GlobalUnlock(global);
+
+    if (win32.OpenClipboard(owner) == win32.FALSE) {
+        log.warn("system clipboard unavailable; retained text in the in-process fallback", .{});
+        return;
+    }
+    defer _ = win32.CloseClipboard();
+    if (win32.EmptyClipboard() == win32.FALSE) {
+        log.warn("system clipboard could not be replaced; retained text in the in-process fallback", .{});
+        return;
+    }
+
+    const handle: win32.HANDLE = @ptrFromInt(@as(usize, @bitCast(global)));
+    if (win32.SetClipboardData(@intFromEnum(win32.CF_UNICODETEXT), handle) != null) {
+        owned = false;
+    } else {
+        log.warn("system clipboard rejected Unicode text; retained text in the in-process fallback", .{});
+    }
+}
+
+fn preferredColorScheme(_: *runtime.State) ?runtime.ColorScheme {
+    if (std.c.getenv("COLORSCHEME")) |raw| {
+        const override = std.mem.span(raw);
+        if (std.ascii.eqlIgnoreCase(override, "dark")) return .dark;
+        if (std.ascii.eqlIgnoreCase(override, "light")) return .light;
+    }
+    var value: u32 = 1;
+    var size: u32 = @sizeOf(@TypeOf(value));
+    const result = win32.RegGetValueW(
+        win32.HKEY_CURRENT_USER,
+        win32.L("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+        win32.L("AppsUseLightTheme"),
+        win32.RRF_RT_REG_DWORD,
+        null,
+        &value,
+        &size,
+    );
+    if (result != win32.NO_ERROR or size != @sizeOf(@TypeOf(value))) return null;
+    return if (value == 0) .dark else .light;
 }
 
 fn pumpEvents(_: *runtime.State, timeout_ms: i32) Error!bool {
@@ -350,6 +473,60 @@ fn adjustedOuterSize(client: runtime.Size, style: win32.WINDOW_STYLE, ex_style: 
     return .{ .width = rect.right - rect.left, .height = rect.bottom - rect.top };
 }
 
+fn placeInitialWindow(window: *Window, options: WindowOptions) void {
+    const hwnd = windowHandle(window);
+    const dpi = win32.GetDpiForWindow(hwnd);
+    const style: win32.WINDOW_STYLE = @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(hwnd, ._STYLE))))));
+    const ex_style: win32.WINDOW_EX_STYLE = @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(hwnd, ._EXSTYLE))))));
+    const outer = adjustedOuterSize(types.scaledSize(options.size, dpiScale(dpi)), style, ex_style, dpi);
+
+    var flags: win32.SET_WINDOW_POS_FLAGS = .{ .NOZORDER = 1, .NOACTIVATE = 1 };
+    var x: i32 = 0;
+    var y: i32 = 0;
+    var monitor_info: win32.MONITORINFO = .{
+        .cbSize = @sizeOf(win32.MONITORINFO),
+        .rcMonitor = undefined,
+        .rcWork = undefined,
+        .dwFlags = 0,
+    };
+    const monitor = win32.MonitorFromWindow(hwnd, win32.MONITOR_DEFAULTTONEAREST);
+    if (monitor != null and win32.GetMonitorInfoW(monitor, &monitor_info) != 0) {
+        const work_width = monitor_info.rcWork.right - monitor_info.rcWork.left;
+        const work_height = monitor_info.rcWork.bottom - monitor_info.rcWork.top;
+        // Preserve the requested client size. If a window is larger than the
+        // work area, keep its top-left corner reachable instead of silently
+        // shrinking application content.
+        x = centeredAxisPosition(monitor_info.rcWork.left, work_width, outer.width);
+        y = centeredAxisPosition(monitor_info.rcWork.top, work_height, outer.height);
+    } else {
+        flags.NOMOVE = 1;
+    }
+    _ = win32.SetWindowPos(hwnd, null, x, y, outer.width, outer.height, flags);
+
+    var client: win32.RECT = undefined;
+    if (win32.GetClientRect(hwnd, &client) != 0) {
+        const pixels: runtime.Size = .{ .width = client.right - client.left, .height = client.bottom - client.top };
+        window.content_scale = dpiScale(dpi);
+        window.framebuffer_size = pixels;
+        window.size = window.pixelToContentSize(pixels);
+    }
+}
+
+fn centeredAxisPosition(work_start: i32, work_extent: i32, window_extent: i32) i32 {
+    return work_start + @divFloor(@max(0, work_extent - window_extent), 2);
+}
+
+fn applyPreferredTitlebar(window: *Window) void {
+    const dark = preferredColorScheme(window.ctx) == .dark;
+    const enabled: win32.BOOL = if (dark) win32.TRUE else win32.FALSE;
+    _ = win32.DwmSetWindowAttribute(
+        windowHandle(window),
+        win32.DWMWA_USE_IMMERSIVE_DARK_MODE,
+        &enabled,
+        @sizeOf(@TypeOf(enabled)),
+    );
+}
+
 fn currentOuterSizeForContent(window: *Window, content: runtime.Size) runtime.Size {
     const hwnd = windowHandle(window);
     const style: win32.WINDOW_STYLE = @bitCast(@as(u32, @truncate(@as(usize, @bitCast(win32.GetWindowLongPtrW(hwnd, ._STYLE))))));
@@ -390,6 +567,8 @@ fn cursorResource(shape: runtime.CursorShape) [*:0]align(1) const u16 {
         .crosshair => win32.IDC_CROSS,
         .hand => win32.IDC_HAND,
         .ibeam => win32.IDC_IBEAM,
+        .wait => win32.IDC_WAIT,
+        .progress => win32.IDC_APPSTARTING,
         .not_allowed => win32.IDC_NO,
         .resize_all => win32.IDC_SIZEALL,
         .resize_ns => win32.IDC_SIZENS,
@@ -442,6 +621,9 @@ const vtable: runtime.VTable = .{
     .apply_scale = applyScale,
     .request_frame = requestFrame,
     .cancel_frame_request = cancelFrameRequest,
+    .clipboard_text = clipboardText,
+    .clipboard_text_set = clipboardTextSet,
+    .preferred_color_scheme = preferredColorScheme,
 };
 
 fn dispatchMessages(wait: bool, timeout_ms: u32) bool {
@@ -571,12 +753,25 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
         win32.WM_SHOWWINDOW => {
             updateRenderSuspension(window, wparam == 0);
         },
+        win32.WM_SETTINGCHANGE => {
+            applyPreferredTitlebar(window);
+        },
         win32.WM_CHAR => {
-            var utf8: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(@intCast(wparam), &utf8) catch 0;
-            if (len != 0 and input.isPrintableText(utf8[0..len])) {
-                runtime.windowUpdateText(window, utf8[0..len]);
+            const unit: u16 = @truncate(wparam);
+            const native = windowData(window);
+            if (native.pending_high_surrogate) |high| {
+                native.pending_high_surrogate = null;
+                if (std.unicode.utf16DecodeSurrogatePair(&.{ high, unit })) |codepoint| {
+                    emitTextCodepoint(window, codepoint, @max(1, @as(usize, @bitCast(lparam)) & 0xffff));
+                    return 0;
+                } else |_| {}
             }
+            if (std.unicode.utf16IsHighSurrogate(unit)) {
+                native.pending_high_surrogate = unit;
+                return 0;
+            }
+            if (!std.unicode.utf16IsLowSurrogate(unit))
+                emitTextCodepoint(window, @intCast(unit), @max(1, @as(usize, @bitCast(lparam)) & 0xffff));
             return 0;
         },
         win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN, win32.WM_KEYUP, win32.WM_SYSKEYUP => {
@@ -584,13 +779,21 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             const released = message == win32.WM_KEYUP or message == win32.WM_SYSKEYUP;
             const repeated = !released and (@as(usize, @bitCast(lparam)) & 0x4000_0000) != 0;
             const action: Action = if (released) .release else if (repeated) .repeat else .press;
-            const repeat_count: usize = if (action == .repeat) @max(1, @as(usize, @bitCast(lparam)) & 0xffff) else 1;
-            for (0..repeat_count) |_| runtime.windowUpdateKey(window, key, @intCast(wparam), action, modifiers());
+            const repeat_count: usize = if (released) 1 else @max(1, @as(usize, @bitCast(lparam)) & 0xffff);
+            runtime.windowUpdateKey(window, key, @intCast(wparam), action, modifiers());
+            for (1..repeat_count) |_| runtime.windowUpdateKey(window, key, @intCast(wparam), .repeat, modifiers());
             if (message == win32.WM_KEYDOWN or message == win32.WM_KEYUP) return 0;
         },
         else => {},
     }
     return win32.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+fn emitTextCodepoint(window: *Window, codepoint: u21, repeat_count: usize) void {
+    var utf8: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(codepoint, &utf8) catch return;
+    if (!input.isPrintableText(utf8[0..len])) return;
+    for (0..repeat_count) |_| runtime.windowUpdateText(window, utf8[0..len]);
 }
 
 fn updateRenderSuspension(window: *Window, fallback_suspended: bool) void {
@@ -607,13 +810,29 @@ fn updateRenderSuspension(window: *Window, fallback_suspended: bool) void {
 }
 
 fn modifiers() Modifiers {
+    const left_shift = win32.GetKeyState(@intFromEnum(win32.VK_LSHIFT)) < 0;
+    const right_shift = win32.GetKeyState(@intFromEnum(win32.VK_RSHIFT)) < 0;
+    const left_control = win32.GetKeyState(@intFromEnum(win32.VK_LCONTROL)) < 0;
+    const right_control = win32.GetKeyState(@intFromEnum(win32.VK_RCONTROL)) < 0;
+    const left_alt = win32.GetKeyState(@intFromEnum(win32.VK_LMENU)) < 0;
+    const right_alt = win32.GetKeyState(@intFromEnum(win32.VK_RMENU)) < 0;
+    const left_super = win32.GetKeyState(@intFromEnum(win32.VK_LWIN)) < 0;
+    const right_super = win32.GetKeyState(@intFromEnum(win32.VK_RWIN)) < 0;
     return .{
-        .shift = win32.GetKeyState(@intFromEnum(win32.VK_SHIFT)) < 0,
-        .control = win32.GetKeyState(@intFromEnum(win32.VK_CONTROL)) < 0,
-        .alt = win32.GetKeyState(@intFromEnum(win32.VK_MENU)) < 0,
-        .super = win32.GetKeyState(@intFromEnum(win32.VK_LWIN)) < 0 or win32.GetKeyState(@intFromEnum(win32.VK_RWIN)) < 0,
+        .shift = left_shift or right_shift,
+        .control = left_control or right_control,
+        .alt = left_alt or right_alt,
+        .super = left_super or right_super,
         .caps_lock = win32.GetKeyState(@intFromEnum(win32.VK_CAPITAL)) & 1 != 0,
         .num_lock = win32.GetKeyState(@intFromEnum(win32.VK_NUMLOCK)) & 1 != 0,
+        .left_shift = left_shift,
+        .right_shift = right_shift,
+        .left_control = left_control,
+        .right_control = right_control,
+        .left_alt = left_alt,
+        .right_alt = right_alt,
+        .left_super = left_super,
+        .right_super = right_super,
     };
 }
 
@@ -743,4 +962,10 @@ fn virtualKeyToKey(vkey: win32.VIRTUAL_KEY, lparam: win32.LPARAM) Key {
         .OEM_7 => .apostrophe,
         else => .unknown,
     };
+}
+
+test "initial window centering preserves oversized windows" {
+    try std.testing.expectEqual(@as(i32, 400), centeredAxisPosition(100, 1000, 400));
+    try std.testing.expectEqual(@as(i32, -1360), centeredAxisPosition(-1920, 1920, 800));
+    try std.testing.expectEqual(@as(i32, 100), centeredAxisPosition(100, 1000, 1200));
 }

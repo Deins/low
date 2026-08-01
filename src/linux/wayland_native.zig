@@ -20,6 +20,10 @@ const c = struct {
     pub const wl_pointer = wl.Pointer;
     pub const wl_keyboard = wl.Keyboard;
     pub const wl_output = wl.Output;
+    pub const wl_data_device_manager = wl.DataDeviceManager;
+    pub const wl_data_device = wl.DataDevice;
+    pub const wl_data_source = wl.DataSource;
+    pub const wl_data_offer = wl.DataOffer;
     pub const wl_surface = wl.Surface;
     pub const wl_callback = wl.Callback;
     pub const wl_array = wl.Array;
@@ -333,6 +337,88 @@ const c = struct {
         seat.setListener(?*anyopaque, seatDispatch, data);
         return 0;
     }
+
+    pub fn wl_data_device_manager_destroy(manager: *wl_data_device_manager) void {
+        manager.destroy();
+    }
+
+    pub fn wl_data_device_manager_get_data_device(manager: *wl_data_device_manager, seat: *wl_seat) ?*wl_data_device {
+        return manager.getDataDevice(seat) catch null;
+    }
+
+    pub fn wl_data_device_manager_create_data_source(manager: *wl_data_device_manager) ?*wl_data_source {
+        return manager.createDataSource() catch null;
+    }
+
+    pub fn wl_data_device_add_listener(device: *wl_data_device, data: ?*anyopaque) void {
+        device.setListener(?*anyopaque, dataDeviceDispatch, data);
+    }
+
+    fn dataDeviceDispatch(device: *wl_data_device, event: wl.DataDevice.Event, data: ?*anyopaque) void {
+        _ = device;
+        const self = @as(*State, @ptrCast(@alignCast(data.?)));
+        switch (event) {
+            .data_offer => |e| self.addClipboardOffer(e.id),
+            .selection => |e| self.selectClipboardOffer(e.id),
+            .enter => |e| self.discardDragOffer(e.id),
+            .leave, .motion, .drop => {},
+        }
+    }
+
+    pub fn wl_data_device_set_selection(device: *wl_data_device, source: ?*wl_data_source, serial: u32) void {
+        device.setSelection(source, serial);
+    }
+
+    pub fn wl_data_device_destroy(device: *wl_data_device) void {
+        if (device.getVersion() >= wl.DataDevice.release_since_version) device.release() else device.destroy();
+    }
+
+    pub fn wl_data_source_add_listener(source: *wl_data_source, data: ?*anyopaque) void {
+        source.setListener(?*anyopaque, dataSourceDispatch, data);
+    }
+
+    fn dataSourceDispatch(source: *wl_data_source, event: wl.DataSource.Event, data: ?*anyopaque) void {
+        const self = @as(*State, @ptrCast(@alignCast(data.?)));
+        switch (event) {
+            .send => |e| self.sendClipboard(e.fd),
+            .cancelled => {
+                if (self.clipboard_source == source) {
+                    self.clipboard_source = null;
+                    self.owns_clipboard = false;
+                }
+                source.destroy();
+            },
+            .target, .dnd_drop_performed, .dnd_finished, .action => {},
+        }
+    }
+
+    pub fn wl_data_source_offer(source: *wl_data_source, mime_type: [*:0]const u8) void {
+        source.offer(mime_type);
+    }
+
+    pub fn wl_data_source_destroy(source: *wl_data_source) void {
+        source.destroy();
+    }
+
+    pub fn wl_data_offer_add_listener(offer: *wl_data_offer, data: *ClipboardOffer) void {
+        offer.setListener(*ClipboardOffer, dataOfferDispatch, data);
+    }
+
+    fn dataOfferDispatch(offer: *wl_data_offer, event: wl.DataOffer.Event, data: *ClipboardOffer) void {
+        _ = offer;
+        switch (event) {
+            .offer => |e| data.considerMime(std.mem.span(e.mime_type)),
+            .source_actions, .action => {},
+        }
+    }
+
+    pub fn wl_data_offer_receive(offer: *wl_data_offer, mime_type: [*:0]const u8, fd: c_int) void {
+        offer.receive(mime_type, fd);
+    }
+
+    pub fn wl_data_offer_destroy(offer: *wl_data_offer) void {
+        offer.destroy();
+    }
     fn seatDispatch(seat: *wl_seat, event: wl.Seat.Event, data: ?*anyopaque) void {
         switch (event) {
             .capabilities => |e| seatCapabilities(data, seat, @bitCast(e.capabilities)),
@@ -627,6 +713,41 @@ const Output = struct {
     scale: i32 = 1,
 };
 
+const clipboard_mime_utf8: [:0]const u8 = "text/plain;charset=utf-8";
+const clipboard_mime_utf8_string: [:0]const u8 = "UTF8_STRING";
+const clipboard_mime_text: [:0]const u8 = "text/plain";
+
+const ClipboardMime = enum(u2) {
+    text,
+    utf8_string,
+    utf8,
+
+    fn name(self: ClipboardMime) [:0]const u8 {
+        return switch (self) {
+            .text => clipboard_mime_text,
+            .utf8_string => clipboard_mime_utf8_string,
+            .utf8 => clipboard_mime_utf8,
+        };
+    }
+};
+
+const ClipboardOffer = struct {
+    offer: *c.wl_data_offer,
+    mime: ?ClipboardMime = null,
+
+    fn considerMime(self: *ClipboardOffer, name: []const u8) void {
+        const candidate: ClipboardMime = if (std.ascii.eqlIgnoreCase(name, clipboard_mime_utf8))
+            .utf8
+        else if (std.ascii.eqlIgnoreCase(name, clipboard_mime_utf8_string))
+            .utf8_string
+        else if (std.ascii.eqlIgnoreCase(name, clipboard_mime_text))
+            .text
+        else
+            return;
+        if (self.mime == null or @intFromEnum(candidate) > @intFromEnum(self.mime.?)) self.mime = candidate;
+    }
+};
+
 pub const State = struct {
     allocator: std.mem.Allocator,
     app_name: [:0]const u8,
@@ -643,6 +764,8 @@ pub const State = struct {
     relative_pointer_manager: ?*c.zwp_relative_pointer_manager_v1 = null,
     wm_base: ?*c.xdg_wm_base = null,
     seat: ?*c.wl_seat = null,
+    data_device_manager: ?*c.wl_data_device_manager = null,
+    data_device: ?*c.wl_data_device = null,
     pointer: ?*c.wl_pointer = null,
     keyboard: ?*c.wl_keyboard = null,
     xkb_context: ?*c.xkb_context = null,
@@ -650,6 +773,14 @@ pub const State = struct {
     xkb_state: ?*c.xkb_state = null,
     repeat_delay: u32 = 0,
     repeat_rate: u32 = 0,
+    input_serial: u32 = 0,
+    clipboard_source: ?*c.wl_data_source = null,
+    pending_clipboard_offer: ?*ClipboardOffer = null,
+    clipboard_offer: ?*ClipboardOffer = null,
+    clipboard_text: std.ArrayListUnmanaged(u8) = .empty,
+    owns_clipboard: bool = false,
+    clipboard_selection_known: bool = false,
+    side_modifiers: Modifiers = .{},
 
     outputs: std.ArrayListUnmanaged(*Output) = .empty,
     windows: std.ArrayListUnmanaged(*Window) = .empty,
@@ -708,6 +839,10 @@ pub const State = struct {
 
         if (c.wl_display_roundtrip(self.display) == -1) return error.WaylandProtocolError;
         if (self.compositor == null or self.wm_base == null) return error.MissingRequiredGlobal;
+        if (self.data_device_manager != null and self.seat != null) {
+            self.data_device = c.wl_data_device_manager_get_data_device(self.data_device_manager.?, self.seat.?);
+            if (self.data_device) |device| c.wl_data_device_add_listener(device, self);
+        }
 
         return self;
     }
@@ -726,6 +861,11 @@ pub const State = struct {
             self.allocator.destroy(output);
         }
         self.outputs.deinit(self.allocator);
+        self.destroyClipboardOffer(&self.pending_clipboard_offer);
+        self.destroyClipboardOffer(&self.clipboard_offer);
+        if (self.clipboard_source) |source| c.wl_data_source_destroy(source);
+        if (self.data_device) |device| c.wl_data_device_destroy(device);
+        if (self.data_device_manager) |manager| c.wl_data_device_manager_destroy(manager);
         if (self.cursor_shape_device) |device| c.wp_cursor_shape_device_v1_destroy(device);
         if (self.keyboard) |keyboard| c.wl_keyboard_destroy(keyboard);
         if (self.pointer) |pointer| c.wl_pointer_destroy(pointer);
@@ -742,6 +882,7 @@ pub const State = struct {
         if (self.xkb_keymap) |keymap| c.xkb_keymap_unref(keymap);
         if (self.xkb_context) |ctx| c.xkb_context_unref(ctx);
         _ = std.os.linux.close(self.wake_fd);
+        self.clipboard_text.deinit(self.allocator);
         self.allocator.free(self.app_name);
         self.allocator.destroy(self);
     }
@@ -752,6 +893,146 @@ pub const State = struct {
 
     pub fn backendKind(_: *State) BackendKind {
         return .wayland;
+    }
+
+    pub fn clipboardText(self: *State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        if (self.owns_clipboard) return allocator.dupe(u8, self.clipboard_text.items);
+        if (self.clipboard_offer) |selected| {
+            if (selected.mime == null) return allocator.dupe(u8, "");
+            if (try self.receiveClipboard(allocator)) |system_text| return system_text;
+        } else if (self.clipboard_selection_known) {
+            return allocator.dupe(u8, "");
+        }
+        log.warn("Wayland system clipboard read unavailable; using in-process UTF-8 fallback", .{});
+        return allocator.dupe(u8, self.clipboard_text.items);
+    }
+
+    pub fn clipboardTextSet(self: *State, text: []const u8) std.mem.Allocator.Error!void {
+        self.clipboard_text.clearRetainingCapacity();
+        try self.clipboard_text.appendSlice(self.allocator, text);
+
+        const manager = self.data_device_manager orelse {
+            log.warn("Wayland system clipboard protocol unavailable; using in-process UTF-8 fallback", .{});
+            self.owns_clipboard = false;
+            return;
+        };
+        const device = self.data_device orelse {
+            log.warn("Wayland system clipboard device unavailable; using in-process UTF-8 fallback", .{});
+            self.owns_clipboard = false;
+            return;
+        };
+        if (self.input_serial == 0) {
+            log.warn("Wayland clipboard has no input serial; using in-process UTF-8 fallback", .{});
+            self.owns_clipboard = false;
+            return;
+        }
+
+        const source = c.wl_data_device_manager_create_data_source(manager) orelse {
+            log.warn("Wayland clipboard data source creation failed; using in-process UTF-8 fallback", .{});
+            self.owns_clipboard = false;
+            return;
+        };
+        c.wl_data_source_add_listener(source, self);
+        c.wl_data_source_offer(source, clipboard_mime_utf8.ptr);
+        c.wl_data_source_offer(source, clipboard_mime_utf8_string.ptr);
+        c.wl_data_source_offer(source, clipboard_mime_text.ptr);
+        c.wl_data_device_set_selection(device, source, self.input_serial);
+        self.clipboard_source = source;
+        self.owns_clipboard = true;
+        if (c.wl_display_flush(self.display) == -1 and @as(std.c.E, @enumFromInt(std.c._errno().*)) != .AGAIN) {
+            self.owns_clipboard = false;
+            log.warn("Wayland system clipboard publish failed; using in-process UTF-8 fallback", .{});
+        }
+    }
+
+    fn receiveClipboard(self: *State, allocator: std.mem.Allocator) std.mem.Allocator.Error!?[]u8 {
+        const selected = self.clipboard_offer orelse return null;
+        const mime = selected.mime orelse return null;
+        var pipe_fds: [2]std.c.fd_t = undefined;
+        if (std.c.pipe(&pipe_fds) != 0) return null;
+        const read_fd = pipe_fds[0];
+        const write_fd = pipe_fds[1];
+        defer _ = std.os.linux.close(read_fd);
+
+        c.wl_data_offer_receive(selected.offer, mime.name().ptr, write_fd);
+        _ = std.os.linux.close(write_fd);
+        if (c.wl_display_flush(self.display) == -1) return null;
+
+        var result: std.ArrayListUnmanaged(u8) = .empty;
+        defer result.deinit(allocator);
+        var buffer: [4096]u8 = undefined;
+        while (true) {
+            const len = std.posix.read(read_fd, &buffer) catch return null;
+            if (len == 0) break;
+            try result.appendSlice(allocator, buffer[0..len]);
+        }
+        return try result.toOwnedSlice(allocator);
+    }
+
+    fn sendClipboard(self: *State, fd: c_int) void {
+        defer _ = std.os.linux.close(fd);
+        var remaining = self.clipboard_text.items;
+        while (remaining.len != 0) {
+            const result = std.c.write(fd, remaining.ptr, remaining.len);
+            if (result < 0) {
+                const err: std.c.E = @enumFromInt(std.c._errno().*);
+                if (err == .INTR) continue;
+                log.warn("Wayland clipboard transfer failed: {t}", .{err});
+                return;
+            }
+            const written: usize = @intCast(result);
+            if (written == 0) return;
+            remaining = remaining[written..];
+        }
+    }
+
+    fn addClipboardOffer(self: *State, offer: *c.wl_data_offer) void {
+        self.destroyClipboardOffer(&self.pending_clipboard_offer);
+        const candidate = self.allocator.create(ClipboardOffer) catch {
+            c.wl_data_offer_destroy(offer);
+            return;
+        };
+        candidate.* = .{ .offer = offer };
+        self.pending_clipboard_offer = candidate;
+        c.wl_data_offer_add_listener(offer, candidate);
+    }
+
+    fn selectClipboardOffer(self: *State, offer: ?*c.wl_data_offer) void {
+        self.clipboard_selection_known = true;
+        if (self.clipboard_offer) |current| {
+            if (offer != null and current.offer == offer.?) return;
+        }
+        self.destroyClipboardOffer(&self.clipboard_offer);
+        self.owns_clipboard = false;
+
+        const selected = offer orelse {
+            self.destroyClipboardOffer(&self.pending_clipboard_offer);
+            return;
+        };
+        if (self.pending_clipboard_offer) |pending| {
+            if (pending.offer == selected) {
+                self.clipboard_offer = pending;
+                self.pending_clipboard_offer = null;
+                return;
+            }
+        }
+        self.destroyClipboardOffer(&self.pending_clipboard_offer);
+        c.wl_data_offer_destroy(selected);
+    }
+
+    fn discardDragOffer(self: *State, offer: ?*c.wl_data_offer) void {
+        const drag_offer = offer orelse return;
+        if (self.pending_clipboard_offer) |pending| {
+            if (pending.offer == drag_offer) self.destroyClipboardOffer(&self.pending_clipboard_offer);
+        }
+    }
+
+    fn destroyClipboardOffer(self: *State, slot: *?*ClipboardOffer) void {
+        if (slot.*) |offer| {
+            c.wl_data_offer_destroy(offer.offer);
+            self.allocator.destroy(offer);
+            slot.* = null;
+        }
     }
 
     pub fn requiredVulkanInstanceExtensions(_: *State) []const [*:0]const u8 {
@@ -958,15 +1239,15 @@ pub const State = struct {
     }
 
     fn currentModifiers(self: *State) Modifiers {
-        const state = self.xkb_state orelse return .{};
-        return .{
-            .shift = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_SHIFT, c.XKB_STATE_MODS_EFFECTIVE) != 0,
-            .control = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_CTRL, c.XKB_STATE_MODS_EFFECTIVE) != 0,
-            .alt = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_ALT, c.XKB_STATE_MODS_EFFECTIVE) != 0,
-            .super = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_LOGO, c.XKB_STATE_MODS_EFFECTIVE) != 0,
-            .caps_lock = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_CAPS, c.XKB_STATE_MODS_EFFECTIVE) != 0,
-            .num_lock = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_NUM, c.XKB_STATE_MODS_EFFECTIVE) != 0,
-        };
+        const state = self.xkb_state orelse return self.side_modifiers;
+        var mods = self.side_modifiers;
+        mods.shift = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_SHIFT, c.XKB_STATE_MODS_EFFECTIVE) != 0 or mods.left_shift or mods.right_shift;
+        mods.control = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_CTRL, c.XKB_STATE_MODS_EFFECTIVE) != 0 or mods.left_control or mods.right_control;
+        mods.alt = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_ALT, c.XKB_STATE_MODS_EFFECTIVE) != 0 or mods.left_alt or mods.right_alt;
+        mods.super = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_LOGO, c.XKB_STATE_MODS_EFFECTIVE) != 0 or mods.left_super or mods.right_super;
+        mods.caps_lock = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_CAPS, c.XKB_STATE_MODS_EFFECTIVE) != 0;
+        mods.num_lock = c.xkb_state_mod_name_is_active(state, c.XKB_MOD_NAME_NUM, c.XKB_STATE_MODS_EFFECTIVE) != 0;
+        return mods;
     }
 
     fn updateKeymap(self: *State, fd: c_int, size: u32) void {
@@ -1455,6 +1736,8 @@ fn waylandCursorShape(shape: CursorShape) c.wp_cursor_shape_device_v1_Shape {
         .crosshair => .crosshair,
         .hand => .pointer,
         .ibeam => .text,
+        .wait => .wait,
+        .progress => .progress,
         .not_allowed => .not_allowed,
         .resize_all => .move,
         .resize_ns => .ns_resize,
@@ -1603,6 +1886,10 @@ fn registryGlobal(data: ?*anyopaque, registry: ?*c.wl_registry, name: u32, inter
         _ = c.wl_seat_add_listener(self.seat.?, &seatListener, self);
         return;
     }
+    if (std.mem.eql(u8, iface, "wl_data_device_manager")) {
+        self.data_device_manager = self.registry.?.bind(name, c.wl_data_device_manager, @min(version, 3)) catch return;
+        return;
+    }
     if (std.mem.eql(u8, iface, "wl_output")) {
         const native = self.registry.?.bind(name, c.wl_output, @min(version, 4)) catch return;
         const output = self.allocator.create(Output) catch {
@@ -1724,9 +2011,9 @@ fn relativePointerDispatch(
 
 fn pointerButton(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, time: u32, button: u32, state: c_uint) callconv(.c) void {
     _ = pointer;
-    _ = serial;
     _ = time;
     const self = @as(*State, @ptrCast(@alignCast(data.?)));
+    self.input_serial = serial;
     const window = self.pointer_window orelse return;
     const btn = switch (button) {
         0x110 => MouseButton.left,
@@ -1768,8 +2055,14 @@ fn keyboardKeymap(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, format: u32, fd:
 fn keyboardEnter(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, surface: ?*c.wl_surface, keys: [*c]c.wl_array) callconv(.c) void {
     _ = keyboard;
     _ = serial;
-    _ = keys;
     const self = @as(*State, @ptrCast(@alignCast(data.?)));
+    input.clearModifierSides(&self.side_modifiers);
+    if (self.xkb_state) |xkb_state| {
+        for (keys.*.slice(u32)) |keycode| {
+            const sym = c.xkb_state_key_get_one_sym(xkb_state, keycode + 8);
+            input.setModifierSide(&self.side_modifiers, mapKeysymToKey(sym), true);
+        }
+    }
     const window = self.getWindowFromSurface(surface) orelse return;
     self.keyboard_window = window;
     window.updateFocus(true);
@@ -1784,24 +2077,27 @@ fn keyboardLeave(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, surf
         window.updateFocus(false);
     }
     self.keyboard_window = null;
+    input.clearModifierSides(&self.side_modifiers);
 }
 
 fn keyboardKey(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, time: u32, key: u32, state: u32) callconv(.c) void {
     _ = keyboard;
-    _ = serial;
     _ = time;
     const self = @as(*State, @ptrCast(@alignCast(data.?)));
+    self.input_serial = serial;
     const window = self.keyboard_window orelse return;
     const xkb_state = self.xkb_state orelse return;
     const sym = c.xkb_state_key_get_one_sym(xkb_state, key + 8);
+    const mapped_key = mapKeysymToKey(sym);
     const action: Action = switch (state) {
         @as(u32, @intCast(@intFromEnum(c.WL_KEYBOARD_KEY_STATE_RELEASED))) => .release,
         @as(u32, @intCast(@intFromEnum(c.WL_KEYBOARD_KEY_STATE_PRESSED))) => .press,
         c.WL_KEYBOARD_KEY_STATE_REPEATED => .repeat,
         else => return,
     };
+    input.setModifierSide(&self.side_modifiers, mapped_key, action != .release);
     const mods = self.currentModifiers();
-    window.updateKey(mapKeysymToKey(sym), key, action, mods);
+    window.updateKey(mapped_key, key, action, mods);
 
     if (action != .release and !mods.control) {
         var buf: [64]u8 = undefined;
@@ -1949,6 +2245,18 @@ const xdgToplevelListener = c.xdg_toplevel_listener{
 const decorationListener = c.zxdg_toplevel_decoration_v1_listener{
     .configure = decorationConfigure,
 };
+
+test "Wayland clipboard prefers explicitly UTF-8 text" {
+    var offer: ClipboardOffer = .{ .offer = undefined };
+    offer.considerMime("application/octet-stream");
+    try std.testing.expectEqual(null, offer.mime);
+    offer.considerMime("text/plain");
+    try std.testing.expectEqual(ClipboardMime.text, offer.mime.?);
+    offer.considerMime("UTF8_STRING");
+    try std.testing.expectEqual(ClipboardMime.utf8_string, offer.mime.?);
+    offer.considerMime("text/plain;charset=UTF-8");
+    try std.testing.expectEqual(ClipboardMime.utf8, offer.mime.?);
+}
 
 test {
     std.testing.refAllDecls(@This());

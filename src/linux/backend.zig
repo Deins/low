@@ -74,6 +74,7 @@ fn initBackend(allocator: std.mem.Allocator, options: InitOptions, selected: Bac
 
 fn shouldFallback(err: Error) bool {
     return switch (err) {
+        error.UnsupportedPlatform,
         error.BackendLibraryUnavailable,
         error.DisplayConnectionFailed,
         error.MissingRequiredGlobal,
@@ -82,6 +83,10 @@ fn shouldFallback(err: Error) bool {
         => true,
         else => false,
     };
+}
+
+test "auto selection falls back when detected backend was compiled out" {
+    try std.testing.expect(shouldFallback(error.UnsupportedPlatform));
 }
 
 fn environmentValue(name: [*:0]const u8) ?[]const u8 {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.low_x11);
 const api = @import("../internal/runtime.zig");
 const input = @import("../internal/input.zig");
 const x11 = @import("x11.zig");
@@ -11,10 +12,13 @@ const Data = struct {
     root: x11.Window,
     fd: c_int,
     wake_fd: std.posix.fd_t,
+    clipboard_window: x11.Window = 0,
     atoms: x11.Atoms,
     cursor_cache: std.EnumArray(api.CursorShape, x11.Cursor) = .initFill(0),
     empty_cursor: x11.Cursor = 0,
     windows: std.ArrayListUnmanaged(*api.Window) = .empty,
+    side_modifiers: api.Modifiers = .{},
+    state: ?*api.State = null,
 };
 
 const WindowData = struct {
@@ -56,16 +60,28 @@ pub fn init(allocator: std.mem.Allocator, options: api.InitOptions) api.Error!*a
         .net_wm_state_maximized_vert = x11.XInternAtom(display, "_NET_WM_STATE_MAXIMIZED_VERT", 0),
         .net_wm_name = x11.XInternAtom(display, "_NET_WM_NAME", 0),
         .utf8_string = x11.XInternAtom(display, "UTF8_STRING", 0),
+        .clipboard = x11.XInternAtom(display, "CLIPBOARD", 0),
+        .clipboard_property = x11.XInternAtom(display, "LOW_CLIPBOARD", 0),
+        .targets = x11.XInternAtom(display, "TARGETS", 0),
+        .text = x11.XInternAtom(display, "TEXT", 0),
+        .text_plain = x11.XInternAtom(display, "text/plain", 0),
+        .text_plain_utf8 = x11.XInternAtom(display, "text/plain;charset=utf-8", 0),
+        .incr = x11.XInternAtom(display, "INCR", 0),
         .net_wm_window_type = x11.XInternAtom(display, "_NET_WM_WINDOW_TYPE", 0),
         .net_wm_window_type_normal = x11.XInternAtom(display, "_NET_WM_WINDOW_TYPE_NORMAL", 0),
         .motif_wm_hints = x11.XInternAtom(display, "_MOTIF_WM_HINTS", 0),
     };
+    data.clipboard_window = x11.XCreateSimpleWindow(display, data.root, 0, 0, 1, 1, 0, 0, 0);
+    if (data.clipboard_window == 0) return error.SystemResources;
+    errdefer _ = x11.XDestroyWindow(display, data.clipboard_window);
+    _ = x11.XSelectInput(display, data.clipboard_window, x11.PropertyChangeMask);
     data.empty_cursor = createEmptyCursor(data) orelse 0;
     _ = x11.XkbSetDetectableAutoRepeat(display, 1, null);
     _ = x11.XFlush(display);
 
     const state = allocator.create(api.State) catch return error.OutOfMemory;
     state.* = .{ .allocator = allocator, .backend_kind = .x11, .backend_data = data, .vtable = &vtable };
+    data.state = state;
     return state;
 }
 
@@ -92,6 +108,7 @@ fn deinit(state: *api.State) void {
         cursor.* = 0;
     };
     if (data.empty_cursor != 0) _ = x11.XFreeCursor(data.display, data.empty_cursor);
+    if (data.clipboard_window != 0) _ = x11.XDestroyWindow(data.display, data.clipboard_window);
     _ = std.os.linux.close(data.wake_fd);
     _ = x11.XCloseDisplay(data.display);
     const allocator = data.allocator;
@@ -260,6 +277,188 @@ fn requestFrame(_: *api.Window) bool {
 }
 fn cancelFrameRequest(_: *api.Window) void {}
 
+fn clipboardText(state: *api.State, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    const data = stateData(state);
+    const owner = x11.XGetSelectionOwner(data.display, data.atoms.clipboard);
+    if (owner == data.clipboard_window) return state.clipboard.get(allocator);
+    if (owner != x11.None) {
+        if (try requestClipboardText(data, data.atoms.utf8_string, allocator)) |text| return text;
+        if (try requestClipboardText(data, x11.XA_STRING, allocator)) |latin1| return latin1;
+    }
+    log.warn("X11 system clipboard read unavailable; using in-process UTF-8 fallback", .{});
+    return state.clipboard.get(allocator);
+}
+
+fn clipboardTextSet(state: *api.State, text: []const u8) std.mem.Allocator.Error!void {
+    const data = stateData(state);
+    try state.clipboard.set(state.allocator, text);
+    _ = x11.XSetSelectionOwner(data.display, data.atoms.clipboard, data.clipboard_window, x11.CurrentTime);
+    _ = x11.XFlush(data.display);
+    if (x11.XGetSelectionOwner(data.display, data.atoms.clipboard) != data.clipboard_window) {
+        log.warn("X11 system clipboard ownership failed; using in-process UTF-8 fallback", .{});
+    }
+}
+
+fn requestClipboardText(data: *Data, target: x11.Atom, allocator: std.mem.Allocator) std.mem.Allocator.Error!?[]u8 {
+    _ = x11.XDeleteProperty(data.display, data.clipboard_window, data.atoms.clipboard_property);
+    _ = x11.XConvertSelection(
+        data.display,
+        data.atoms.clipboard,
+        target,
+        data.atoms.clipboard_property,
+        data.clipboard_window,
+        x11.CurrentTime,
+    );
+    _ = x11.XFlush(data.display);
+
+    const notification = waitForClipboardEvent(data, .selection) orelse return null;
+    if (notification.xselection.property == x11.None) return null;
+    return readClipboardProperty(data, target, allocator);
+}
+
+const ClipboardWait = enum { selection, property };
+
+fn waitForClipboardEvent(data: *Data, wanted: ClipboardWait) ?x11.XEvent {
+    // A broken selection owner must not freeze the UI indefinitely.
+    for (0..100) |_| {
+        while (x11.XPending(data.display) > 0) {
+            var event: x11.XEvent = std.mem.zeroes(x11.XEvent);
+            _ = x11.XNextEvent(data.display, &event);
+            const matches = switch (wanted) {
+                .selection => event.type == x11.SelectionNotify and
+                    event.xselection.requestor == data.clipboard_window and
+                    event.xselection.selection == data.atoms.clipboard,
+                .property => event.type == x11.PropertyNotify and
+                    event.xproperty.window == data.clipboard_window and
+                    event.xproperty.atom == data.atoms.clipboard_property and
+                    event.xproperty.state == x11.PropertyNewValue,
+            };
+            if (matches) return event;
+            handleEvent(data, &event);
+        }
+
+        var fd = [_]std.posix.pollfd{.{ .fd = data.fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&fd, 20) catch return null;
+        if (ready > 0 and (fd[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) return null;
+    }
+    return null;
+}
+
+const ClipboardProperty = struct {
+    actual_type: x11.Atom,
+    format: c_int,
+    count: usize,
+    value: ?[*]u8,
+
+    fn deinit(self: ClipboardProperty) void {
+        if (self.value) |value| _ = x11.XFree(value);
+    }
+};
+
+fn getClipboardProperty(data: *Data, delete: bool) ?ClipboardProperty {
+    var actual_type: x11.Atom = x11.None;
+    var format: c_int = 0;
+    var count: c_ulong = 0;
+    var bytes_after: c_ulong = 0;
+    var value: ?[*]u8 = null;
+    const result = x11.XGetWindowProperty(
+        data.display,
+        data.clipboard_window,
+        data.atoms.clipboard_property,
+        0,
+        std.math.maxInt(c_long),
+        @intFromBool(delete),
+        x11.AnyPropertyType,
+        &actual_type,
+        &format,
+        &count,
+        &bytes_after,
+        &value,
+    );
+    if (result != 0 or bytes_after != 0) {
+        if (value) |allocated| _ = x11.XFree(allocated);
+        return null;
+    }
+    return .{ .actual_type = actual_type, .format = format, .count = @intCast(count), .value = value };
+}
+
+fn readClipboardProperty(data: *Data, requested_target: x11.Atom, allocator: std.mem.Allocator) std.mem.Allocator.Error!?[]u8 {
+    const initial = getClipboardProperty(data, true) orelse return null;
+    defer initial.deinit();
+
+    if (initial.actual_type != data.atoms.incr) {
+        if (initial.format != 8 or initial.value == null) return null;
+        const bytes = initial.value.?[0..initial.count];
+        return if (requested_target == x11.XA_STRING)
+            try latin1ToUtf8(allocator, bytes)
+        else
+            try allocator.dupe(u8, bytes);
+    }
+
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(allocator);
+    while (true) {
+        _ = waitForClipboardEvent(data, .property) orelse {
+            result.deinit(allocator);
+            return null;
+        };
+        const chunk = getClipboardProperty(data, true) orelse {
+            result.deinit(allocator);
+            return null;
+        };
+        defer chunk.deinit();
+        if (chunk.count == 0) break;
+        if (chunk.format != 8 or chunk.value == null) {
+            result.deinit(allocator);
+            return null;
+        }
+        try result.appendSlice(allocator, chunk.value.?[0..chunk.count]);
+    }
+    const bytes = try result.toOwnedSlice(allocator);
+    if (requested_target != x11.XA_STRING) return bytes;
+    defer allocator.free(bytes);
+    return try latin1ToUtf8(allocator, bytes);
+}
+
+fn latin1ToUtf8(allocator: std.mem.Allocator, latin1: []const u8) std.mem.Allocator.Error![]u8 {
+    var utf8: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer utf8.deinit(allocator);
+    for (latin1) |byte| {
+        if (byte < 0x80) {
+            try utf8.append(allocator, byte);
+        } else {
+            try utf8.append(allocator, 0xc0 | (byte >> 6));
+            try utf8.append(allocator, 0x80 | (byte & 0x3f));
+        }
+    }
+    return try utf8.toOwnedSlice(allocator);
+}
+
+fn utf8ToLatin1(allocator: std.mem.Allocator, utf8: []const u8) std.mem.Allocator.Error![]u8 {
+    var latin1: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer latin1.deinit(allocator);
+    var index: usize = 0;
+    while (index < utf8.len) {
+        const sequence_len = std.unicode.utf8ByteSequenceLength(utf8[index]) catch {
+            try latin1.append(allocator, '?');
+            index += 1;
+            continue;
+        };
+        if (index + sequence_len > utf8.len) {
+            try latin1.append(allocator, '?');
+            break;
+        }
+        const codepoint = std.unicode.utf8Decode(utf8[index..][0..sequence_len]) catch {
+            try latin1.append(allocator, '?');
+            index += 1;
+            continue;
+        };
+        try latin1.append(allocator, if (codepoint <= 0xff) @intCast(codepoint) else '?');
+        index += sequence_len;
+    }
+    return try latin1.toOwnedSlice(allocator);
+}
+
 fn pumpEvents(state: *api.State, timeout_ms: i32) api.Error!bool {
     const data = stateData(state);
     if (x11.XPending(data.display) > 0) {
@@ -301,9 +500,13 @@ fn handleEvent(data: *Data, event: *x11.XEvent) void {
             if (findWindow(data, event.xclient.window)) |w| api.windowUpdateClose(w);
         },
         x11.ConfigureNotify => if (findWindow(data, event.xconfigure.window)) |w| api.windowUpdateSize(w, .{ .width = event.xconfigure.width, .height = event.xconfigure.height }),
-        x11.FocusIn => if (findWindow(data, event.xfocus.window)) |w| api.windowUpdateFocus(w, true),
+        x11.FocusIn => if (findWindow(data, event.xfocus.window)) |w| {
+            syncModifierSides(data, event.xfocus.window);
+            api.windowUpdateFocus(w, true);
+        },
         x11.FocusOut => if (findWindow(data, event.xfocus.window)) |w| {
             if (w.isMouseCaptured()) w.setMouseCaptured(false);
+            input.clearModifierSides(&data.side_modifiers);
             api.windowUpdateFocus(w, false);
         },
         x11.EnterNotify => if (findWindow(data, event.xcrossing.window)) |w| {
@@ -330,6 +533,8 @@ fn handleEvent(data: *Data, event: *x11.XEvent) void {
         x11.ButtonRelease => handleButton(data, event.xbutton, false),
         x11.KeyPress => handleKey(data, event.xkey, true),
         x11.KeyRelease => handleKey(data, event.xkey, false),
+        x11.SelectionRequest => handleSelectionRequest(data, event.xselectionrequest),
+        x11.SelectionClear => {},
         x11.MapNotify => if (findWindow(data, event.xmap.window)) |w| {
             w.visible = true;
             w.minimized = false;
@@ -347,9 +552,85 @@ fn handleEvent(data: *Data, event: *x11.XEvent) void {
     }
 }
 
+fn handleSelectionRequest(data: *Data, request: x11.XSelectionRequestEvent) void {
+    var reply: x11.XEvent = std.mem.zeroes(x11.XEvent);
+    reply.xselection = .{
+        .type = x11.SelectionNotify,
+        .serial = 0,
+        .send_event = 1,
+        .display = request.display,
+        .requestor = request.requestor,
+        .selection = request.selection,
+        .target = request.target,
+        .property = x11.None,
+        .time = request.time,
+    };
+
+    if (request.selection == data.atoms.clipboard and request.property != x11.None) {
+        if (request.target == data.atoms.targets) {
+            const targets = [_]x11.Atom{
+                data.atoms.targets,
+                data.atoms.utf8_string,
+                data.atoms.text,
+                data.atoms.text_plain_utf8,
+                data.atoms.text_plain,
+                x11.XA_STRING,
+            };
+            _ = x11.XChangeProperty(
+                data.display,
+                request.requestor,
+                request.property,
+                x11.XA_ATOM,
+                32,
+                x11.PropModeReplace,
+                &targets,
+                targets.len,
+            );
+            reply.xselection.property = request.property;
+        } else if (isClipboardTextTarget(data, request.target)) {
+            const text = data.state.?.clipboard.text.items;
+            if (request.target == x11.XA_STRING) {
+                if (utf8ToLatin1(data.allocator, text)) |latin1| {
+                    defer data.allocator.free(latin1);
+                    if (writeClipboardProperty(data, request, x11.XA_STRING, latin1)) reply.xselection.property = request.property;
+                } else |_| {}
+            } else if (text.len <= std.math.maxInt(c_int)) {
+                const property_type = if (request.target == data.atoms.text) data.atoms.utf8_string else request.target;
+                if (writeClipboardProperty(data, request, property_type, text)) reply.xselection.property = request.property;
+            }
+        }
+    }
+
+    _ = x11.XSendEvent(data.display, request.requestor, 0, 0, &reply);
+    _ = x11.XFlush(data.display);
+}
+
+fn isClipboardTextTarget(data: *const Data, target: x11.Atom) bool {
+    return target == data.atoms.utf8_string or
+        target == data.atoms.text or
+        target == data.atoms.text_plain_utf8 or
+        target == data.atoms.text_plain or
+        target == x11.XA_STRING;
+}
+
+fn writeClipboardProperty(data: *Data, request: x11.XSelectionRequestEvent, property_type: x11.Atom, text: []const u8) bool {
+    if (text.len > std.math.maxInt(c_int)) return false;
+    _ = x11.XChangeProperty(
+        data.display,
+        request.requestor,
+        request.property,
+        property_type,
+        8,
+        x11.PropModeReplace,
+        text.ptr,
+        @intCast(text.len),
+    );
+    return true;
+}
+
 fn handleButton(data: *Data, event: x11.XButtonEvent, pressed: bool) void {
     const window = findWindow(data, event.window) orelse return;
-    const mods = modifiers(event.state);
+    const mods = modifiers(event.state, data.side_modifiers);
     switch (event.button) {
         4 => if (pressed) api.windowUpdateScroll(window, 0, 1),
         5 => if (pressed) api.windowUpdateScroll(window, 0, -1),
@@ -379,7 +660,8 @@ fn handleKey(data: *Data, event: x11.XKeyEvent, pressed: bool) void {
     const len = x11.XLookupString(@constCast(&event), &bytes, bytes.len, &keysym, null);
     const key = mapKeysym(keysym);
     const action: api.Action = if (pressed and window.pressed_keys.contains(key)) .repeat else if (pressed) .press else .release;
-    const mods = modifiers(event.state);
+    input.setModifierSide(&data.side_modifiers, key, pressed);
+    const mods = modifiers(event.state, data.side_modifiers);
     api.windowUpdateKey(window, key, @intCast(event.keycode), action, mods);
     if (pressed and !mods.control and len > 0) {
         const text = bytes[0..@intCast(len)];
@@ -387,8 +669,36 @@ fn handleKey(data: *Data, event: x11.XKeyEvent, pressed: bool) void {
     }
 }
 
-fn modifiers(state: c_uint) api.Modifiers {
-    return .{ .shift = state & x11.ShiftMask != 0, .control = state & x11.ControlMask != 0, .alt = state & x11.Mod1Mask != 0, .super = state & x11.Mod4Mask != 0, .caps_lock = state & x11.LockMask != 0, .num_lock = state & x11.Mod2Mask != 0 };
+fn modifiers(state: c_uint, sides: api.Modifiers) api.Modifiers {
+    var mods = sides;
+    mods.shift = state & x11.ShiftMask != 0 or mods.left_shift or mods.right_shift;
+    mods.control = state & x11.ControlMask != 0 or mods.left_control or mods.right_control;
+    mods.alt = state & x11.Mod1Mask != 0 or mods.left_alt or mods.right_alt;
+    mods.super = state & x11.Mod4Mask != 0 or mods.left_super or mods.right_super;
+    mods.caps_lock = state & x11.LockMask != 0;
+    mods.num_lock = state & x11.Mod2Mask != 0;
+    return mods;
+}
+
+fn syncModifierSides(data: *Data, window: x11.Window) void {
+    input.clearModifierSides(&data.side_modifiers);
+    var keymap: [32]u8 = undefined;
+    _ = x11.XQueryKeymap(data.display, &keymap);
+    for (0..256) |keycode| {
+        const bit: u3 = @intCast(keycode & 7);
+        if (keymap[keycode / 8] & (@as(u8, 1) << bit) == 0) continue;
+        var event: x11.XKeyEvent = std.mem.zeroes(x11.XKeyEvent);
+        event.type = x11.KeyPress;
+        event.display = data.display;
+        event.window = window;
+        event.root = data.root;
+        event.keycode = @intCast(keycode);
+        event.same_screen = 1;
+        var keysym: x11.KeySym = 0;
+        var bytes: [8]u8 = undefined;
+        _ = x11.XLookupString(&event, &bytes, bytes.len, &keysym, null);
+        input.setModifierSide(&data.side_modifiers, mapKeysym(keysym), true);
+    }
 }
 
 fn findWindow(data: *Data, handle: x11.Window) ?*api.Window {
@@ -411,6 +721,7 @@ fn createFontCursor(data: *Data, shape: api.CursorShape) x11.Cursor {
         .crosshair => x11.XC_crosshair,
         .hand => x11.XC_hand2,
         .ibeam => x11.XC_xterm,
+        .wait, .progress => x11.XC_watch,
         .resize_all => x11.XC_fleur,
         .resize_ns => x11.XC_sb_v_double_arrow,
         .resize_ew => x11.XC_sb_h_double_arrow,
@@ -567,6 +878,16 @@ test "X11 maps alphanumeric keysyms" {
     try std.testing.expectEqual(api.Key.nine, mapKeysym('9'));
 }
 
+test "X11 clipboard converts Latin-1 fallback to UTF-8" {
+    const converted = try latin1ToUtf8(std.testing.allocator, "caf\xe9");
+    defer std.testing.allocator.free(converted);
+    try std.testing.expectEqualStrings("café", converted);
+
+    const latin1 = try utf8ToLatin1(std.testing.allocator, "café 東京");
+    defer std.testing.allocator.free(latin1);
+    try std.testing.expectEqualStrings("caf\xe9 ??", latin1);
+}
+
 const vtable: api.VTable = .{
     .deinit = deinit,
     .native_display = nativeDisplay,
@@ -595,6 +916,8 @@ const vtable: api.VTable = .{
     .apply_scale = applyScale,
     .request_frame = requestFrame,
     .cancel_frame_request = cancelFrameRequest,
+    .clipboard_text = clipboardText,
+    .clipboard_text_set = clipboardTextSet,
 };
 
 test {

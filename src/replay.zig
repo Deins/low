@@ -101,7 +101,12 @@ pub const Recording = struct {
     pub fn read(allocator: std.mem.Allocator, reader: *std.Io.Reader) !Recording {
         var magic: [file_magic.len]u8 = undefined;
         try reader.readSliceAll(&magic);
-        if (!std.mem.eql(u8, &magic, file_magic)) return error.InvalidRecording;
+        const modifier_encoding: ModifierEncoding = if (std.mem.eql(u8, &magic, file_magic))
+            .sides
+        else if (std.mem.eql(u8, &magic, legacy_file_magic))
+            .aggregate
+        else
+            return error.InvalidRecording;
         const frame_count = std.math.cast(usize, try readInt(reader, u64)) orelse return error.InvalidRecording;
         const event_count = std.math.cast(usize, try readInt(reader, u64)) orelse return error.InvalidRecording;
         const frames = try allocator.alloc(FrameRecord, frame_count);
@@ -118,7 +123,7 @@ pub const Recording = struct {
         for (events) |*recorded| {
             recorded.* = .{
                 .window_id = try readInt(reader, u64),
-                .event = try readEvent(allocator, reader),
+                .event = try readEvent(allocator, reader, modifier_encoding),
             };
             initialized += 1;
         }
@@ -128,7 +133,9 @@ pub const Recording = struct {
     }
 };
 
-const file_magic = "LOWRPL\x01\x00";
+const file_magic = "LOWRPL\x02\x00";
+const legacy_file_magic = "LOWRPL\x01\x00";
+const ModifierEncoding = enum { aggregate, sides };
 
 /// Clock override for tests, simulations, and application-owned timelines.
 pub const Clock = struct {
@@ -593,15 +600,31 @@ fn readF64(reader: *std.Io.Reader) !f64 {
 }
 
 fn writeModifiers(writer: *std.Io.Writer, mods: runtime.Modifiers) !void {
-    const bits: u6 = @bitCast(mods);
-    try writeInt(writer, u8, bits);
+    const bits: u14 = @bitCast(mods);
+    try writeInt(writer, u16, bits);
 }
 
-fn readModifiers(reader: *std.Io.Reader) !runtime.Modifiers {
-    const byte = try readInt(reader, u8);
-    if (byte > std.math.maxInt(u6)) return error.InvalidRecording;
-    const bits: u6 = @intCast(byte);
-    return @bitCast(bits);
+fn readModifiers(reader: *std.Io.Reader, encoding: ModifierEncoding) !runtime.Modifiers {
+    return switch (encoding) {
+        .aggregate => blk: {
+            const byte = try readInt(reader, u8);
+            if (byte > std.math.maxInt(u6)) return error.InvalidRecording;
+            break :blk .{
+                .shift = byte & 0x01 != 0,
+                .control = byte & 0x02 != 0,
+                .alt = byte & 0x04 != 0,
+                .super = byte & 0x08 != 0,
+                .caps_lock = byte & 0x10 != 0,
+                .num_lock = byte & 0x20 != 0,
+            };
+        },
+        .sides => blk: {
+            const word = try readInt(reader, u16);
+            if (word > std.math.maxInt(u14)) return error.InvalidRecording;
+            const bits: u14 = @intCast(word);
+            break :blk @bitCast(bits);
+        },
+    };
 }
 
 fn writeEvent(writer: *std.Io.Writer, event: Event) !void {
@@ -674,7 +697,7 @@ fn writeEvent(writer: *std.Io.Writer, event: Event) !void {
     }
 }
 
-fn readEvent(allocator: std.mem.Allocator, reader: *std.Io.Reader) !Event {
+fn readEvent(allocator: std.mem.Allocator, reader: *std.Io.Reader, modifier_encoding: ModifierEncoding) !Event {
     return switch (try readInt(reader, u8)) {
         0 => .{ .close = {} },
         1 => .{ .resize = .{ .width = try readInt(reader, i32), .height = try readInt(reader, i32) } },
@@ -687,14 +710,14 @@ fn readEvent(allocator: std.mem.Allocator, reader: *std.Io.Reader) !Event {
         8 => .{ .mouse_button = .{
             .button = std.enums.fromInt(runtime.MouseButton, try readInt(reader, u8)) orelse return error.InvalidRecording,
             .action = std.enums.fromInt(runtime.Action, try readInt(reader, u8)) orelse return error.InvalidRecording,
-            .mods = try readModifiers(reader),
+            .mods = try readModifiers(reader, modifier_encoding),
         } },
         9 => .{ .scroll = .{ .x = try readF64(reader), .y = try readF64(reader) } },
         10 => .{ .key = .{
             .key = std.enums.fromInt(runtime.Key, try readInt(reader, u16)) orelse return error.InvalidRecording,
             .raw_keycode = try readInt(reader, u32),
             .action = std.enums.fromInt(runtime.Action, try readInt(reader, u8)) orelse return error.InvalidRecording,
-            .mods = try readModifiers(reader),
+            .mods = try readModifiers(reader, modifier_encoding),
         } },
         11 => blk: {
             const length = std.math.cast(usize, try readInt(reader, u64)) orelse return error.InvalidRecording;
@@ -720,7 +743,7 @@ test "global recording round trips and replays input with frame timing" {
     const first = try record_state.createWindow(.{ .title = "first" });
     const second = try record_state.createWindow(.{ .title = "second" });
     try recorder.beginFrame(10);
-    try first.injectEvent(.{ .key = .{ .key = .a, .raw_keycode = 38, .action = .press, .mods = .{ .shift = true } } });
+    try first.injectEvent(.{ .key = .{ .key = .a, .raw_keycode = 38, .action = .press, .mods = .{ .shift = true, .right_shift = true } } });
     try first.injectEvent(.{ .text = "A" });
     try second.injectEvent(.{ .cursor_motion = .{ .x = 12.5, .y = 7.25 } });
     _ = try recorder.endFrame();
@@ -745,6 +768,7 @@ test "global recording round trips and replays input with frame timing" {
     defer loaded.deinit();
     try std.testing.expectEqual(@as(u64, 35), loaded.durationNs());
     try std.testing.expectEqualStrings("A", loaded.events[1].event.text);
+    try std.testing.expect(loaded.events[0].event.key.mods.right_shift);
 
     var replay_state = try Offscreen.init(allocator, .{});
     defer replay_state.deinit();
@@ -763,6 +787,33 @@ test "global recording round trips and replays input with frame timing" {
     try std.testing.expect(replay_second.isFocused());
     try std.testing.expectEqualDeep(runtime.ContentSize{ .width = 1280, .height = 720 }, replay_second.getSize());
     try std.testing.expect((try replayer.nextFrame()) == null);
+}
+
+test "legacy recordings retain aggregate modifiers" {
+    const allocator = std.testing.allocator;
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try output.writer.writeAll(legacy_file_magic);
+    try writeInt(&output.writer, u64, 1); // frames
+    try writeInt(&output.writer, u64, 1); // events
+    try writeInt(&output.writer, u64, 1); // delta_ns
+    try writeInt(&output.writer, u64, 0); // first_event
+    try writeInt(&output.writer, u64, 1); // event_count
+    try writeInt(&output.writer, u64, 0); // window_id
+    try writeInt(&output.writer, u8, 10); // key event
+    try writeInt(&output.writer, u16, @intFromEnum(runtime.Key.a));
+    try writeInt(&output.writer, u32, 38);
+    try writeInt(&output.writer, u8, @intFromEnum(runtime.Action.press));
+    try writeInt(&output.writer, u8, 0x09); // shift + super
+
+    var input = std.Io.Reader.fixed(output.written());
+    var recording = try Recording.read(allocator, &input);
+    defer recording.deinit();
+    const mods = recording.events[0].event.key.mods;
+    try std.testing.expect(mods.shift);
+    try std.testing.expect(mods.super);
+    try std.testing.expect(!mods.left_shift);
+    try std.testing.expect(!mods.right_super);
 }
 
 test "replay ignores compositor-owned events from existing recordings" {
