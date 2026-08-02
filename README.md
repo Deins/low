@@ -66,38 +66,19 @@ zig build run --build-file ./examples/multiwindow_triangles/build.zig \
   -- --frames 300 --record-video
 ```
 
-The video recorder keeps rendered pixels on the GPU, converts BGRA to BT.709 NV12, encodes and pulls stream to cpu,
-then writes streaming Matroska by default (or the selected codec's raw
-elementary stream when requested) through a caller-owned `std.Io.Writer`.
-Vulkan Video dependencies are not
-resolved by normal builds.
-
-Request recording support with `video.selectVideoFormat(..., .on)` during
-device selection; Low tries AV1, H.265, then H.264. Once the selected
-`VideoDevice` is attached, a target starts with only
-`beginRecording(.{ .io = io, .writer = writer })`. Explicit codec preferences,
-timing, quality, resize behavior, and container settings remain optional.
-
-See the [Vulkan Video recording guide](docs/recording.md) for device setup,
-recording lifecycle, timing, output formats, and quality tradeoffs. For
-platform and Vulkan-layer internals, including the Vulkan Video implementation
-invariants and validation guidance, see the [implementation notes](docs/implementation.md).
+Vulkan Video recording captures submitted render-target frames on the GPU and
+writes Matroska by default. Recording support must be selected before creating
+the Vulkan device. See the [recording guide](docs/recording.md) for setup,
+lifecycle, timing, and output options, or the
+[implementation notes](docs/implementation.md) for Vulkan internals.
 
 ## Deterministic input recording and replay
 
-`low.replay` records window events together with the frame deltas used by the
-application loop. Replaying the returned deltas instead of sampling wall time
-makes input-driven rendering reproducible, including screenshot and video
-capture when the application supplies `Frame.elapsed_ns` as its recording
-timestamp.
-
-The default scope includes every window in a context and maps windows by
-creation order. A window slice selects per-window recording or replay, so a
-tool can keep an editor window live while replaying its preview window.
-Recordings can also be written to and read from a versioned binary stream.
-
-See the [deterministic input replay guide](docs/input-replay.md) for the default
-loop, per-window use, persistence, custom timing, and event injection.
+`low.replay` records window input and frame timing so deterministic application
+loops can reproduce the same update and rendering path. It covers the whole
+context and replays at the recorded pace by default. See the
+[input replay guide](docs/input-replay.md) for usage, persistence, per-window
+control, and custom timelines.
 
 ### Deployment & cross-compilation
 For portable deployments or cross-compilation, specify a target such as:

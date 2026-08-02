@@ -19,19 +19,21 @@ pub const RecordingFormat = enum {
     mkv,
 };
 
-/// Selects how recorded frames are timestamped and supplies the nominal rate
-/// required to configure the selected encoder.
+/// Selects how recorded frames are timed.
 ///
 /// Variable-rate timing (`.monotonic`) requires `.mkv` output; raw elementary
-/// streams have no container timestamps.
+/// streams have no timestamps. Most ordinary render loops should keep the
+/// default `.monotonic = .fps(60)` timing.
 pub const RecordingTiming = union(enum) {
-    /// Space accepted frames evenly at this rate. Automatic per-frame rate
-    /// limiting uses the same rate so faster presentation does not slow down
-    /// playback.
+    /// Give every submitted frame the same duration. This is a good fit for a
+    /// renderer or simulation that advances at a fixed rate; for example,
+    /// `.fps(60)` makes every frame one 60 Hz simulation step. The default
+    /// per-frame policy records every step, regardless of wall-clock speed.
     fixed_rate: capabilities.FrameRate,
-    /// Timestamp accepted frames from the monotonic clock or a per-frame
-    /// caller timestamp. Frames can have variable spacing; the carried rate
-    /// is also the automatic capture cap.
+    /// Preserve the actual time between accepted frames, using Low's monotonic
+    /// clock or a per-frame caller timestamp. This is a good fit for normal UI
+    /// and game loops whose render time varies. The carried rate configures the
+    /// encoder and becomes the capture cap when `.rate_limit = .auto` is used.
     monotonic: capabilities.FrameRate,
 
     pub fn frameRate(self: RecordingTiming) capabilities.FrameRate {
@@ -48,7 +50,8 @@ pub const RecordingTiming = union(enum) {
 /// Configuration for `RenderTarget.beginRecording` or `Recorder.begin`.
 ///
 /// Typical window recording needs only `io` and `writer`; the
-/// defaults produce a 60 fps, 12 Mbps Matroska file. Call `endRecording` (or
+/// defaults produce a 12 Mbps Matroska file with actual frame times and record
+/// every submitted frame for reliable debugging. Call `endRecording` (or
 /// `Recorder.end`) before closing the writer so pending GPU work is drained
 /// and the container is finalized.
 ///
@@ -61,14 +64,17 @@ pub const RecordingOptions = struct {
     /// Destination for the encoded stream. The caller owns and closes it after
     /// `endRecording` completes.
     writer: *std.Io.Writer,
-    /// Select timestamp behavior and the nominal encoder rate. Use `.fps(60)`
-    /// for whole-number rates or `.init(30_000, 1001)` for exact fractions.
+    /// Select frame timing. Keep the default for normal rendering. Its rate
+    /// configures the encoder and is used as the opt-in `.auto` capture limit.
+    /// Use `.fixed_rate = .fps(60)` when every submitted frame is a fixed 60 Hz
+    /// rendering or simulation step.
     timing: RecordingTiming = .{ .monotonic = .fps(60) },
     /// Target video bitrate in bits per second. Higher values preserve detail
     /// but increase file size; 12 Mbps is a reasonable 1080p starting point.
     bitrate: u32 = 12_000_000,
     /// Maximum frames between IDR keyframes. Smaller values improve seeking
-    /// and recovery but increase bitrate; 60 is about one second at 60 fps.
+    /// and recovery but increase bitrate; 60 is about one second when the
+    /// recording accepts 60 frames per second.
     gop_size: u32 = 60,
     /// Encoder tuning preference. `.balanced` is the portable default;
     /// `.low_latency` and `.high_quality` need matching device support.
@@ -1737,7 +1743,8 @@ fn resolveRateLimit(timing: RecordingTiming, policy: recording_submit.RateLimit)
     };
     return switch (policy) {
         .auto => switch (timing) {
-            .fixed_rate, .monotonic => |rate| try resolvedFrameRate(rate.numerator, rate.denominator),
+            .fixed_rate => null,
+            .monotonic => |rate| try resolvedFrameRate(rate.numerator, rate.denominator),
         },
         .unlimited => null,
         .frame_rate => |rate| blk: {
@@ -1918,13 +1925,16 @@ test "recording admission throttles monotonic and fixed timing from supplied tim
         .start_time_ns = 0,
         .source_extent = .{ .width = 64, .height = 64 },
     };
-    const first = (try monotonic.selectFrame(.{ .timestamp_ns = 0 })).?;
+    const first = (try monotonic.selectFrame(.{ .timestamp_ns = 0, .rate_limit = .auto })).?;
     try std.testing.expectEqual(@as(u64, 0), first.timestamp_ns);
     monotonic.run.?.rate_state = first.rate_state;
     monotonic.run.?.last_timestamp_ns = first.timestamp_ns;
     monotonic.run.?.output_frames += 1;
-    try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try monotonic.selectFrame(.{ .timestamp_ns = 8_000_000 }));
-    const second = (try monotonic.selectFrame(.{ .timestamp_ns = 17_000_000 })).?;
+    try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try monotonic.selectFrame(.{
+        .timestamp_ns = 8_000_000,
+        .rate_limit = .auto,
+    }));
+    const second = (try monotonic.selectFrame(.{ .timestamp_ns = 17_000_000, .rate_limit = .auto })).?;
     try std.testing.expectEqual(@as(u64, 17_000_000), second.timestamp_ns);
 
     var fixed = Recorder.init(std.testing.allocator, &video_device, 0, 2, low_vk.format.b8g8r8a8_unorm);
@@ -1942,12 +1952,15 @@ test "recording admission throttles monotonic and fixed timing from supplied tim
         .start_time_ns = 0,
         .source_extent = .{ .width = 64, .height = 64 },
     };
-    const fixed_first = (try fixed.selectFrame(.{ .timestamp_ns = 0 })).?;
+    const fixed_first = (try fixed.selectFrame(.{ .timestamp_ns = 0, .rate_limit = .fps(30) })).?;
     fixed.run.?.rate_state = fixed_first.rate_state;
     fixed.run.?.last_timestamp_ns = fixed_first.timestamp_ns;
     fixed.run.?.output_frames += 1;
-    try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try fixed.selectFrame(.{ .timestamp_ns = 20_000_000 }));
-    const fixed_second = (try fixed.selectFrame(.{ .timestamp_ns = 34_000_000 })).?;
+    try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try fixed.selectFrame(.{
+        .timestamp_ns = 20_000_000,
+        .rate_limit = .fps(30),
+    }));
+    const fixed_second = (try fixed.selectFrame(.{ .timestamp_ns = 34_000_000, .rate_limit = .fps(30) })).?;
     try std.testing.expectEqual(@as(u64, 33_333_333), fixed_second.timestamp_ns);
     try std.testing.expectError(error.FixedRateLimitMismatch, fixed.selectFrame(.{
         .timestamp_ns = 40_000_000,
@@ -1955,7 +1968,37 @@ test "recording admission throttles monotonic and fixed timing from supplied tim
     }));
 }
 
-test "unlimited monotonic recording accepts custom and automatic timestamps" {
+test "fixed timing records every simulation step by default" {
+    var video_device: VideoDevice = undefined;
+    var writer: std.Io.Writer = .failing;
+    var recorder = Recorder.init(std.testing.allocator, &video_device, 0, 2, low_vk.format.b8g8r8a8_unorm);
+    recorder.run = .{
+        .io = std.Options.debug_io,
+        .writer = &writer,
+        .timing = .{ .fixed_rate = .fps(60) },
+        .bitrate = 1,
+        .gop_size = 1,
+        .quality = .balanced,
+        .resize = .stop_recording,
+        .parameter_sets = .stream_start,
+        .codec = .h264,
+        .format = .mkv,
+        .start_time_ns = 0,
+        .source_extent = .{ .width = 64, .height = 64 },
+    };
+
+    const first = (try recorder.selectFrame(.{ .timestamp_ns = 0 })).?;
+    try std.testing.expectEqual(@as(u64, 0), first.timestamp_ns);
+    try std.testing.expectEqual(@as(?Recorder.CaptureRateState, null), first.rate_state);
+    recorder.run.?.last_timestamp_ns = first.timestamp_ns;
+    recorder.run.?.output_frames += 1;
+
+    const second = (try recorder.selectFrame(.{ .timestamp_ns = 1 })).?;
+    try std.testing.expectEqual(@as(u64, 16_666_667), second.timestamp_ns);
+    try std.testing.expectEqual(@as(?Recorder.CaptureRateState, null), second.rate_state);
+}
+
+test "default monotonic recording accepts custom and automatic timestamps" {
     var video_device: VideoDevice = undefined;
     var writer: std.Io.Writer = .failing;
     var recorder = Recorder.init(std.testing.allocator, &video_device, 0, 2, low_vk.format.b8g8r8a8_unorm);
@@ -1973,9 +2016,9 @@ test "unlimited monotonic recording accepts custom and automatic timestamps" {
         .start_time_ns = std.Io.Timestamp.now(std.Options.debug_io, .awake).nanoseconds,
         .source_extent = .{ .width = 64, .height = 64 },
     };
-    try std.testing.expect((try recorder.selectFrame(.{ .rate_limit = .unlimited })) != null);
+    try std.testing.expect((try recorder.selectFrame(.{})) != null);
     try std.testing.expectEqual(@as(?Recorder.SelectedFrame, null), try recorder.selectFrame(.{ .skip_frame = true }));
-    const selected = (try recorder.selectFrame(.{ .timestamp_ns = 42, .rate_limit = .unlimited })).?;
+    const selected = (try recorder.selectFrame(.{ .timestamp_ns = 42 })).?;
     try std.testing.expectEqual(@as(u64, 42), selected.timestamp_ns);
     try std.testing.expectEqual(@as(?Recorder.CaptureRateState, null), selected.rate_state);
 }

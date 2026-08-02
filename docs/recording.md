@@ -120,51 +120,82 @@ has no container timestamps, so it only accepts fixed-rate timing.
 
 ## Timing
 
-`RecordingOptions.timing` combines timestamp behavior with the nominal frame
-rate needed to configure H.264 and Vulkan rate control:
+Most applications should not set `timing`. The default preserves the actual
+time between rendered frames and records every submitted frame. This is useful
+for debugging because capture throttling cannot hide a one-frame problem:
 
 ```zig
-// Evenly spaced 60 fps timestamps and an automatic 60 fps capture cap.
-.timing = .{ .fixed_rate = .fps(60) },
+try target.beginRecording(.{
+    .io = io,
+    .writer = writer,
+});
+```
 
-// Variable timestamps and an automatic 60 fps capture cap. This is the default.
+Choose a timing mode only when the application's update loop has a specific
+cadence:
+
+```zig
+// Normal UI or game loop: preserve the actual time between frames.
+// This is the default.
 .timing = .{ .monotonic = .fps(60) },
 
-// Variable timestamps, with an exact fractional nominal/capture rate.
+// Fixed-step renderer or simulation: every recorded frame is one 60 Hz step.
+.timing = .{ .fixed_rate = .fps(60) },
+
+// A less common exact fractional rate.
 .timing = .{ .monotonic = .init(30_000, 1001) },
 ```
 
-Use `.fixed_rate` for a conventional constant-rate recording. Accepted frames
-play at an even interval, and the default per-frame rate policy drops excess
-frames at that same rate. A caller-provided timestamp controls admission but
-does not replace the evenly spaced output timestamp.
+`.fixed_rate = .fps(60)` is a good fit when rendering or simulation runs at a
+fixed 60 Hz rate. Every submitted frame represents one simulation step and
+plays for exactly 1/60 second. The simulation may render faster or slower than
+real time without changing the resulting video's speed or dropping steps. It
+is also the mode to use when a downstream consumer requires a constant-rate
+video or when writing `.raw` output.
 
-Use `.monotonic` for a variable-rate recording driven by normal rendering.
-`submitAndPresent(.{})` timestamps frames using the monotonic clock and drops
-excess frames at the carried rate. Accepted frames retain their actual capture
-timestamps.
+The default `.monotonic = .fps(60)` is a good fit for an ordinary render loop
+whose frame times vary. `submitAndPresent(.{})` reads Low's monotonic clock,
+records every submitted frame, and preserves its actual capture time. A slow
+frame therefore remains a slow frame during playback instead of making the
+whole recording run fast or slow. The `.fps(60)` value configures the encoder;
+it does not discard frames unless `.rate_limit = .auto` is selected.
 
 When timestamps come from an application clock, a media source, or another
 external scheduler, set `.recording.timestamp_ns` in monotonic mode. Timestamps
-are nanoseconds on the recording timeline and must be strictly increasing. Use
-`.rate_limit = .unlimited` when every timestamped frame should be recorded;
-otherwise `.auto` applies the timing rate as a capture cap.
+are nanoseconds elapsed on the recording timeline and must be strictly
+increasing.
+
+To reduce recording overhead or file size, opt in to the configured 60 fps
+capture limit on submission:
+
+```zig
+try frame.submitAndPresent(.{
+    .recording = .{ .rate_limit = .auto },
+});
+```
+
+This drops recording frames above 60 fps without delaying rendering or
+presentation. Fixed-rate mode records every submitted frame by default because
+the rate describes simulation/playback time rather than wall-clock capture
+time.
 
 `.fps(60)` is the clearest choice for whole-number rates. Use
 `.init(30_000, 1001)` for exact fractional rates such as NTSC 29.97 fps;
 fractions avoid accumulated rounding error from a nanosecond interval.
 
-## Per-frame recording control
+## Advanced per-frame recording control
 
-`submitAndPresent` has one options-based form. Its defaults work whether or not
-recording is active; recording fields are ignored when it is inactive:
+Most applications should call `submitAndPresent(.{})`. Its defaults work
+whether or not recording is active, and recording fields are ignored when it
+is inactive. Set per-frame options only to skip a frame, supply an application
+timeline, or enable capture limiting:
 
 ```zig
 try frame.submitAndPresent(.{
     .recording = .{
         .skip_frame = false,
         .timestamp_ns = null,
-        .rate_limit = .auto,
+        .rate_limit = .unlimited,
     },
 });
 ```
@@ -176,23 +207,25 @@ encode work, making it suitable for manual admission control.
 admission and still emits evenly spaced timestamps. Monotonic timing uses it
 for output. When omitted, Low samples its monotonic clock.
 
-The rate policy controls automatic admission without delaying presentation:
+The rate policy controls which frames enter the recording; it never delays
+rendering or presentation:
 
 ```zig
-.rate_limit = .auto                 // use the configured timing rate
-.rate_limit = .unlimited            // record every submitted frame
+.rate_limit = .unlimited            // record every frame; this is the default
+.rate_limit = .auto                 // cap monotonic capture at the timing rate
 .rate_limit = .fps(30)              // at most 30 recorded frames per second
 .rate_limit = .init(30_000, 1001)   // exact fractional rate
 .rate_limit = .interval(50_000_000) // at most one frame every 50 ms
 ```
 
-For fixed timing, `.auto` is normally correct. A custom rate must equal the
-fixed output rate or submission returns `FixedRateLimitMismatch`; otherwise the
-capture cadence and output cadence would change playback speed. `.unlimited`
-is allowed as an explicit opt-out for callers that intentionally want every
-frame encoded with fixed spacing. Changing the policy accepts that frame and
-starts a new cadence; missed rate slots are skipped rather than emitted later
-as a burst.
+Keep `.unlimited` when capturing a bug or when every fixed simulation step must
+be recorded. Use `.auto` when recording overhead matters more than retaining
+every rendered frame; it caps monotonic capture at the rate configured in
+`timing` and still records every fixed-rate step. A custom limit for fixed
+timing must equal the fixed output rate or submission returns
+`FixedRateLimitMismatch`; otherwise capture and playback would run at different
+speeds. Changing the policy accepts that frame and starts a new cadence; missed
+rate slots are skipped rather than emitted later as a burst.
 
 Readback uses the same submission model:
 

@@ -33,7 +33,8 @@ defer recording.deinit();
 delta is measured from recorder initialization. `Frame.elapsed_ns` is the sum
 of all returned deltas and is the deterministic application timestamp.
 
-Replay uses the same loop shape and does not sleep by default:
+Replay uses the same loop shape and reproduces the recorded wall-clock cadence
+by default:
 
 ```zig
 var replayer = try low.replay.Replayer.init(allocator, &context, &recording, .{});
@@ -52,8 +53,9 @@ recorded or replayed. In particular, an input callback may safely request
 fullscreen during replay without stale recorded configure events replacing the
 compositor's response. Explicit `Window.injectEvent` calls still work, allowing
 a debugger to change state or branch from the recorded timeline. Set
-`.pace = .realtime` to reproduce the wall-clock cadence as well; this does not
-change the deltas returned to the application.
+`.pace = .unpaced` for automated tests, offline rendering, or timeline tools
+that should run as quickly as possible. Pacing never changes the deterministic
+deltas returned to the application.
 
 ## Per-window recording and mixed live/replay
 
@@ -138,9 +140,7 @@ try render_frame.submitAndPresent(.{
 ```
 
 The same event sequence, update deltas, frame admission decisions, and video
-timestamps then reach screenshot/readback and recording paths. Fixed-rate video
-recording may use its normal fixed timestamp policy; the replay timestamp still
-drives identical rate admission.
+timestamps then reach screenshot/readback and recording paths.
 
 The [`multiwindow_triangles`](../examples/multiwindow_triangles/README.md#input-timeline-recording-and-replay)
 example is the complete reference implementation. Its `--record-input` path

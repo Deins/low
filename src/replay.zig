@@ -350,7 +350,12 @@ pub const ReplayScope = union(enum) {
     windows: []const *Window,
 };
 
-pub const Pace = enum { unpaced, realtime };
+pub const Pace = enum {
+    /// Dispatch frames as quickly as the application can consume them.
+    unpaced,
+    /// Wait between frames to reproduce the recorded wall-clock cadence.
+    realtime,
+};
 
 pub const ReplayerOptions = struct {
     scope: ReplayScope = .all,
@@ -358,8 +363,15 @@ pub const ReplayerOptions = struct {
     /// ignore replayable input from this pump but retain live surface events;
     /// other windows remain fully interactive.
     poll_live: bool = true,
-    pace: Pace = .unpaced,
+    /// Reproduce the recorded wall-clock cadence by default. Use `.unpaced`
+    /// for automated tests, offline rendering, or timeline processing.
+    pace: Pace = .realtime,
 };
+
+test "replayer follows the recorded cadence by default" {
+    const options: ReplayerOptions = .{};
+    try std.testing.expectEqual(Pace.realtime, options.pace);
+}
 
 pub const Replayer = struct {
     inner: *Inner,
