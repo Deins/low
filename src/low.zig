@@ -239,6 +239,7 @@ test "root API exposes the supported contract" {
     _ = Window.vulkanSurface;
     _ = Window.setMouseCaptured;
     _ = Window.isMouseCaptured;
+    _ = Window.isMouseCaptureRequested;
     _ = Window.isCursorVisible;
     _ = Window.deinit;
     _ = Error;

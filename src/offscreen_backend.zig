@@ -200,8 +200,10 @@ pub const Backend = struct {
         const window = try context.createWindow(.{ .title = "test" });
         window.setMouseCaptured(true);
         try std.testing.expect(window.isMouseCaptured());
+        try std.testing.expect(window.isMouseCaptureRequested());
         window.setMouseCaptured(false);
         try std.testing.expect(!window.isMouseCaptured());
+        try std.testing.expect(!window.isMouseCaptureRequested());
         window.setCursorVisible(false);
         try std.testing.expect(!window.isCursorVisible());
     }

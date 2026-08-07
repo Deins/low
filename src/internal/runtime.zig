@@ -293,6 +293,7 @@ pub const Window = struct {
     decoration_mode: DecorationMode = .auto,
     cursor_visible: bool = true,
     mouse_captured: bool = false,
+    mouse_capture_requested: bool = false,
     cursor_shape: CursorShape = .arrow,
     size: ContentSize,
     framebuffer_size: PixelSize,
@@ -453,12 +454,19 @@ pub const Window = struct {
     /// `isMouseCaptured` remains false when the backend cannot establish the
     /// request.
     pub fn setMouseCaptured(self: *Window, captured: bool) void {
+        self.mouse_capture_requested = captured;
         if (self.mouse_captured == captured) return;
         self.mouse_captured = self.ctx.vtable.set_mouse_captured(self, captured);
     }
 
     pub fn isMouseCaptured(self: *const Window) bool {
         return self.mouse_captured;
+    }
+
+    /// Returns whether a capture request is pending or active. This can differ
+    /// from `isMouseCaptured` while the pointer has no focus.
+    pub fn isMouseCaptureRequested(self: *const Window) bool {
+        return self.mouse_capture_requested;
     }
 
     /// Returns whether the platform currently advises pausing rendering for

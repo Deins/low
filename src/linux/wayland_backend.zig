@@ -229,7 +229,17 @@ fn scale(inner: *native.Window, value: native.ContentScale) void {
     window.content_scale = value;
 }
 fn focus(inner: *native.Window, focused: bool) void {
-    api.windowUpdateFocus(publicWindow(inner), focused);
+    const window = publicWindow(inner);
+    const regained_focus = focused and !window.isFocused();
+    api.windowUpdateFocus(window, focused);
+
+    // Some compositors keep a persistent constraint object on focus loss but
+    // stop sending relative motion after focus returns. Recreate the native
+    // constraint without changing the application's capture request.
+    if (regained_focus and window.isFocused() and window.isMouseCaptureRequested()) {
+        if (window.isMouseCaptured()) _ = inner.setMouseCaptured(false);
+        window.mouse_captured = inner.setMouseCaptured(true);
+    }
 }
 fn renderSuspended(inner: *native.Window, suspended: bool) void {
     api.windowUpdateRenderSuspended(publicWindow(inner), suspended);
@@ -238,7 +248,14 @@ fn frame(inner: *native.Window, time_ms: u32) void {
     api.windowUpdateFrameReady(publicWindow(inner), time_ms);
 }
 fn cursorEnter(inner: *native.Window, entered: bool) void {
-    api.windowUpdateCursorEnter(publicWindow(inner), entered);
+    const window = publicWindow(inner);
+    api.windowUpdateCursorEnter(window, entered);
+
+    // A request made before Wayland supplied a pointer cannot be established
+    // immediately. Retry once the pointer enters this surface.
+    if (entered and window.isMouseCaptureRequested() and !window.isMouseCaptured()) {
+        window.setMouseCaptured(true);
+    }
 }
 fn cursorMotion(inner: *native.Window, point: native.Point) void {
     api.windowUpdateCursorMotion(publicWindow(inner), point.x, point.y);
