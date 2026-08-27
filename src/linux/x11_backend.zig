@@ -661,7 +661,7 @@ fn handleKey(data: *Data, event: x11.XKeyEvent, pressed: bool) void {
     const key = mapKeysym(keysym);
     const action: api.Action = if (pressed and window.pressed_keys.contains(key)) .repeat else if (pressed) .press else .release;
     input.setModifierSide(&data.side_modifiers, key, pressed);
-    const mods = modifiers(event.state, data.side_modifiers);
+    const mods = keyModifiers(event.state, data.side_modifiers, key);
     api.windowUpdateKey(window, key, @intCast(event.keycode), action, mods);
     if (pressed and !mods.control and len > 0) {
         const text = bytes[0..@intCast(len)];
@@ -678,6 +678,10 @@ fn modifiers(state: c_uint, sides: api.Modifiers) api.Modifiers {
     mods.caps_lock = state & x11.LockMask != 0;
     mods.num_lock = state & x11.Mod2Mask != 0;
     return mods;
+}
+
+fn keyModifiers(state: c_uint, sides: api.Modifiers, key: api.Key) api.Modifiers {
+    return input.modifiersAfterKeyTransition(modifiers(state, sides), sides, key);
 }
 
 fn syncModifierSides(data: *Data, window: x11.Window) void {
@@ -876,6 +880,14 @@ test "X11 maps alphanumeric keysyms" {
     try std.testing.expectEqual(api.Key.a, mapKeysym('A'));
     try std.testing.expectEqual(api.Key.zero, mapKeysym('0'));
     try std.testing.expectEqual(api.Key.nine, mapKeysym('9'));
+}
+
+test "X11 modifier release uses post-transition side state" {
+    const released = keyModifiers(x11.ShiftMask, .{}, .left_shift);
+    try std.testing.expect(!released.shift);
+
+    const other_side_held = keyModifiers(x11.ShiftMask, .{ .right_shift = true }, .left_shift);
+    try std.testing.expect(other_side_held.shift);
 }
 
 test "X11 clipboard converts Latin-1 fallback to UTF-8" {

@@ -2096,7 +2096,11 @@ fn keyboardKey(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, time: 
         else => return,
     };
     input.setModifierSide(&self.side_modifiers, mapped_key, action != .release);
-    const mods = self.currentModifiers();
+    const mods = input.modifiersAfterKeyTransition(
+        self.currentModifiers(),
+        self.side_modifiers,
+        mapped_key,
+    );
     window.updateKey(mapped_key, key, action, mods);
 
     if (action != .release and !mods.control) {

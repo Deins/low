@@ -62,6 +62,20 @@ pub fn clearModifierSides(mods: *Modifiers) void {
     mods.right_super = false;
 }
 
+/// Correct the aggregate whose key event precedes the platform's aggregate
+/// modifier update. Side state already reflects the key transition.
+pub fn modifiersAfterKeyTransition(mods_before: Modifiers, sides: Modifiers, key: Key) Modifiers {
+    var mods = mods_before;
+    switch (key) {
+        .left_shift, .right_shift => mods.shift = sides.left_shift or sides.right_shift,
+        .left_control, .right_control => mods.control = sides.left_control or sides.right_control,
+        .left_alt, .right_alt => mods.alt = sides.left_alt or sides.right_alt,
+        .left_command, .right_command => mods.super = sides.left_super or sides.right_super,
+        else => {},
+    }
+    return mods;
+}
+
 /// Keyboard text callbacks carry text input, not the control bytes generated
 /// by keys such as Backspace, Enter, and Tab.  Those keys are delivered by the
 /// key callback instead.
@@ -94,6 +108,18 @@ test "modifier side helpers preserve aggregate state" {
     try std.testing.expect(!mods.left_alt);
     try std.testing.expect(mods.shift);
     try std.testing.expect(mods.control);
+}
+
+test "modifier transition replaces the stale aggregate for its key" {
+    const released = modifiersAfterKeyTransition(.{ .shift = true }, .{}, .left_shift);
+    try std.testing.expect(!released.shift);
+
+    const other_side_held = modifiersAfterKeyTransition(
+        .{ .shift = true },
+        .{ .right_shift = true },
+        .left_shift,
+    );
+    try std.testing.expect(other_side_held.shift);
 }
 
 pub const CursorShape = enum {
