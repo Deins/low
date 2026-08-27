@@ -2035,10 +2035,12 @@ fn pointerAxis(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, axis: u32,
     _ = time;
     const self = @as(*State, @ptrCast(@alignCast(data.?)));
     const window = self.pointer_window orelse return;
+    // Wayland conventionally reports 10 axis units per wheel detent.
+    const steps = -value.toDouble() / 10.0;
     if (axis == @as(u32, @intCast(@intFromEnum(c.WL_POINTER_AXIS_VERTICAL_SCROLL)))) {
-        window.updateScroll(0, -value.toDouble());
+        window.updateScroll(0, steps);
     } else if (axis == @as(u32, @intCast(@intFromEnum(c.WL_POINTER_AXIS_HORIZONTAL_SCROLL)))) {
-        window.updateScroll(-value.toDouble(), 0);
+        window.updateScroll(steps, 0);
     }
 }
 
