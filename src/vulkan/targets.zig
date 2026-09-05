@@ -711,6 +711,8 @@ pub const RenderTarget = struct {
 
     pub const Frame = struct {
         index: u32,
+        /// Submission slot whose previous fence has completed; not an image index.
+        slot_index: u32,
         image: vk.Image,
         view: vk.ImageView,
         extent: vk.Extent2D,
@@ -1016,6 +1018,7 @@ pub const RenderTarget = struct {
                 self.submitted = false;
                 return .{
                     .index = image_index,
+                    .slot_index = slot_index,
                     .image = image_handle,
                     .view = self.imageView(image_index),
                     .extent = self.extent,

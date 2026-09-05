@@ -316,6 +316,13 @@ pub const PresentationSurface = struct {
 pub const Device = struct {
     const Self = @This();
 
+    /// Optional accounting hook; copied device views retain the same context.
+    pub const MemoryObserver = struct {
+        context: ?*anyopaque,
+        allocated: *const fn (?*anyopaque, api.DeviceMemory, u64, u32) anyerror!void,
+        freed: *const fn (?*anyopaque, api.DeviceMemory) void,
+    };
+
     pub const Dispatch = struct {
         device_wait_idle: api.PfnDeviceWaitIdle,
         wait_for_fences: api.PfnWaitForFences,
@@ -354,6 +361,7 @@ pub const Device = struct {
     };
 
     handle: api.DeviceHandle,
+    memory_observer: ?MemoryObserver = null,
     dispatch: Dispatch,
 
     pub fn init(instance: *const Instance, handle: api.DeviceHandle) Loader.Error!Self {
@@ -595,10 +603,13 @@ pub const Device = struct {
     pub fn allocateMemory(self: *const Self, info: *const api.MemoryAllocateInfo) !api.DeviceMemory {
         var memory: api.DeviceMemory = 0;
         try check(self.dispatch.allocate_memory(self.handle, info, null, &memory));
+        errdefer self.dispatch.free_memory(self.handle, memory, null);
+        if (self.memory_observer) |observer| try observer.allocated(observer.context, memory, info.allocation_size, info.memory_type_index);
         return memory;
     }
 
     pub fn freeMemory(self: *const Self, memory: api.DeviceMemory) void {
+        if (memory != 0) if (self.memory_observer) |observer| observer.freed(observer.context, memory);
         self.dispatch.free_memory(self.handle, memory, null);
     }
 
