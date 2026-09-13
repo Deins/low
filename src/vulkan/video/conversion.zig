@@ -275,7 +275,7 @@ test "letterbox transform preserves aspect and centers content" {
         .{ .width = 1280, .height = 720 },
         .{ .width = 1920, .height = 1320 },
     ));
-    try std.testing.expectEqual(FitRect{ .x = 320, .y = 0, .width = 1280, .height = 1080 }, letterboxRect(
+    try std.testing.expectEqual(FitRect{ .x = 240, .y = 0, .width = 1440, .height = 1080 }, letterboxRect(
         .{ .width = 4, .height = 3 },
         .{ .width = 1920, .height = 1080 },
     ));

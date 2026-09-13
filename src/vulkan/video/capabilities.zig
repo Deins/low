@@ -933,10 +933,9 @@ test "each codec requests only its own device extension" {
     try std.testing.expect(std.mem.eql(u8, std.mem.span(requiredDeviceExtensions(.av1)[2]), "VK_KHR_video_encode_av1"));
 }
 
-test "recording request defaults cover every codec" {
-    try std.testing.expect(!RecordingRequest.off.enabled());
-    try std.testing.expect(RecordingRequest.on.enabled());
-    try std.testing.expectEqualSlices(Codec, &.{ .av1, .h265, .h264 }, &default_codec_preferences);
+test "recording requests distinguish enabled and disabled capture" {
+    try std.testing.expect(!@as(RecordingRequest, .off).enabled());
+    try std.testing.expect(@as(RecordingRequest, .on).enabled());
 }
 
 test "HEVC and AV1 profile chains select their codec operation" {

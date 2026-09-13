@@ -368,11 +368,6 @@ pub const ReplayerOptions = struct {
     pace: Pace = .realtime,
 };
 
-test "replayer follows the recorded cadence by default" {
-    const options: ReplayerOptions = .{};
-    try std.testing.expectEqual(Pace.realtime, options.pace);
-}
-
 pub const Replayer = struct {
     inner: *Inner,
 

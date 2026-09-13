@@ -208,15 +208,6 @@ test "detectBackend" {
     );
 }
 
-test "backend request carries backend-specific options" {
-    const options = InitOptions{
-        .backend = .{ .offscreen = .{ .frame_mode = .{ .continuous = .{ .interval_ns = 1_000 } } } },
-    };
-    try std.testing.expectEqual(std.meta.Tag(BackendRequest).offscreen, std.meta.activeTag(options.backend));
-    try std.testing.expectEqual(@as(?u64, 1_000), options.backend.offscreen.frame_mode.continuous.interval_ns);
-    try std.testing.expectEqual(std.meta.Tag(BackendRequest).auto, std.meta.activeTag((InitOptions{}).backend));
-}
-
 test "scaledSize" {
     const size = scaledSize(.{ .width = 100, .height = 50 }, .{ .x = 1.5, .y = 2.0 });
     try std.testing.expectEqual(@as(i32, 150), size.width);

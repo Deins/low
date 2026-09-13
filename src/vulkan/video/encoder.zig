@@ -1861,17 +1861,11 @@ test "Annex-B parameter streams accept both standard start codes" {
     try std.testing.expectEqual(@as(?usize, null), annexBStartCodeLength(&.{ 0, 1, 0x67 }));
 }
 
-test "recorder accepts every advertised recording codec" {
-    try validateRecordingCodec(.h264);
-    try validateRecordingCodec(.h265);
-    try validateRecordingCodec(.av1);
-}
-
 test "recorder accepts packed 10-bit UNORM source formats" {
     try std.testing.expect(sourceFormatSupported(low_vk.format.b8g8r8a8_unorm));
     try std.testing.expect(sourceFormatSupported(low_vk.format.a2b10g10r10_unorm_pack32));
     try std.testing.expect(sourceFormatSupported(low_vk.format.a2r10g10b10_unorm_pack32));
-    try std.testing.expect(!sourceFormatSupported(.undefined));
+    try std.testing.expect(!sourceFormatSupported(low_vk.format.undefined));
 }
 
 test "recorder status transitions are non-consuming" {

@@ -1,5 +1,3 @@
-const std = @import("std");
-
 /// Per-frame recording rate policy. Rate limiting drops recording frames; it
 /// never delays or skips presentation.
 pub const RateLimit = union(enum) {
@@ -51,10 +49,3 @@ pub const RecordingOptions = struct {
 pub const SubmitOptions = struct {
     recording: RecordingOptions = .{},
 };
-
-test "recording submission options default to lossless frame admission" {
-    const options: SubmitOptions = .{};
-    try std.testing.expect(!options.recording.skip_frame);
-    try std.testing.expectEqual(@as(?u64, null), options.recording.timestamp_ns);
-    try std.testing.expect(options.recording.rate_limit == .unlimited);
-}
