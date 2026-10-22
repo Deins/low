@@ -97,7 +97,7 @@ const Renderer = struct {
             low_device,
             low.vulkan.toQueue(graphics_queue),
             selection.graphics_queue_family,
-            @intFromEnum(command_pool),
+            @backingInt(command_pool),
         );
         if (selection.present_queue_family) |present_family| {
             if (present_family != selection.graphics_queue_family) {
@@ -128,13 +128,13 @@ const Renderer = struct {
 
     fn initPipeline(self: *Renderer, surface: ?low.vulkan.api.SurfaceKHR) !void {
         std.debug.assert(self.pipeline == .null_handle);
-        const color_format: vk.Format = @enumFromInt(try Targets.chooseColorFormat(
+        const color_format: vk.Format = @fromBackingInt(@intCast(try Targets.chooseColorFormat(
             &self.render_context.instance,
             low.vulkan.toPhysicalDevice(self.physical_device),
             surface,
             self.gpa,
             Targets.default_color_formats,
-        ));
+        )));
         const pipeline_layout = try createPipelineLayout(self.device);
         errdefer self.device.destroyPipelineLayout(pipeline_layout, null);
         const pipeline = try createPipeline(self.device, pipeline_layout, color_format);
@@ -302,8 +302,8 @@ const AppWindow = struct {
             else => return err,
         };
         defer frame.abort();
-        const command_buffer: vk.CommandBuffer = @enumFromInt(@intFromPtr(frame.command_buffer.?));
-        const image_view: vk.ImageView = @enumFromInt(frame.view);
+        const command_buffer: vk.CommandBuffer = @fromBackingInt(@intCast(@intFromPtr(frame.command_buffer.?)));
+        const image_view: vk.ImageView = @fromBackingInt(@intCast(frame.view));
         const extent = vk.Extent2D{ .width = frame.extent.width, .height = frame.extent.height };
         const color_attachment = vk.RenderingAttachmentInfo{
             .image_view = image_view,

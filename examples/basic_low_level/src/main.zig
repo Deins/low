@@ -368,11 +368,11 @@ pub fn main(init: std.process.Init) !void {
         .key = onKey,
         .text = onText,
     });
-    const surface: vk.SurfaceKHR = @enumFromInt(window.vulkanSurface().?);
+    const surface: vk.SurfaceKHR = @fromBackingInt(@intCast(window.vulkanSurface().?));
     if (try low_instance.getPhysicalDeviceSurfaceSupportKHR(
         low.vulkan.toPhysicalDevice(selection.physical_device),
         selection.queue_family,
-        @intFromEnum(surface),
+        @backingInt(surface),
     ) != low.vulkan.api.TRUE) return error.NoPresentDevice;
     var target = try RawTarget.init(allocator, instance, selection.physical_device, device, graphics_queue, selection.queue_family, surface, window);
     defer target.deinit();
