@@ -102,7 +102,7 @@ fn addPlatformSupport(
     b: *Build,
     module: *Build.Module,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     enable_wayland: bool,
 ) bool {
     switch (target.result.os.tag) {
@@ -125,7 +125,7 @@ fn addLinuxSupport(
     b: *Build,
     module: *Build.Module,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     enable_wayland: bool,
 ) bool {
     // Both the X11 and Wayland Linux backends use libc. X11-only test builds

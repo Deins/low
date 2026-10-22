@@ -1,22 +1,20 @@
 .{
     .name = .low,
     .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0x928878a129b5e577,
     .dependencies = .{
         .win32 = .{
-            .url = "git+https://github.com/kristoff-it/zigwin32.git?ref=fix/zig16#1102e9b82e8bd50913b6a78035bfb399ebd8cf97",
-            .hash = "zigwin32-25.0.28-preview-6BfVhYKN5AOvXPVJq4bGZ7C5dM3PbUra4xhKAKOFJGcF",
+            .url = "git+https://github.com/marlersoft/zigwin32.git#fb2645891520f3e99931db17a7eba04057e87e89",
+            .hash = "win32-42.0.39-preview-mX5pFc794wMcrMyFgsO1c4csBdowhpiqqwIyN_xjqI5z",
             .lazy = true,
         },
         .wayland = .{
-            .url = "git+https://codeberg.org/Deins/zig-wayland#606066c33324ddf7cbf7bc934d021814cf049dfa",
-            .hash = "wayland-0.7.0-dev-lQa1kl38AQC-kQolS5D4jV1GJ2rH2jv1VWHr14YLVnyn",
+            .path = "../zig-wayland",
             .lazy = true,
         },
         .vulkan = .{
-            .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
-            .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
+            .path = "../vulkan-zig",
             .lazy = true,
         },
         .vulkan_headers = .{

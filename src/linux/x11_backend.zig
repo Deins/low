@@ -16,7 +16,7 @@ const Data = struct {
     atoms: x11.Atoms,
     cursor_cache: std.EnumArray(api.CursorShape, x11.Cursor) = .initFill(0),
     empty_cursor: x11.Cursor = 0,
-    windows: std.ArrayListUnmanaged(*api.Window) = .empty,
+    windows: std.ArrayList(*api.Window) = .empty,
     side_modifiers: api.Modifiers = .{},
     state: ?*api.State = null,
 };
@@ -395,7 +395,7 @@ fn readClipboardProperty(data: *Data, requested_target: x11.Atom, allocator: std
             try allocator.dupe(u8, bytes);
     }
 
-    var result: std.ArrayListUnmanaged(u8) = .empty;
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
     while (true) {
         _ = waitForClipboardEvent(data, .property) orelse {
@@ -421,7 +421,7 @@ fn readClipboardProperty(data: *Data, requested_target: x11.Atom, allocator: std
 }
 
 fn latin1ToUtf8(allocator: std.mem.Allocator, latin1: []const u8) std.mem.Allocator.Error![]u8 {
-    var utf8: std.ArrayListUnmanaged(u8) = .empty;
+    var utf8: std.ArrayList(u8) = .empty;
     errdefer utf8.deinit(allocator);
     for (latin1) |byte| {
         if (byte < 0x80) {
@@ -435,7 +435,7 @@ fn latin1ToUtf8(allocator: std.mem.Allocator, latin1: []const u8) std.mem.Alloca
 }
 
 fn utf8ToLatin1(allocator: std.mem.Allocator, utf8: []const u8) std.mem.Allocator.Error![]u8 {
-    var latin1: std.ArrayListUnmanaged(u8) = .empty;
+    var latin1: std.ArrayList(u8) = .empty;
     errdefer latin1.deinit(allocator);
     var index: usize = 0;
     while (index < utf8.len) {
@@ -740,7 +740,7 @@ fn createFontCursor(data: *Data, shape: api.CursorShape) x11.Cursor {
 fn applyCursor(window: *api.Window) void {
     const data = stateData(window.ctx);
     const cursor = if (!window.cursor_visible) data.empty_cursor else blk: {
-        const entry = &data.cursor_cache.values[@intFromEnum(window.cursor_shape)];
+        const entry = &data.cursor_cache.values[@backingInt(window.cursor_shape)];
         if (entry.* == 0) entry.* = createFontCursor(data, window.cursor_shape);
         break :blk entry.*;
     };
@@ -803,15 +803,15 @@ fn setNetWmState(window: *api.Window, add: bool, requested: NetWmState) void {
 }
 
 fn mapKeysym(sym: x11.KeySym) api.Key {
-    if (sym >= 0xffbe and sym <= 0xffd6) return @enumFromInt(@intFromEnum(api.Key.f1) + @as(u16, @intCast(sym - 0xffbe)));
+    if (sym >= 0xffbe and sym <= 0xffd6) return @fromBackingInt(@intCast(@backingInt(api.Key.f1) + @as(u16, @intCast(sym - 0xffbe))));
     if (sym >= 'a' and sym <= 'z') {
-        return @enumFromInt(@as(u16, @intFromEnum(api.Key.a)) + @as(u16, @intCast(sym - 'a')));
+        return @fromBackingInt(@intCast(@as(u16, @backingInt(api.Key.a)) + @as(u16, @intCast(sym - 'a'))));
     }
     if (sym >= 'A' and sym <= 'Z') {
-        return @enumFromInt(@as(u16, @intFromEnum(api.Key.a)) + @as(u16, @intCast(sym - 'A')));
+        return @fromBackingInt(@intCast(@as(u16, @backingInt(api.Key.a)) + @as(u16, @intCast(sym - 'A'))));
     }
     if (sym >= '0' and sym <= '9') {
-        return @enumFromInt(@as(u16, @intFromEnum(api.Key.zero)) + @as(u16, @intCast(sym - '0')));
+        return @fromBackingInt(@intCast(@as(u16, @backingInt(api.Key.zero)) + @as(u16, @intCast(sym - '0'))));
     }
     return switch (sym) {
         0xffaf => .kp_divide,

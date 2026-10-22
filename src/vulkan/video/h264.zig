@@ -20,7 +20,7 @@ pub const ParameterSets = struct {
         if (gop_size == 0 or gop_size > 32_768) return error.InvalidGopSize;
         const time_scale = std.math.mul(u32, timing.numerator, 2) catch return error.FrameRateTooLarge;
         const level = chooseLevel(extent, timing, bitrate) orelse return error.UnsupportedVideoExtent;
-        if (@intFromEnum(level) > @intFromEnum(maximum_level)) return error.UnsupportedVideoExtent;
+        if (@backingInt(level) > @backingInt(maximum_level)) return error.UnsupportedVideoExtent;
 
         self.* = std.mem.zeroes(ParameterSets);
         self.vui.flags = .{
@@ -51,7 +51,7 @@ pub const ParameterSets = struct {
         self.sps.flags = .{
             .constraint_set_0_flag = profile == .baseline,
             .constraint_set_1_flag = profile == .baseline,
-            .direct_8x_8_inference_flag = true,
+            .direct_8x8_inference_flag = true,
             .frame_mbs_only_flag = true,
             .frame_cropping_flag = macroblock_width != extent.width or macroblock_height != extent.height,
             .vui_parameters_present_flag = true,
@@ -79,7 +79,7 @@ pub const ParameterSets = struct {
             // Keep the first encoder path within the syntax flags universally
             // exposed for High/Main/Baseline profiles. Drivers may omit the
             // transform-8x8 set capability even when High profile is present.
-            .transform_8x_8_mode_flag = false,
+            .transform_8x8_mode_flag = false,
             .deblocking_filter_control_present_flag = true,
             .entropy_coding_mode_flag = profile != .baseline,
         };

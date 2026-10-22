@@ -176,8 +176,8 @@ pub const Recorder = struct {
         clock: Clock,
         last_clock_ns: u64,
         elapsed_ns: u64 = 0,
-        frames: std.ArrayListUnmanaged(FrameRecord) = .empty,
-        events: std.ArrayListUnmanaged(RecordedEvent) = .empty,
+        frames: std.ArrayList(FrameRecord) = .empty,
+        events: std.ArrayList(RecordedEvent) = .empty,
         active_frame: ?usize = null,
         sticky_error: ?anyerror = null,
         attached: bool = false,
@@ -377,7 +377,7 @@ pub const Replayer = struct {
         state: *runtime.State,
         recording: *const Recording,
         scope: ReplayScope,
-        mappings: std.ArrayListUnmanaged(Mapping) = .empty,
+        mappings: std.ArrayList(Mapping) = .empty,
         next_frame: usize = 0,
         elapsed_ns: u64 = 0,
         pace_started_ns: ?u64 = null,
@@ -672,8 +672,8 @@ fn writeEvent(writer: *std.Io.Writer, event: Event) !void {
         },
         .mouse_button => |value| {
             try writeInt(writer, u8, 8);
-            try writeInt(writer, u8, @intFromEnum(value.button));
-            try writeInt(writer, u8, @intFromEnum(value.action));
+            try writeInt(writer, u8, @backingInt(value.button));
+            try writeInt(writer, u8, @backingInt(value.action));
             try writeModifiers(writer, value.mods);
         },
         .scroll => |value| {
@@ -683,9 +683,9 @@ fn writeEvent(writer: *std.Io.Writer, event: Event) !void {
         },
         .key => |value| {
             try writeInt(writer, u8, 10);
-            try writeInt(writer, u16, @intFromEnum(value.key));
+            try writeInt(writer, u16, @backingInt(value.key));
             try writeInt(writer, u32, value.raw_keycode);
-            try writeInt(writer, u8, @intFromEnum(value.action));
+            try writeInt(writer, u8, @backingInt(value.action));
             try writeModifiers(writer, value.mods);
         },
         .text => |bytes| {
@@ -808,9 +808,9 @@ test "legacy recordings retain aggregate modifiers" {
     try writeInt(&output.writer, u64, 1); // event_count
     try writeInt(&output.writer, u64, 0); // window_id
     try writeInt(&output.writer, u8, 10); // key event
-    try writeInt(&output.writer, u16, @intFromEnum(runtime.Key.a));
+    try writeInt(&output.writer, u16, @backingInt(runtime.Key.a));
     try writeInt(&output.writer, u32, 38);
-    try writeInt(&output.writer, u8, @intFromEnum(runtime.Action.press));
+    try writeInt(&output.writer, u8, @backingInt(runtime.Action.press));
     try writeInt(&output.writer, u8, 0x09); // shift + super
 
     var input = std.Io.Reader.fixed(output.written());

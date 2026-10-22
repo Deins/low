@@ -28,7 +28,7 @@ pub fn build(b: *Build) !void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .strip = optimize != .Debug,
+            .strip = optimize != .debug,
         }),
     });
     exe.root_module.addImport("low", low_dep.module("low"));

@@ -414,7 +414,7 @@ pub fn queryH264Support(options: QueryH264SupportOptions) !H264Support {
         instance,
         physical_device,
         &profile_info.profile,
-        .{ .storage_bit = true, .video_encode_src_bit_khr = true },
+        .{ .storage = true, .video_encode_src_khr = true },
         true,
         options.allocator,
     );
@@ -426,7 +426,7 @@ pub fn queryH264Support(options: QueryH264SupportOptions) !H264Support {
         instance,
         physical_device,
         &profile_info.profile,
-        .{ .video_encode_dpb_bit_khr = true },
+        .{ .video_encode_dpb_khr = true },
         false,
         options.allocator,
     );
@@ -434,9 +434,9 @@ pub fn queryH264Support(options: QueryH264SupportOptions) !H264Support {
         support.reason = .no_dpb_format;
         return support;
     }
-    if (!support.rate_control_modes.cbr_bit_khr and
-        !support.rate_control_modes.vbr_bit_khr and
-        !support.rate_control_modes.disabled_bit_khr)
+    if (!support.rate_control_modes.cbr_khr and
+        !support.rate_control_modes.vbr_khr and
+        !support.rate_control_modes.disabled_khr)
     {
         support.reason = .no_usable_rate_control_mode;
         return support;
@@ -484,7 +484,7 @@ pub fn queryH265Support(options: QueryH265SupportOptions) !H265Support {
         support.reason = .unsupported_profile;
         return support;
     };
-    populateCodecSupport(&support, selected.generic, selected.encode, @intFromEnum(selected.profile), @intFromEnum(selected.h265.max_level_idc));
+    populateCodecSupport(&support, selected.generic, selected.encode, @backingInt(selected.profile), @backingInt(selected.h265.max_level_idc));
     support.tuning_modes.low_latency = h265TuningModeSupported(instance, physical_device, selected.profile, .low_latency_khr);
     support.tuning_modes.high_quality = h265TuningModeSupported(instance, physical_device, selected.profile, .high_quality_khr);
     if (!try finishCodecSupport(instance, physical_device, &support, options.extent, options.allocator, H265ProfileChain)) return support;
@@ -537,7 +537,7 @@ pub fn queryAV1Support(options: QueryAV1SupportOptions) !AV1Support {
         support.reason = .unsupported_profile;
         return support;
     };
-    populateCodecSupport(&support, selected.generic, selected.encode, @intFromEnum(selected.profile), @intFromEnum(selected.av1.max_level));
+    populateCodecSupport(&support, selected.generic, selected.encode, @backingInt(selected.profile), @backingInt(selected.av1.max_level));
     support.tuning_modes.low_latency = av1TuningModeSupported(instance, physical_device, selected.profile, .low_latency_khr);
     support.tuning_modes.high_quality = av1TuningModeSupported(instance, physical_device, selected.profile, .high_quality_khr);
     if (!try finishCodecSupport(instance, physical_device, &support, options.extent, options.allocator, AV1ProfileChain)) return support;
@@ -576,18 +576,18 @@ fn finishCodecSupport(
         return false;
     };
     var chain: Chain = undefined;
-    chain.init(@enumFromInt(support.profile), .default_khr);
-    support.input_format = try chooseVideoFormat(instance, physical_device, &chain.profile, .{ .storage_bit = true, .video_encode_src_bit_khr = true }, true, allocator);
+    chain.init(@fromBackingInt(@intCast(support.profile)), .default_khr);
+    support.input_format = try chooseVideoFormat(instance, physical_device, &chain.profile, .{ .storage = true, .video_encode_src_khr = true }, true, allocator);
     if (support.input_format == null) {
         support.reason = .no_encode_input_format;
         return false;
     }
-    support.dpb_format = try chooseVideoFormat(instance, physical_device, &chain.profile, .{ .video_encode_dpb_bit_khr = true }, false, allocator);
+    support.dpb_format = try chooseVideoFormat(instance, physical_device, &chain.profile, .{ .video_encode_dpb_khr = true }, false, allocator);
     if (support.dpb_format == null) {
         support.reason = .no_dpb_format;
         return false;
     }
-    if (!support.rate_control_modes.cbr_bit_khr and !support.rate_control_modes.vbr_bit_khr and !support.rate_control_modes.disabled_bit_khr) {
+    if (!support.rate_control_modes.cbr_khr and !support.rate_control_modes.vbr_khr and !support.rate_control_modes.disabled_khr) {
         support.reason = .no_usable_rate_control_mode;
         return false;
     }
@@ -604,10 +604,10 @@ const ProfileChain = struct {
             .usage = .{ .tuning_mode = tuning },
             .h264 = .{ .std_profile_idc = profile_idc },
             .profile = .{
-                .video_codec_operation = .{ .encode_h264_bit_khr = true },
-                .chroma_subsampling = .{ .@"420_bit_khr" = true },
-                .luma_bit_depth = .{ .@"8_bit_khr" = true },
-                .chroma_bit_depth = .{ .@"8_bit_khr" = true },
+                .video_codec_operation = .{ .encode_h264_khr = true },
+                .chroma_subsampling = .{ .@"420_khr" = true },
+                .luma_bit_depth = .{ .@"8_khr" = true },
+                .chroma_bit_depth = .{ .@"8_khr" = true },
             },
         };
         self.h264.p_next = @ptrCast(&self.usage);
@@ -632,10 +632,10 @@ const H265ProfileChain = struct {
             .usage = .{ .tuning_mode = tuning },
             .h265 = .{ .std_profile_idc = profile_idc },
             .profile = .{
-                .video_codec_operation = .{ .encode_h265_bit_khr = true },
-                .chroma_subsampling = .{ .@"420_bit_khr" = true },
-                .luma_bit_depth = .{ .@"8_bit_khr" = true },
-                .chroma_bit_depth = .{ .@"8_bit_khr" = true },
+                .video_codec_operation = .{ .encode_h265_khr = true },
+                .chroma_subsampling = .{ .@"420_khr" = true },
+                .luma_bit_depth = .{ .@"8_khr" = true },
+                .chroma_bit_depth = .{ .@"8_khr" = true },
             },
         };
         self.h265.p_next = @ptrCast(&self.usage);
@@ -684,10 +684,10 @@ const AV1ProfileChain = struct {
             .usage = .{ .tuning_mode = tuning },
             .av1 = .{ .std_profile = profile_idc },
             .profile = .{
-                .video_codec_operation = .{ .encode_av1_bit_khr = true },
-                .chroma_subsampling = .{ .@"420_bit_khr" = true },
-                .luma_bit_depth = .{ .@"8_bit_khr" = true },
-                .chroma_bit_depth = .{ .@"8_bit_khr" = true },
+                .video_codec_operation = .{ .encode_av1_khr = true },
+                .chroma_subsampling = .{ .@"420_khr" = true },
+                .luma_bit_depth = .{ .@"8_khr" = true },
+                .chroma_bit_depth = .{ .@"8_khr" = true },
             },
         };
         self.av1.p_next = @ptrCast(&self.usage);
@@ -773,9 +773,9 @@ fn findEncodeQueueFamily(instance: vk.InstanceWrapper, physical_device: vk.Physi
     var fallback: ?u32 = null;
     for (properties[0..count], video[0..count], 0..) |property, video_property, index| {
         if (property.queue_family_properties.queue_count == 0 or
-            !property.queue_family_properties.queue_flags.video_encode_bit_khr or
+            !property.queue_family_properties.queue_flags.video_encode_khr or
             !queueSupportsCodec(video_property.video_codec_operations, codec)) continue;
-        if (property.queue_family_properties.queue_flags.compute_bit) return @intCast(index);
+        if (property.queue_family_properties.queue_flags.compute) return @intCast(index);
         if (fallback == null) fallback = @intCast(index);
     }
     return fallback;
@@ -783,9 +783,9 @@ fn findEncodeQueueFamily(instance: vk.InstanceWrapper, physical_device: vk.Physi
 
 fn queueSupportsCodec(operations: vk.VideoCodecOperationFlagsKHR, codec: Codec) bool {
     return switch (codec) {
-        .h264 => operations.encode_h264_bit_khr,
-        .h265 => operations.encode_h265_bit_khr,
-        .av1 => operations.encode_av1_bit_khr,
+        .h264 => operations.encode_h264_khr,
+        .h265 => operations.encode_h265_khr,
+        .av1 => operations.encode_av1_khr,
     };
 }
 
@@ -867,11 +867,11 @@ fn alignForward(value: u32, alignment: u32) ?u32 {
 }
 
 fn toInstance(handle: low_vk.InstanceHandle) vk.Instance {
-    return @enumFromInt(@intFromPtr(handle orelse return .null_handle));
+    return @fromBackingInt(@intCast(@intFromPtr(handle orelse return .null_handle)));
 }
 
 fn toPhysicalDevice(handle: low_vk.PhysicalDevice) vk.PhysicalDevice {
-    return @enumFromInt(@intFromPtr(handle orelse return .null_handle));
+    return @fromBackingInt(@intCast(@intFromPtr(handle orelse return .null_handle)));
 }
 
 test "coded extents combine both video granularities" {
@@ -941,13 +941,13 @@ test "recording requests distinguish enabled and disabled capture" {
 test "HEVC and AV1 profile chains select their codec operation" {
     var h265: H265ProfileChain = undefined;
     h265.init(.main, .default_khr);
-    try std.testing.expect(h265.profile.video_codec_operation.encode_h265_bit_khr);
-    try std.testing.expect(!h265.profile.video_codec_operation.encode_av1_bit_khr);
+    try std.testing.expect(h265.profile.video_codec_operation.encode_h265_khr);
+    try std.testing.expect(!h265.profile.video_codec_operation.encode_av1_khr);
 
     var av1: AV1ProfileChain = undefined;
     av1.init(.main, .default_khr);
-    try std.testing.expect(av1.profile.video_codec_operation.encode_av1_bit_khr);
-    try std.testing.expect(!av1.profile.video_codec_operation.encode_h265_bit_khr);
+    try std.testing.expect(av1.profile.video_codec_operation.encode_av1_khr);
+    try std.testing.expect(!av1.profile.video_codec_operation.encode_h265_khr);
 }
 
 test "selected format retains the codec and queue requirements" {

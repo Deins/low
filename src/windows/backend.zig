@@ -23,7 +23,7 @@ var class_registered = false;
 
 const Data = struct {
     allocator: std.mem.Allocator,
-    windows: std.ArrayListUnmanaged(*Window) = .empty,
+    windows: std.ArrayList(*Window) = .empty,
 };
 
 const WindowedState = struct {
@@ -199,10 +199,10 @@ fn clipboardText(state: *runtime.State, allocator: std.mem.Allocator) std.mem.Al
     }
     defer _ = win32.CloseClipboard();
 
-    if (win32.IsClipboardFormatAvailable(@intFromEnum(win32.CF_UNICODETEXT)) == win32.FALSE) {
+    if (win32.IsClipboardFormatAvailable(@backingInt(win32.CF_UNICODETEXT)) == win32.FALSE) {
         return emptyClipboardText(state, allocator);
     }
-    const handle = win32.GetClipboardData(@intFromEnum(win32.CF_UNICODETEXT)) orelse {
+    const handle = win32.GetClipboardData(@backingInt(win32.CF_UNICODETEXT)) orelse {
         log.warn("system clipboard text could not be retrieved; using in-process text fallback", .{});
         return state.clipboard.get(allocator);
     };
@@ -283,7 +283,7 @@ fn clipboardTextSet(state: *runtime.State, text: []const u8) std.mem.Allocator.E
     }
 
     const handle: win32.HANDLE = @ptrFromInt(@as(usize, @bitCast(global)));
-    if (win32.SetClipboardData(@intFromEnum(win32.CF_UNICODETEXT), handle) != null) {
+    if (win32.SetClipboardData(@backingInt(win32.CF_UNICODETEXT), handle) != null) {
         owned = false;
     } else {
         log.warn("system clipboard rejected Unicode text; retained text in the in-process fallback", .{});
@@ -336,7 +336,7 @@ fn setTitle(window: *Window, title: [:0]const u8) void {
 }
 
 fn show(window: *Window) void {
-    _ = win32.ShowWindow(windowHandle(window), .{ .SHOWNORMAL = 1 });
+    _ = win32.ShowWindow(windowHandle(window), .SHOWNORMAL);
 }
 
 fn hide(window: *Window) void {
@@ -775,7 +775,7 @@ fn wndProc(hwnd: win32.HWND, message: u32, wparam: win32.WPARAM, lparam: win32.L
             return 0;
         },
         win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN, win32.WM_KEYUP, win32.WM_SYSKEYUP => {
-            const key = virtualKeyToKey(@enumFromInt(wparam), lparam);
+            const key = virtualKeyToKey(@fromBackingInt(@intCast(wparam)), lparam);
             const released = message == win32.WM_KEYUP or message == win32.WM_SYSKEYUP;
             const repeated = !released and (@as(usize, @bitCast(lparam)) & 0x4000_0000) != 0;
             const action: Action = if (released) .release else if (repeated) .repeat else .press;
@@ -806,25 +806,25 @@ fn updateRenderSuspension(window: *Window, fallback_suspended: bool) void {
     );
     // DWM also reports windows cloaked by the shell. If it is unavailable or
     // declines the query, retain the state inferred from the window message.
-    runtime.windowUpdateRenderSuspended(window, fallback_suspended or result == 0 and cloaked != 0);
+    runtime.windowUpdateRenderSuspended(window, fallback_suspended or @backingInt(result) == 0 and cloaked != 0);
 }
 
 fn modifiers() Modifiers {
-    const left_shift = win32.GetKeyState(@intFromEnum(win32.VK_LSHIFT)) < 0;
-    const right_shift = win32.GetKeyState(@intFromEnum(win32.VK_RSHIFT)) < 0;
-    const left_control = win32.GetKeyState(@intFromEnum(win32.VK_LCONTROL)) < 0;
-    const right_control = win32.GetKeyState(@intFromEnum(win32.VK_RCONTROL)) < 0;
-    const left_alt = win32.GetKeyState(@intFromEnum(win32.VK_LMENU)) < 0;
-    const right_alt = win32.GetKeyState(@intFromEnum(win32.VK_RMENU)) < 0;
-    const left_super = win32.GetKeyState(@intFromEnum(win32.VK_LWIN)) < 0;
-    const right_super = win32.GetKeyState(@intFromEnum(win32.VK_RWIN)) < 0;
+    const left_shift = win32.GetKeyState(@backingInt(win32.VK_LSHIFT)) < 0;
+    const right_shift = win32.GetKeyState(@backingInt(win32.VK_RSHIFT)) < 0;
+    const left_control = win32.GetKeyState(@backingInt(win32.VK_LCONTROL)) < 0;
+    const right_control = win32.GetKeyState(@backingInt(win32.VK_RCONTROL)) < 0;
+    const left_alt = win32.GetKeyState(@backingInt(win32.VK_LMENU)) < 0;
+    const right_alt = win32.GetKeyState(@backingInt(win32.VK_RMENU)) < 0;
+    const left_super = win32.GetKeyState(@backingInt(win32.VK_LWIN)) < 0;
+    const right_super = win32.GetKeyState(@backingInt(win32.VK_RWIN)) < 0;
     return .{
         .shift = left_shift or right_shift,
         .control = left_control or right_control,
         .alt = left_alt or right_alt,
         .super = left_super or right_super,
-        .caps_lock = win32.GetKeyState(@intFromEnum(win32.VK_CAPITAL)) & 1 != 0,
-        .num_lock = win32.GetKeyState(@intFromEnum(win32.VK_NUMLOCK)) & 1 != 0,
+        .caps_lock = win32.GetKeyState(@backingInt(win32.VK_CAPITAL)) & 1 != 0,
+        .num_lock = win32.GetKeyState(@backingInt(win32.VK_NUMLOCK)) & 1 != 0,
         .left_shift = left_shift,
         .right_shift = right_shift,
         .left_control = left_control,

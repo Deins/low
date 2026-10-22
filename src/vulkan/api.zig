@@ -94,8 +94,8 @@ pub const format = struct {
 
 pub const FormatFeatureFlags = u32;
 pub const format_feature = struct {
-    pub const color_attachment_bit: FormatFeatureFlags = 1 << 7;
-    pub const transfer_src_bit: FormatFeatureFlags = 1 << 14;
+    pub const color_attachment: FormatFeatureFlags = 1 << 7;
+    pub const transfer_src: FormatFeatureFlags = 1 << 14;
 };
 
 pub const FormatProperties = extern struct {
@@ -192,71 +192,71 @@ pub const MemoryHeapFlags = u32;
 // padding.
 
 pub const image_usage = struct {
-    pub const transfer_src_bit: ImageUsageFlags = 1 << 0;
-    pub const transfer_dst_bit: ImageUsageFlags = 1 << 1;
-    pub const color_attachment_bit: ImageUsageFlags = 1 << 4;
+    pub const transfer_src: ImageUsageFlags = 1 << 0;
+    pub const transfer_dst: ImageUsageFlags = 1 << 1;
+    pub const color_attachment: ImageUsageFlags = 1 << 4;
 };
 
 pub const image_aspect = struct {
-    pub const color_bit: ImageAspectFlags = 1 << 0;
+    pub const color: ImageAspectFlags = 1 << 0;
 };
 
 pub const pipeline_stage = struct {
-    pub const top_of_pipe_bit: PipelineStageFlags = 1 << 0;
-    pub const color_attachment_output_bit: PipelineStageFlags = 1 << 10;
-    pub const transfer_bit: PipelineStageFlags = 1 << 12;
-    pub const bottom_of_pipe_bit: PipelineStageFlags = 1 << 13;
-    pub const host_bit: PipelineStageFlags = 1 << 14;
+    pub const top_of_pipe: PipelineStageFlags = 1 << 0;
+    pub const color_attachment_output: PipelineStageFlags = 1 << 10;
+    pub const transfer: PipelineStageFlags = 1 << 12;
+    pub const bottom_of_pipe: PipelineStageFlags = 1 << 13;
+    pub const host: PipelineStageFlags = 1 << 14;
 };
 
 pub const access = struct {
-    pub const transfer_read_bit: AccessFlags = 1 << 11;
-    pub const transfer_write_bit: AccessFlags = 1 << 12;
-    pub const host_read_bit: AccessFlags = 1 << 13;
-    pub const color_attachment_write_bit: AccessFlags = 1 << 8;
+    pub const transfer_read: AccessFlags = 1 << 11;
+    pub const transfer_write: AccessFlags = 1 << 12;
+    pub const host_read: AccessFlags = 1 << 13;
+    pub const color_attachment_write: AccessFlags = 1 << 8;
 };
 
 pub const command_buffer_usage = struct {
-    pub const one_time_submit_bit: CommandBufferUsageFlags = 1 << 0;
-    pub const render_pass_continue_bit: CommandBufferUsageFlags = 1 << 1;
-    pub const simultaneous_use_bit: CommandBufferUsageFlags = 1 << 2;
+    pub const one_time_submit: CommandBufferUsageFlags = 1 << 0;
+    pub const render_pass_continue: CommandBufferUsageFlags = 1 << 1;
+    pub const simultaneous_use: CommandBufferUsageFlags = 1 << 2;
 };
 
 pub const command_pool_create = struct {
-    pub const reset_command_buffer_bit: CommandPoolCreateFlags = 1 << 1;
+    pub const reset_command_buffer: CommandPoolCreateFlags = 1 << 1;
 };
 
 pub const fence_create = struct {
-    pub const signaled_bit: FenceCreateFlags = 1 << 0;
+    pub const signaled: FenceCreateFlags = 1 << 0;
 };
 
 pub const surface_transform = struct {
-    pub const identity_bit_khr: SurfaceTransformFlagsKHR = 1 << 0;
+    pub const identity_khr: SurfaceTransformFlagsKHR = 1 << 0;
 };
 
 pub const composite_alpha = struct {
-    pub const opaque_bit_khr: CompositeAlphaFlagsKHR = 1 << 0;
-    pub const pre_multiplied_bit_khr: CompositeAlphaFlagsKHR = 1 << 1;
-    pub const post_multiplied_bit_khr: CompositeAlphaFlagsKHR = 1 << 2;
-    pub const inherit_bit_khr: CompositeAlphaFlagsKHR = 1 << 3;
+    pub const opaque_khr: CompositeAlphaFlagsKHR = 1 << 0;
+    pub const pre_multiplied_khr: CompositeAlphaFlagsKHR = 1 << 1;
+    pub const post_multiplied_khr: CompositeAlphaFlagsKHR = 1 << 2;
+    pub const inherit_khr: CompositeAlphaFlagsKHR = 1 << 3;
 };
 
 pub const queue = struct {
-    pub const graphics_bit: QueueFlags = 1 << 0;
+    pub const graphics: QueueFlags = 1 << 0;
 };
 
 pub const memory_property = struct {
-    pub const device_local_bit: MemoryPropertyFlags = 1 << 0;
-    pub const host_visible_bit: MemoryPropertyFlags = 1 << 1;
-    pub const host_coherent_bit: MemoryPropertyFlags = 1 << 2;
+    pub const device_local: MemoryPropertyFlags = 1 << 0;
+    pub const host_visible: MemoryPropertyFlags = 1 << 1;
+    pub const host_coherent: MemoryPropertyFlags = 1 << 2;
 };
 
 pub const buffer_usage = struct {
-    pub const transfer_dst_bit: BufferUsageFlags = 1 << 1;
+    pub const transfer_dst: BufferUsageFlags = 1 << 1;
 };
 
 pub const sample_count = struct {
-    pub const @"1_bit": SampleCountFlags = 1;
+    pub const @"1": SampleCountFlags = 1;
 };
 
 pub const QUEUE_FAMILY_IGNORED: u32 = 0xffffffff;

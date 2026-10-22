@@ -196,7 +196,7 @@ pub fn createDevice(
     selection: DeviceSelection(Vk),
 ) !DeviceResources(Vk) {
     const queue_priority = [_]f32{1.0};
-    var queue_families: std.ArrayListUnmanaged(u32) = .empty;
+    var queue_families: std.ArrayList(u32) = .empty;
     defer queue_families.deinit(allocator);
     try appendQueueFamily(&queue_families, allocator, selection.graphics_queue_family);
     if (selection.present_queue_family) |family| try appendQueueFamily(&queue_families, allocator, family);
@@ -212,7 +212,7 @@ pub fn createDevice(
         .p_queue_priorities = &queue_priority,
     };
 
-    var extensions: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+    var extensions: std.ArrayList([*:0]const u8) = .empty;
     defer extensions.deinit(allocator);
     for (selection.requirements.required_extensions) |extension| try appendExtension(&extensions, allocator, extension);
     if (selection.present_queue_family != null) try appendExtension(&extensions, allocator, swapchain_extension);
@@ -303,7 +303,7 @@ pub fn findDevice(
     const physical_devices = try instance.enumeratePhysicalDevicesAlloc(allocator);
     defer allocator.free(physical_devices);
 
-    var required_extensions: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+    var required_extensions: std.ArrayList([*:0]const u8) = .empty;
     defer required_extensions.deinit(allocator);
     for (settings.requirements.required_extensions) |extension| try appendExtension(&required_extensions, allocator, extension);
     if (settings.presentation != null) try appendExtension(&required_extensions, allocator, swapchain_extension);
@@ -348,18 +348,18 @@ pub fn findDevice(
         const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, allocator);
         defer allocator.free(families);
 
-        const graphics_queue_family = findQueueFamily(families, .graphics_bit, .any, null);
+        const graphics_queue_family = findQueueFamily(families, .graphics, .any, null);
         const graphics_family = graphics_queue_family orelse continue;
 
         const present_family = if (settings.presentation) |presentation|
             try low_instance.findPresentQueueFamilyKHR(Vulkan.toPhysicalDevice(physical_device), presentation, @intCast(families.len)) orelse continue
         else
             null;
-        const transfer_family = findQueueFamily(families, .transfer_bit, settings.transfer_queue, graphics_family) orelse switch (settings.transfer_queue) {
+        const transfer_family = findQueueFamily(families, .transfer, settings.transfer_queue, graphics_family) orelse switch (settings.transfer_queue) {
             .none => null,
             else => continue,
         };
-        const compute_family = findQueueFamily(families, .compute_bit, settings.compute_queue, graphics_family) orelse switch (settings.compute_queue) {
+        const compute_family = findQueueFamily(families, .compute, settings.compute_queue, graphics_family) orelse switch (settings.compute_queue) {
             .none => null,
             else => continue,
         };
@@ -397,9 +397,9 @@ fn meetsVersion(available: anytype, required: ?@TypeOf(available)) bool {
 }
 
 fn featuresSupported(comptime Features: type, required: Features, available: Features) bool {
-    inline for (@typeInfo(Features).@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, "s_type") or std.mem.eql(u8, field.name, "p_next")) continue;
-        if (@field(required, field.name) == .true and @field(available, field.name) != .true) return false;
+    inline for (@typeInfo(Features).@"struct".field_names) |name| {
+        if (comptime std.mem.eql(u8, name, "s_type") or std.mem.eql(u8, name, "p_next")) continue;
+        if (@field(required, name) == .true and @field(available, name) != .true) return false;
     }
     return true;
 }
@@ -433,8 +433,8 @@ fn findQueueFamily(families: anytype, comptime wanted: anytype, preference: Queu
             .any => return family_index,
             .separate, .dedicated => {
                 if (graphics_family != null and family_index == graphics_family.?) continue;
-                if (comptime std.mem.eql(u8, @tagName(wanted), "compute_bit")) return family_index;
-                if (!family.queue_flags.compute_bit) return family_index;
+                if (comptime std.mem.eql(u8, @tagName(wanted), "compute")) return family_index;
+                if (!family.queue_flags.compute) return family_index;
                 if (preference == .separate and separate_fallback == null) separate_fallback = family_index;
             },
         }
@@ -442,12 +442,12 @@ fn findQueueFamily(families: anytype, comptime wanted: anytype, preference: Queu
     return separate_fallback;
 }
 
-fn appendQueueFamily(list: *std.ArrayListUnmanaged(u32), allocator: std.mem.Allocator, family: u32) !void {
+fn appendQueueFamily(list: *std.ArrayList(u32), allocator: std.mem.Allocator, family: u32) !void {
     for (list.items) |existing| if (existing == family) return;
     try list.append(allocator, family);
 }
 
-fn appendExtension(list: *std.ArrayListUnmanaged([*:0]const u8), allocator: std.mem.Allocator, extension: [*:0]const u8) !void {
+fn appendExtension(list: *std.ArrayList([*:0]const u8), allocator: std.mem.Allocator, extension: [*:0]const u8) !void {
     for (list.items) |existing| if (std.mem.eql(u8, std.mem.span(existing), std.mem.span(extension))) return;
     try list.append(allocator, extension);
 }
@@ -477,17 +477,17 @@ test "queue preferences distinguish shared and dedicated families" {
         queue_flags: Flags,
     };
     const families = [_]Family{
-        .{ .queue_flags = .{ .graphics_bit = true, .transfer_bit = true, .compute_bit = true } },
-        .{ .queue_flags = .{ .transfer_bit = true, .compute_bit = true } },
-        .{ .queue_flags = .{ .transfer_bit = true } },
-        .{ .queue_flags = .{ .transfer_bit = true, .compute_bit = true } },
+        .{ .queue_flags = .{ .graphics = true, .transfer = true, .compute = true } },
+        .{ .queue_flags = .{ .transfer = true, .compute = true } },
+        .{ .queue_flags = .{ .transfer = true } },
+        .{ .queue_flags = .{ .transfer = true, .compute = true } },
     };
-    try std.testing.expectEqual(@as(?u32, 0), findQueueFamily(&families, Flag.transfer_bit, .any, 0));
-    try std.testing.expectEqual(@as(?u32, 2), findQueueFamily(&families, Flag.transfer_bit, .separate, 0));
-    try std.testing.expectEqual(@as(?u32, 2), findQueueFamily(&families, Flag.transfer_bit, .dedicated, 0));
-    try std.testing.expectEqual(@as(?u32, 1), findQueueFamily(&families, Flag.compute_bit, .separate, 0));
-    try std.testing.expectEqual(@as(?u32, 1), findQueueFamily(&families, Flag.compute_bit, .dedicated, 0));
-    try std.testing.expectEqual(@as(?u32, null), findQueueFamily(families[0..1], Flag.compute_bit, .separate, 0));
+    try std.testing.expectEqual(@as(?u32, 0), findQueueFamily(&families, Flag.transfer, .any, 0));
+    try std.testing.expectEqual(@as(?u32, 2), findQueueFamily(&families, Flag.transfer, .separate, 0));
+    try std.testing.expectEqual(@as(?u32, 2), findQueueFamily(&families, Flag.transfer, .dedicated, 0));
+    try std.testing.expectEqual(@as(?u32, 1), findQueueFamily(&families, Flag.compute, .separate, 0));
+    try std.testing.expectEqual(@as(?u32, 1), findQueueFamily(&families, Flag.compute, .dedicated, 0));
+    try std.testing.expectEqual(@as(?u32, null), findQueueFamily(families[0..1], Flag.compute, .separate, 0));
 }
 
 /// Presentation preferences used by the three standard vsync policies.
@@ -571,7 +571,7 @@ pub fn chooseOffscreenFormat(instance: *const Vulkan.Instance, physical_device: 
 }
 
 fn chooseOffscreenFormatForUsage(instance: *const Vulkan.Instance, physical_device: vk.PhysicalDevice, desired: []const vk.Format, transfer_source: bool) ?vk.Format {
-    const required = vk.format_feature.color_attachment_bit | if (transfer_source) vk.format_feature.transfer_src_bit else 0;
+    const required = vk.format_feature.color_attachment | if (transfer_source) vk.format_feature.transfer_src else 0;
     for (desired) |wanted| {
         const properties = instance.getPhysicalDeviceFormatProperties(physical_device, wanted);
         if (properties.optimal_tiling_features & required == required) return wanted;
@@ -944,7 +944,7 @@ pub const RenderTarget = struct {
                     const memory_type: u32 = @intCast(index);
                     if (requirements.memory_type_bits & (@as(u32, 1) << @intCast(index)) == 0) continue;
                     fallback = memory_type;
-                    if (self.memory_properties.memory_types[index].property_flags & vk.memory_property.device_local_bit != 0) {
+                    if (self.memory_properties.memory_types[index].property_flags & vk.memory_property.device_local != 0) {
                         return self.device.allocateMemory(&.{
                             .s_type = .memory_allocate_info,
                             .p_next = null,
@@ -1000,17 +1000,17 @@ pub const RenderTarget = struct {
                 const image_handle = self.image(image_index);
                 const old_layout = self.imageLayout(image_index);
                 const source_stage: vk.PipelineStageFlags = switch (old_layout) {
-                    .undefined => vk.pipeline_stage.top_of_pipe_bit,
-                    .transfer_src_optimal => vk.pipeline_stage.transfer_bit,
-                    .present_src_khr => vk.pipeline_stage.bottom_of_pipe_bit,
-                    else => vk.pipeline_stage.color_attachment_output_bit,
+                    .undefined => vk.pipeline_stage.top_of_pipe,
+                    .transfer_src_optimal => vk.pipeline_stage.transfer,
+                    .present_src_khr => vk.pipeline_stage.bottom_of_pipe,
+                    else => vk.pipeline_stage.color_attachment_output,
                 };
                 const source_access: vk.AccessFlags = switch (old_layout) {
                     .undefined, .present_src_khr => 0,
-                    .transfer_src_optimal => vk.access.transfer_read_bit,
-                    else => vk.access.color_attachment_write_bit,
+                    .transfer_src_optimal => vk.access.transfer_read,
+                    else => vk.access.color_attachment_write,
                 };
-                transitionImage(self.device, slot.command_buffer, image_handle, old_layout, .color_attachment_optimal, source_stage, source_access, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit);
+                transitionImage(self.device, slot.command_buffer, image_handle, old_layout, .color_attachment_optimal, source_stage, source_access, vk.pipeline_stage.color_attachment_output, vk.access.color_attachment_write);
 
                 self.active_slot = slot_index;
                 self.active_image = image_index;
@@ -1050,7 +1050,7 @@ pub const RenderTarget = struct {
                     null;
                 const copy_image = readback_allocator != null or recording_frame != null;
                 const post_render_layout: vk.ImageLayout = if (copy_image) .transfer_src_optimal else if (self.surface == 0) .color_attachment_optimal else .present_src_khr;
-                transitionImage(self.device, slot.command_buffer, image_handle, .color_attachment_optimal, post_render_layout, vk.pipeline_stage.color_attachment_output_bit, vk.access.color_attachment_write_bit, if (post_render_layout == .transfer_src_optimal) vk.pipeline_stage.transfer_bit else vk.pipeline_stage.bottom_of_pipe_bit, if (post_render_layout == .transfer_src_optimal) vk.access.transfer_read_bit else 0);
+                transitionImage(self.device, slot.command_buffer, image_handle, .color_attachment_optimal, post_render_layout, vk.pipeline_stage.color_attachment_output, vk.access.color_attachment_write, if (post_render_layout == .transfer_src_optimal) vk.pipeline_stage.transfer else vk.pipeline_stage.bottom_of_pipe, if (post_render_layout == .transfer_src_optimal) vk.access.transfer_read else 0);
                 var recorder_prepared = false;
                 var recorder_signal: vk.Semaphore = 0;
                 if (comptime build_options.vk_video) {
@@ -1066,15 +1066,15 @@ pub const RenderTarget = struct {
                         .buffer_offset = 0,
                         .buffer_row_length = 0,
                         .buffer_image_height = 0,
-                        .image_subresource = .{ .aspect_mask = vk.image_aspect.color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+                        .image_subresource = .{ .aspect_mask = vk.image_aspect.color, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
                         .image_offset = .{ .x = 0, .y = 0, .z = 0 },
                         .image_extent = .{ .width = self.extent.width, .height = self.extent.height, .depth = 1 },
                     });
-                    self.device.cmdBufferPipelineBarrier(slot.command_buffer, vk.pipeline_stage.transfer_bit, vk.pipeline_stage.host_bit, &.{
+                    self.device.cmdBufferPipelineBarrier(slot.command_buffer, vk.pipeline_stage.transfer, vk.pipeline_stage.host, &.{
                         .s_type = .buffer_memory_barrier,
                         .p_next = null,
-                        .src_access_mask = vk.access.transfer_write_bit,
-                        .dst_access_mask = vk.access.host_read_bit,
+                        .src_access_mask = vk.access.transfer_write,
+                        .dst_access_mask = vk.access.host_read,
                         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
                         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
                         .buffer = slot.readback_buffer,
@@ -1082,7 +1082,7 @@ pub const RenderTarget = struct {
                         .size = @as(u64, self.extent.width) * self.extent.height * 4,
                     });
                 }
-                if (self.surface != 0 and post_render_layout == .transfer_src_optimal) transitionImage(self.device, slot.command_buffer, image_handle, .transfer_src_optimal, .present_src_khr, vk.pipeline_stage.transfer_bit, vk.access.transfer_read_bit, vk.pipeline_stage.bottom_of_pipe_bit, 0);
+                if (self.surface != 0 and post_render_layout == .transfer_src_optimal) transitionImage(self.device, slot.command_buffer, image_handle, .transfer_src_optimal, .present_src_khr, vk.pipeline_stage.transfer, vk.access.transfer_read, vk.pipeline_stage.bottom_of_pipe, 0);
                 self.device.endCommandBuffer(slot.command_buffer) catch |err| {
                     if (comptime build_options.vk_video) if (recorder_prepared) self.recorder.?.abortPrepared(err);
                     return err;
@@ -1105,7 +1105,7 @@ pub const RenderTarget = struct {
                 };
                 if (self.surface != 0) {
                     wait_semaphores[0] = slot.image_available;
-                    wait_stages[0] = vk.pipeline_stage.color_attachment_output_bit;
+                    wait_stages[0] = vk.pipeline_stage.color_attachment_output;
                     // Presentation waits can outlive the graphics frame slot.
                     // Index this semaphore by acquired swapchain image so it
                     // is only reused after that image has been acquired again.
@@ -1186,7 +1186,7 @@ pub const RenderTarget = struct {
                 slot.readback_buffer = 0;
                 slot.readback_memory = 0;
                 slot.readback_capacity = 0;
-                slot.readback_buffer = try self.device.createBuffer(&.{ .s_type = .buffer_create_info, .p_next = null, .flags = 0, .size = size, .usage = vk.buffer_usage.transfer_dst_bit, .sharing_mode = .exclusive, .queue_family_index_count = 0, .p_queue_family_indices = null });
+                slot.readback_buffer = try self.device.createBuffer(&.{ .s_type = .buffer_create_info, .p_next = null, .flags = 0, .size = size, .usage = vk.buffer_usage.transfer_dst, .sharing_mode = .exclusive, .queue_family_index_count = 0, .p_queue_family_indices = null });
                 errdefer {
                     self.device.destroyBuffer(slot.readback_buffer);
                     slot.readback_buffer = 0;
@@ -1195,7 +1195,7 @@ pub const RenderTarget = struct {
                 var memory_type: ?u32 = null;
                 for (0..self.memory_properties.memory_type_count) |index| {
                     if (requirements.memory_type_bits & (@as(u32, 1) << @intCast(index)) == 0) continue;
-                    const wanted = vk.memory_property.host_visible_bit | vk.memory_property.host_coherent_bit;
+                    const wanted = vk.memory_property.host_visible | vk.memory_property.host_coherent;
                     if (self.memory_properties.memory_types[index].property_flags & wanted == wanted) {
                         memory_type = @intCast(index);
                         break;
@@ -1235,7 +1235,7 @@ pub const RenderTarget = struct {
                             .extent = wanted,
                             .format = self.color_format,
                             .image_count = self.frames_in_flight,
-                            .usage = vk.image_usage.color_attachment_bit | if (self.transferSourceRequired()) vk.image_usage.transfer_src_bit else 0,
+                            .usage = vk.image_usage.color_attachment | if (self.transferSourceRequired()) vk.image_usage.transfer_src else 0,
                         });
                         self.extent = wanted;
                     } else if (self.extent.width != wanted.width or self.extent.height != wanted.height) {
@@ -1264,7 +1264,7 @@ pub const RenderTarget = struct {
                 const selected_format = chooseSurfaceFormat(formats, self.color_formats) orelse return error.UnsupportedSurfaceFormat;
                 self.color_format = selected_format.format;
                 const transfer_src_required = self.transferSourceRequired();
-                if (transfer_src_required and capabilities.supported_usage_flags & vk.image_usage.transfer_src_bit == 0) {
+                if (transfer_src_required and capabilities.supported_usage_flags & vk.image_usage.transfer_src == 0) {
                     return error.UnsupportedSurfaceUsage;
                 }
                 const present_modes = try self.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(self.physical_device, self.surface, self.allocator);
@@ -1284,7 +1284,7 @@ pub const RenderTarget = struct {
                     .image_color_space = selected_format.color_space,
                     .image_extent = wanted_extent,
                     .image_array_layers = 1,
-                    .image_usage = vk.image_usage.color_attachment_bit | if (transfer_src_required) vk.image_usage.transfer_src_bit else 0,
+                    .image_usage = vk.image_usage.color_attachment | if (transfer_src_required) vk.image_usage.transfer_src else 0,
                     .image_sharing_mode = if (concurrent) .concurrent else .exclusive,
                     .queue_family_index_count = if (concurrent) 2 else 0,
                     .p_queue_family_indices = if (concurrent) queue_family_indices[0..].ptr else null,
@@ -1313,7 +1313,7 @@ pub const RenderTarget = struct {
                         .format = selected_format.format,
                         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
                         .subresource_range = .{
-                            .aspect_mask = vk.image_aspect.color_bit,
+                            .aspect_mask = vk.image_aspect.color,
                             .base_mip_level = 0,
                             .level_count = 1,
                             .base_array_layer = 0,
@@ -1605,7 +1605,7 @@ const OffscreenImageRing = struct {
         extent: vk.Extent2D,
         format: vk.Format,
         image_count: u32 = 3,
-        usage: vk.ImageUsageFlags = vk.image_usage.color_attachment_bit | vk.image_usage.transfer_src_bit,
+        usage: vk.ImageUsageFlags = vk.image_usage.color_attachment | vk.image_usage.transfer_src,
     };
 
     pub const Frame = struct {
@@ -1687,7 +1687,7 @@ const OffscreenImageRing = struct {
                 .extent = .{ .width = self.extent.width, .height = self.extent.height, .depth = 1 },
                 .mip_levels = 1,
                 .array_layers = 1,
-                .samples = vk.sample_count.@"1_bit",
+                .samples = vk.sample_count.@"1",
                 .tiling = .optimal,
                 .usage = self.usage,
                 .sharing_mode = .exclusive,
@@ -1706,7 +1706,7 @@ const OffscreenImageRing = struct {
                 .format = self.format,
                 .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
                 .subresource_range = .{
-                    .aspect_mask = vk.image_aspect.color_bit,
+                    .aspect_mask = vk.image_aspect.color,
                     .base_mip_level = 0,
                     .level_count = 1,
                     .base_array_layer = 0,
@@ -1777,10 +1777,10 @@ fn chooseExtent(capabilities: vk.SurfaceCapabilitiesKHR, requested: vk.Extent2D)
 }
 
 fn chooseCompositeAlpha(supported: vk.CompositeAlphaFlagsKHR) vk.CompositeAlphaFlagsKHR {
-    if (supported & vk.composite_alpha.opaque_bit_khr != 0) return vk.composite_alpha.opaque_bit_khr;
-    if (supported & vk.composite_alpha.pre_multiplied_bit_khr != 0) return vk.composite_alpha.pre_multiplied_bit_khr;
-    if (supported & vk.composite_alpha.post_multiplied_bit_khr != 0) return vk.composite_alpha.post_multiplied_bit_khr;
-    return vk.composite_alpha.inherit_bit_khr;
+    if (supported & vk.composite_alpha.opaque_khr != 0) return vk.composite_alpha.opaque_khr;
+    if (supported & vk.composite_alpha.pre_multiplied_khr != 0) return vk.composite_alpha.pre_multiplied_khr;
+    if (supported & vk.composite_alpha.post_multiplied_khr != 0) return vk.composite_alpha.post_multiplied_khr;
+    return vk.composite_alpha.inherit_khr;
 }
 
 fn choosePresentMode(available: []const vk.PresentModeKHR, desired: []const vk.PresentModeKHR) ?vk.PresentModeKHR {
@@ -1845,7 +1845,7 @@ fn transitionImage(
         .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
         .image = image,
         .subresource_range = .{
-            .aspect_mask = vk.image_aspect.color_bit,
+            .aspect_mask = vk.image_aspect.color,
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,

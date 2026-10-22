@@ -37,14 +37,14 @@ pub const Sequence = struct {
 pub fn writeSequenceHeader(allocator: std.mem.Allocator, sequence: *const Sequence, level: vk.StdVideoAV1Level) ![]u8 {
     var payload: [64]u8 = @splat(0);
     var bits = BitWriter{ .bytes = &payload };
-    try bits.put(@intFromEnum(sequence.header.seq_profile), 3);
+    try bits.put(@backingInt(sequence.header.seq_profile), 3);
     try bits.put(0, 1); // still_picture
     try bits.put(0, 1); // reduced_still_picture_header
     try bits.put(0, 1); // timing_info_present_flag
     try bits.put(0, 1); // initial_display_delay_present_flag
     try bits.put(0, 5); // operating_points_cnt_minus_1
     try bits.put(0, 12); // operating_point_idc
-    const level_value: u8 = @intCast(@intFromEnum(level));
+    const level_value: u8 = @intCast(@backingInt(level));
     try bits.put(level_value, 5);
     if (level_value > 7) try bits.put(0, 1); // seq_tier
     try bits.put(sequence.header.frame_width_bits_minus_1, 4);
@@ -71,11 +71,11 @@ pub fn writeSequenceHeader(allocator: std.mem.Allocator, sequence: *const Sequen
     try bits.put(0, 1); // high_bitdepth
     try bits.put(0, 1); // mono_chrome
     try bits.put(1, 1); // color_description_present_flag
-    try bits.put(@intFromEnum(sequence.color.color_primaries), 8);
-    try bits.put(@intFromEnum(sequence.color.transfer_characteristics), 8);
-    try bits.put(@intFromEnum(sequence.color.matrix_coefficients), 8);
+    try bits.put(@backingInt(sequence.color.color_primaries), 8);
+    try bits.put(@backingInt(sequence.color.transfer_characteristics), 8);
+    try bits.put(@backingInt(sequence.color.matrix_coefficients), 8);
     try bits.put(0, 1); // color_range (studio swing)
-    try bits.put(@intFromEnum(sequence.color.chroma_sample_position), 2);
+    try bits.put(@backingInt(sequence.color.chroma_sample_position), 2);
     try bits.put(0, 1); // separate_uv_delta_q
     try bits.put(0, 1); // film_grain_params_present
     try bits.put(1, 1); // trailing_one_bit

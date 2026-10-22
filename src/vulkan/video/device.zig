@@ -118,17 +118,17 @@ fn requireCommands(dispatch: vk.DeviceWrapper.Dispatch) !void {
 }
 
 fn toInstance(handle: low_vk.InstanceHandle) vk.Instance {
-    return @enumFromInt(@intFromPtr(handle orelse return .null_handle));
+    return @fromBackingInt(@intCast(@intFromPtr(handle orelse return .null_handle)));
 }
 
 fn toPhysicalDevice(handle: low_vk.PhysicalDevice) vk.PhysicalDevice {
-    return @enumFromInt(@intFromPtr(handle orelse return .null_handle));
+    return @fromBackingInt(@intCast(@intFromPtr(handle orelse return .null_handle)));
 }
 
 fn toDevice(handle: low_vk.DeviceHandle) vk.Device {
-    return @enumFromInt(@intFromPtr(handle orelse return .null_handle));
+    return @fromBackingInt(@intCast(@intFromPtr(handle orelse return .null_handle)));
 }
 
 fn toQueue(handle: low_vk.Queue) vk.Queue {
-    return @enumFromInt(@intFromPtr(handle orelse return .null_handle));
+    return @fromBackingInt(@intCast(@intFromPtr(handle orelse return .null_handle)));
 }

@@ -457,7 +457,7 @@ pub const Device = struct {
         const info = api.CommandBufferBeginInfo{
             .s_type = .command_buffer_begin_info,
             .p_next = null,
-            .flags = api.command_buffer_usage.one_time_submit_bit,
+            .flags = api.command_buffer_usage.one_time_submit,
             .p_inheritance_info = null,
         };
         try self.beginCommandBufferWithInfo(command_buffer, &info);
@@ -520,7 +520,7 @@ pub const Device = struct {
     }
 
     pub fn allocateCommandBuffers(self: *const Self, info: *const api.CommandBufferAllocateInfo, buffers: []api.CommandBuffer) !void {
-        if (builtin.mode == .Debug) std.debug.assert(buffers.len == @as(usize, info.command_buffer_count));
+        if (builtin.mode == .debug) std.debug.assert(buffers.len == @as(usize, info.command_buffer_count));
         try check(self.dispatch.allocate_command_buffers(self.handle, info, buffers.ptr));
     }
 
@@ -544,7 +544,7 @@ pub const Device = struct {
         const info = api.FenceCreateInfo{
             .s_type = .fence_create_info,
             .p_next = null,
-            .flags = if (signaled) api.fence_create.signaled_bit else 0,
+            .flags = if (signaled) api.fence_create.signaled else 0,
         };
         try check(self.dispatch.create_fence(self.handle, &info, null, &fence));
         return fence;
@@ -641,60 +641,60 @@ pub const Device = struct {
 /// Converts a dispatchable handle from a generated Vulkan binding to low's
 /// ABI handle representation.
 pub inline fn toInstance(value: anytype) api.InstanceHandle {
-    return @ptrFromInt(@intFromEnum(value));
+    return @ptrFromInt(@backingInt(value));
 }
 
 /// Converts a dispatchable physical-device handle from a generated Vulkan
 /// binding to low's ABI handle representation.
 pub inline fn toPhysicalDevice(value: anytype) api.PhysicalDevice {
-    return @ptrFromInt(@intFromEnum(value));
+    return @ptrFromInt(@backingInt(value));
 }
 
 /// Converts a dispatchable device handle from a generated Vulkan binding to
 /// low's ABI handle representation.
 pub inline fn toDevice(value: anytype) api.DeviceHandle {
-    return @ptrFromInt(@intFromEnum(value));
+    return @ptrFromInt(@backingInt(value));
 }
 
 /// Converts a dispatchable queue handle from a generated Vulkan binding to
 /// low's ABI handle representation.
 pub inline fn toQueue(value: anytype) api.Queue {
-    return @ptrFromInt(@intFromEnum(value));
+    return @ptrFromInt(@backingInt(value));
 }
 
 /// Converts a dispatchable command-buffer handle from a generated Vulkan
 /// binding to low's ABI handle representation.
 pub inline fn toCommandBuffer(value: anytype) api.CommandBuffer {
-    return @ptrFromInt(@intFromEnum(value));
+    return @ptrFromInt(@backingInt(value));
 }
 
 /// Converts a low ABI command-buffer handle to a generated Vulkan binding
 /// handle. `CommandBuffer` is normally `vk.CommandBuffer`.
 pub inline fn fromCommandBuffer(comptime CommandBuffer: type, value: api.CommandBuffer) CommandBuffer {
-    return @enumFromInt(@intFromPtr(value));
+    return @fromBackingInt(@intCast(@intFromPtr(value)));
 }
 
 /// Converts a generated Vulkan format enum to low's numeric format ABI.
 pub inline fn toFormat(value: anytype) api.Format {
-    return @intCast(@intFromEnum(value));
+    return @intCast(@backingInt(value));
 }
 
 /// Converts a generated Vulkan non-dispatchable image-view handle to low's
 /// numeric handle ABI.
 pub inline fn toImageView(value: anytype) api.ImageView {
-    return @intCast(@intFromEnum(value));
+    return @intCast(@backingInt(value));
 }
 
 /// Converts a low ABI image-view handle to a generated Vulkan binding handle.
 /// `ImageView` is normally `vk.ImageView`.
 pub inline fn fromImageView(comptime ImageView: type, value: api.ImageView) ImageView {
-    return @enumFromInt(value);
+    return @fromBackingInt(@intCast(value));
 }
 
 /// Converts a generated Vulkan non-dispatchable surface handle to low's
 /// numeric handle ABI.
 pub inline fn toSurface(value: anytype) api.SurfaceKHR {
-    return @intCast(@intFromEnum(value));
+    return @intCast(@backingInt(value));
 }
 
 pub fn targets() type {
@@ -938,7 +938,7 @@ test "beginCommandBufferWithInfo accepts secondary inheritance" {
     try device.beginCommandBufferWithInfo(null, &.{
         .s_type = .command_buffer_begin_info,
         .p_next = null,
-        .flags = api.command_buffer_usage.render_pass_continue_bit,
+        .flags = api.command_buffer_usage.render_pass_continue,
         .p_inheritance_info = &inheritance,
     });
 }

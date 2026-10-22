@@ -165,7 +165,7 @@ pub const Event = union(enum) {
 /// copy here makes copy/paste reliable between all `low` windows, including
 /// the unsupported-platform stub.
 pub const Clipboard = struct {
-    text: std.ArrayListUnmanaged(u8) = .empty,
+    text: std.ArrayList(u8) = .empty,
 
     pub fn deinit(self: *Clipboard, allocator: std.mem.Allocator) void {
         self.text.deinit(allocator);

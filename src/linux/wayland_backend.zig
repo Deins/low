@@ -5,7 +5,7 @@ const native = @import("wayland_native.zig");
 const Data = struct {
     allocator: std.mem.Allocator,
     native_state: *native.State,
-    windows: std.ArrayListUnmanaged(*api.Window) = .empty,
+    windows: std.ArrayList(*api.Window) = .empty,
 };
 
 pub fn init(allocator: std.mem.Allocator, options: api.InitOptions) api.Error!*api.State {
@@ -179,7 +179,7 @@ fn setCursorVisible(window: *api.Window, visible: bool) void {
     nativeWindow(window).setCursorVisible(visible);
 }
 fn setCursor(window: *api.Window, shape: api.CursorShape) void {
-    nativeWindow(window).setCursor(@enumFromInt(@intFromEnum(shape)));
+    nativeWindow(window).setCursor(@fromBackingInt(@intCast(@backingInt(shape))));
 }
 fn setMouseCaptured(window: *api.Window, captured: bool) bool {
     return nativeWindow(window).setMouseCaptured(captured);
@@ -264,13 +264,13 @@ fn cursorDelta(inner: *native.Window, x: f64, y: f64) void {
     api.windowUpdateCursorDelta(publicWindow(inner), x, y);
 }
 fn mouseButton(inner: *native.Window, button: native.MouseButton, action: native.Action, mods: native.Modifiers) void {
-    api.windowUpdateMouseButton(publicWindow(inner), @enumFromInt(@intFromEnum(button)), @enumFromInt(@intFromEnum(action)), mods);
+    api.windowUpdateMouseButton(publicWindow(inner), @fromBackingInt(@intCast(@backingInt(button))), @fromBackingInt(@intCast(@backingInt(action))), mods);
 }
 fn scroll(inner: *native.Window, x: f64, y: f64) void {
     api.windowUpdateScroll(publicWindow(inner), x, y);
 }
 fn key(inner: *native.Window, key_value: native.Key, raw: u32, action: native.Action, mods: native.Modifiers) void {
-    api.windowUpdateKey(publicWindow(inner), @enumFromInt(@intFromEnum(key_value)), raw, @enumFromInt(@intFromEnum(action)), mods);
+    api.windowUpdateKey(publicWindow(inner), @fromBackingInt(@intCast(@backingInt(key_value))), raw, @fromBackingInt(@intCast(@backingInt(action))), mods);
 }
 fn text(inner: *native.Window, bytes: []const u8) void {
     api.windowUpdateText(publicWindow(inner), bytes);

@@ -241,14 +241,14 @@ pub const Recorder = struct {
         if (!support.available) return supportError(support.reason);
         if (support.encode_queue_family.? != self.video_device.encode_queue_family) return error.MissingVideoEncodeQueue;
         if (support.max_dpb_slots < 2 or support.max_active_reference_pictures < 1) return error.UnsupportedVideoProfile;
-        if (!support.encode_feedback_flags.bitstream_buffer_offset_bit_khr or
-            !support.encode_feedback_flags.bitstream_bytes_written_bit_khr)
+        if (!support.encode_feedback_flags.bitstream_buffer_offset_khr or
+            !support.encode_feedback_flags.bitstream_bytes_written_khr)
         {
             return error.EncodeFeedbackUnavailable;
         }
 
         const policy = try selectPolicy(support, options.quality);
-        if (!policy.rate_control.disabled_bit_khr and
+        if (!policy.rate_control.disabled_khr and
             (support.max_bitrate == 0 or options.bitrate > support.max_bitrate))
         {
             return error.UnsupportedRateControl;
@@ -411,6 +411,13 @@ pub const Recorder = struct {
     }
 
     pub fn prepareFrame(self: *Recorder, command_buffer: low_vk.CommandBuffer, image: low_vk.Image, extent: low_vk.Extent2D, selected: SelectedFrame) !?PreparedFrame {
+        return self.prepareFrameInner(command_buffer, image, extent, selected) catch |err| {
+            self.failShared(err);
+            return err;
+        };
+    }
+
+    fn prepareFrameInner(self: *Recorder, command_buffer: low_vk.CommandBuffer, image: low_vk.Image, extent: low_vk.Extent2D, selected: SelectedFrame) !?PreparedFrame {
         const run = &(self.run orelse return null);
         if (!run.accepting or run.sticky_error != null) return null;
         std.debug.assert(self.prepared_slot == null);
@@ -429,19 +436,18 @@ pub const Recorder = struct {
 
         const device = self.video_device.device();
         const slot = &cache.slots[slot_index];
-        errdefer |err| self.failShared(err);
         try device.resetCommandBuffer(slot.encode_command_buffer, .{});
         try device.resetCommandBuffer(slot.compute_command_buffer, .{});
         cache.conversion_pipeline.?.recordCopy(
             device,
             toCommandBuffer(command_buffer),
-            @enumFromInt(image),
+            @fromBackingInt(@intCast(image)),
             .{ .width = extent.width, .height = extent.height },
             cache.key.extent,
             slot.conversionImages(),
             slot.initialized,
         );
-        try device.beginCommandBuffer(slot.compute_command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
+        try device.beginCommandBuffer(slot.compute_command_buffer, &.{ .flags = .{ .one_time_submit = true } });
         cache.conversion_pipeline.?.recordConversion(
             device,
             slot.compute_command_buffer,
@@ -457,20 +463,24 @@ pub const Recorder = struct {
         slot.timestamp_ns = selected.timestamp_ns;
         slot.rate_state = selected.rate_state;
         self.prepared_slot = slot_index;
-        return .{ .signal_semaphore = @intFromEnum(slot.copy_finished) };
+        return .{ .signal_semaphore = @backingInt(slot.copy_finished) };
     }
 
     pub fn submitPrepared(self: *Recorder) !void {
+        self.submitPreparedInner() catch |err| {
+            self.prepared_slot = null;
+            self.failShared(err);
+            return err;
+        };
+    }
+
+    fn submitPreparedInner(self: *Recorder) !void {
         const slot_index = self.prepared_slot orelse return;
         const cache = self.cache.?;
         const slot = &cache.slots[slot_index];
         const device = self.video_device.device();
-        errdefer |err| {
-            self.prepared_slot = null;
-            self.failShared(err);
-        }
         try device.resetFences(&.{slot.encode_finished});
-        const wait_stage = [_]vk.PipelineStageFlags{.{ .all_commands_bit = true }};
+        const wait_stage = [_]vk.PipelineStageFlags{.{ .all_commands = true }};
         const compute_submit = vk.SubmitInfo{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = @ptrCast(&slot.copy_finished),
@@ -635,7 +645,7 @@ const AnySupport = struct {
     std_header_version: vk.ExtensionProperties,
 
     fn fromH264(value: capabilities.H264Support) AnySupport {
-        return from(value, @intFromEnum(value.profile), @intFromEnum(value.max_level));
+        return from(value, @backingInt(value.profile), @backingInt(value.max_level));
     }
     fn fromCodec(value: capabilities.CodecSupport) AnySupport {
         return from(value, value.profile, value.max_level);
@@ -674,24 +684,24 @@ fn selectPolicy(support: AnySupport, quality: capabilities.Quality) !Policy {
     return switch (quality) {
         .low_latency => .{
             .tuning = if (support.tuning_modes.low_latency) .low_latency_khr else return error.UnsupportedRateControl,
-            .rate_control = if (support.rate_control_modes.cbr_bit_khr) .{ .cbr_bit_khr = true } else return error.UnsupportedRateControl,
+            .rate_control = if (support.rate_control_modes.cbr_khr) .{ .cbr_khr = true } else return error.UnsupportedRateControl,
             .quality_level = 0,
         },
         .balanced => .{
             .tuning = .default_khr,
-            .rate_control = if (support.rate_control_modes.vbr_bit_khr)
-                .{ .vbr_bit_khr = true }
-            else if (support.rate_control_modes.cbr_bit_khr)
-                .{ .cbr_bit_khr = true }
-            else if (support.rate_control_modes.disabled_bit_khr)
-                .{ .disabled_bit_khr = true }
+            .rate_control = if (support.rate_control_modes.vbr_khr)
+                .{ .vbr_khr = true }
+            else if (support.rate_control_modes.cbr_khr)
+                .{ .cbr_khr = true }
+            else if (support.rate_control_modes.disabled_khr)
+                .{ .disabled_khr = true }
             else
                 return error.UnsupportedRateControl,
             .quality_level = if (support.max_quality_levels == 0) 0 else (support.max_quality_levels - 1) / 2,
         },
         .high_quality => .{
             .tuning = if (support.tuning_modes.high_quality) .high_quality_khr else return error.UnsupportedRateControl,
-            .rate_control = if (support.rate_control_modes.vbr_bit_khr) .{ .vbr_bit_khr = true } else return error.UnsupportedRateControl,
+            .rate_control = if (support.rate_control_modes.vbr_khr) .{ .vbr_khr = true } else return error.UnsupportedRateControl,
             .quality_level = if (support.max_quality_levels == 0) 0 else support.max_quality_levels - 1,
         },
     };
@@ -759,7 +769,7 @@ const Cache = struct {
         // optional H.264 max-level field at its zero-initialized Level 1.0
         // value. In that internally inconsistent case, let the session derive
         // its limit and choose the SPS level from extent/rate/bitrate.
-        const h264_max: vk.StdVideoH264LevelIdc = @enumFromInt(self.key.max_level);
+        const h264_max: vk.StdVideoH264LevelIdc = @fromBackingInt(@intCast(self.key.max_level));
         const effective_max_level: vk.StdVideoH264LevelIdc = if (h264_max == .@"1_0" and
             (self.support.max_extent.width > 176 or self.support.max_extent.height > 144))
             .@"6_2"
@@ -769,14 +779,14 @@ const Cache = struct {
             .use_max_level_idc = .false,
             .max_level_idc = h264_max,
         };
-        var h265_session = vk.VideoEncodeH265SessionCreateInfoKHR{ .use_max_level_idc = .false, .max_level_idc = @enumFromInt(self.key.max_level) };
-        var av1_session = vk.VideoEncodeAV1SessionCreateInfoKHR{ .use_max_level = .false, .max_level = @enumFromInt(self.key.max_level) };
+        var h265_session = vk.VideoEncodeH265SessionCreateInfoKHR{ .use_max_level_idc = .false, .max_level_idc = @fromBackingInt(@intCast(self.key.max_level)) };
+        var av1_session = vk.VideoEncodeAV1SessionCreateInfoKHR{ .use_max_level = .false, .max_level = @fromBackingInt(@intCast(self.key.max_level)) };
         switch (self.key.codec) {
-            .h264 => try self.parameter_sets.init(self.key.extent, self.key.frame_rate, self.key.gop_size, @enumFromInt(self.key.profile), effective_max_level, self.key.bitrate),
-            .h265 => try self.h265_parameter_sets.init(self.key.extent, self.key.frame_rate, @enumFromInt(self.key.profile), @enumFromInt(self.key.max_level)),
+            .h264 => try self.parameter_sets.init(self.key.extent, self.key.frame_rate, self.key.gop_size, @fromBackingInt(@intCast(self.key.profile)), effective_max_level, self.key.bitrate),
+            .h265 => try self.h265_parameter_sets.init(self.key.extent, self.key.frame_rate, @fromBackingInt(@intCast(self.key.profile)), @fromBackingInt(@intCast(self.key.max_level))),
             .av1 => {
-                try self.av1_sequence.init(self.key.extent, @enumFromInt(self.key.profile));
-                self.header = try av1.writeSequenceHeader(self.allocator, &self.av1_sequence, @enumFromInt(self.key.max_level));
+                try self.av1_sequence.init(self.key.extent, @fromBackingInt(@intCast(self.key.profile)));
+                self.header = try av1.writeSequenceHeader(self.allocator, &self.av1_sequence, @fromBackingInt(@intCast(self.key.max_level)));
             },
         }
         self.session = try device.createVideoSessionKHR(&.{
@@ -799,11 +809,11 @@ const Cache = struct {
         if (self.key.codec != .av1) try self.readHeader();
 
         self.command_pool = try device.createCommandPool(&.{
-            .flags = .{ .reset_command_buffer_bit = true },
+            .flags = .{ .reset_command_buffer = true },
             .queue_family_index = self.video_device.encode_queue_family,
         }, null);
         self.compute_command_pool = try device.createCommandPool(&.{
-            .flags = .{ .reset_command_buffer_bit = true },
+            .flags = .{ .reset_command_buffer = true },
             .queue_family_index = self.video_device.compute_queue_family,
         }, null);
         try self.createDpb();
@@ -838,13 +848,13 @@ const Cache = struct {
 
     fn initProfile(self: *Cache) void {
         self.usage_info = .{
-            .video_usage_hints = .{ .recording_bit_khr = true },
-            .video_content_hints = .{ .rendered_bit_khr = true },
+            .video_usage_hints = .{ .recording_khr = true },
+            .video_content_hints = .{ .rendered_khr = true },
             .tuning_mode = self.key.tuning,
         };
-        self.h264_profile = .{ .p_next = @ptrCast(&self.usage_info), .std_profile_idc = @enumFromInt(self.key.profile) };
-        self.h265_profile = .{ .p_next = @ptrCast(&self.usage_info), .std_profile_idc = @enumFromInt(self.key.profile) };
-        self.av1_profile = .{ .p_next = @ptrCast(&self.usage_info), .std_profile = @enumFromInt(self.key.profile) };
+        self.h264_profile = .{ .p_next = @ptrCast(&self.usage_info), .std_profile_idc = @fromBackingInt(@intCast(self.key.profile)) };
+        self.h265_profile = .{ .p_next = @ptrCast(&self.usage_info), .std_profile_idc = @fromBackingInt(@intCast(self.key.profile)) };
+        self.av1_profile = .{ .p_next = @ptrCast(&self.usage_info), .std_profile = @fromBackingInt(@intCast(self.key.profile)) };
         self.profile = .{
             .p_next = switch (self.key.codec) {
                 .h264 => @ptrCast(&self.h264_profile),
@@ -852,13 +862,13 @@ const Cache = struct {
                 .av1 => @ptrCast(&self.av1_profile),
             },
             .video_codec_operation = switch (self.key.codec) {
-                .h264 => .{ .encode_h264_bit_khr = true },
-                .h265 => .{ .encode_h265_bit_khr = true },
-                .av1 => .{ .encode_av1_bit_khr = true },
+                .h264 => .{ .encode_h264_khr = true },
+                .h265 => .{ .encode_h265_khr = true },
+                .av1 => .{ .encode_av1_khr = true },
             },
-            .chroma_subsampling = .{ .@"420_bit_khr" = true },
-            .luma_bit_depth = .{ .@"8_bit_khr" = true },
-            .chroma_bit_depth = .{ .@"8_bit_khr" = true },
+            .chroma_subsampling = .{ .@"420_khr" = true },
+            .luma_bit_depth = .{ .@"8_khr" = true },
+            .chroma_bit_depth = .{ .@"8_khr" = true },
         };
         self.profile_list = .{ .profile_count = 1, .p_profiles = @ptrCast(&self.profile) };
     }
@@ -890,25 +900,25 @@ const Cache = struct {
 
     fn rateControlFlags(self: *const Cache) vk.VideoEncodeH264RateControlFlagsKHR {
         var flags = self.h264_quality_properties.preferred_rate_control_flags;
-        flags.regular_gop_bit_khr = true;
-        flags.reference_pattern_flat_bit_khr = true;
-        flags.reference_pattern_dyadic_bit_khr = false;
+        flags.regular_gop_khr = true;
+        flags.reference_pattern_flat_khr = true;
+        flags.reference_pattern_dyadic_khr = false;
         return flags;
     }
 
     fn h265RateControlFlags(self: *const Cache) vk.VideoEncodeH265RateControlFlagsKHR {
         var flags = self.h265_quality_properties.preferred_rate_control_flags;
-        flags.regular_gop_bit_khr = true;
-        flags.reference_pattern_flat_bit_khr = true;
-        flags.reference_pattern_dyadic_bit_khr = false;
+        flags.regular_gop_khr = true;
+        flags.reference_pattern_flat_khr = true;
+        flags.reference_pattern_dyadic_khr = false;
         return flags;
     }
 
     fn av1RateControlFlags(self: *const Cache) vk.VideoEncodeAV1RateControlFlagsKHR {
         var flags = self.av1_quality_properties.preferred_rate_control_flags;
-        flags.regular_gop_bit_khr = true;
-        flags.reference_pattern_flat_bit_khr = true;
-        flags.reference_pattern_dyadic_bit_khr = false;
+        flags.regular_gop_khr = true;
+        flags.reference_pattern_flat_khr = true;
+        flags.reference_pattern_dyadic_khr = false;
         return flags;
     }
 
@@ -930,7 +940,7 @@ const Cache = struct {
         const bindings = try self.allocator.alloc(vk.BindVideoSessionMemoryInfoKHR, count);
         defer self.allocator.free(bindings);
         for (requirements[0..count], self.session_memory[0..count], bindings[0..count]) |requirement, *memory, *binding| {
-            const memory_type = try self.video_device.findMemoryType(requirement.memory_requirements.memory_type_bits, .{}, .{ .device_local_bit = true });
+            const memory_type = try self.video_device.findMemoryType(requirement.memory_requirements.memory_type_bits, .{}, .{ .device_local = true });
             memory.* = try device.allocateMemory(&.{
                 .allocation_size = requirement.memory_requirements.size,
                 .memory_type_index = memory_type,
@@ -1042,16 +1052,16 @@ const Cache = struct {
             .extent = .{ .width = self.key.extent.width, .height = self.key.extent.height, .depth = 1 },
             .mip_levels = 1,
             .array_layers = 2,
-            .samples = .{ .@"1_bit" = true },
+            .samples = .{ .@"1" = true },
             .tiling = .optimal,
-            .usage = .{ .video_encode_dpb_bit_khr = true },
+            .usage = .{ .video_encode_dpb_khr = true },
             .sharing_mode = .exclusive,
             .initial_layout = .undefined,
         }, null);
         const requirements = device.getImageMemoryRequirements(self.dpb_image);
         self.dpb_memory = try device.allocateMemory(&.{
             .allocation_size = requirements.size,
-            .memory_type_index = try self.video_device.findMemoryType(requirements.memory_type_bits, .{}, .{ .device_local_bit = true }),
+            .memory_type_index = try self.video_device.findMemoryType(requirements.memory_type_bits, .{}, .{ .device_local = true }),
         }, null);
         try device.bindImageMemory(self.dpb_image, self.dpb_memory, 0);
         for (&self.dpb_views, 0..) |*view, layer| {
@@ -1102,7 +1112,7 @@ const Cache = struct {
             .command_buffer_count = 1,
         }, @ptrCast(&command_buffer));
         defer device.freeCommandBuffers(self.command_pool, &.{command_buffer});
-        try device.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
+        try device.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit = true } });
         if (!self.session_initialized) {
             const barriers = [_]vk.ImageMemoryBarrier2{dpbInitialBarrier(self.dpb_image)};
             device.cmdPipelineBarrier2(command_buffer, &.{
@@ -1116,7 +1126,7 @@ const Cache = struct {
             .gop_frame_count = self.key.gop_size,
             .idr_period = self.key.gop_size,
             .consecutive_b_frame_count = 0,
-            .temporal_layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
+            .temporal_layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
         };
         const h264_layer = vk.VideoEncodeH264RateControlLayerInfoKHR{
             .use_min_qp = .false,
@@ -1131,7 +1141,7 @@ const Cache = struct {
             .gop_frame_count = self.key.gop_size,
             .idr_period = self.key.gop_size,
             .consecutive_b_frame_count = 0,
-            .sub_layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
+            .sub_layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
         };
         const h265_layer = vk.VideoEncodeH265RateControlLayerInfoKHR{
             .use_min_qp = .false,
@@ -1146,7 +1156,7 @@ const Cache = struct {
             .gop_frame_count = self.key.gop_size,
             .key_frame_period = self.key.gop_size,
             .consecutive_bipredictive_frame_count = 0,
-            .temporal_layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
+            .temporal_layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
         };
         const av1_layer = vk.VideoEncodeAV1RateControlLayerInfoKHR{
             .use_min_q_index = .false,
@@ -1164,7 +1174,7 @@ const Cache = struct {
                 .av1 => @ptrCast(&av1_layer),
             },
             .average_bitrate = self.key.bitrate,
-            .max_bitrate = if (self.key.rate_control.cbr_bit_khr) self.key.bitrate else max_bitrate,
+            .max_bitrate = if (self.key.rate_control.cbr_khr) self.key.bitrate else max_bitrate,
             .frame_rate_numerator = self.key.frame_rate.numerator,
             .frame_rate_denominator = self.key.frame_rate.denominator,
         };
@@ -1175,8 +1185,8 @@ const Cache = struct {
                 .av1 => @ptrCast(&av1_rate),
             },
             .rate_control_mode = self.key.rate_control,
-            .layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
-            .p_layers = if (self.key.rate_control.disabled_bit_khr) null else @ptrCast(&layer),
+            .layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
+            .p_layers = if (self.key.rate_control.disabled_khr) null else @ptrCast(&layer),
             .virtual_buffer_size_in_ms = 1000,
             .initial_virtual_buffer_size_in_ms = 500,
         };
@@ -1193,9 +1203,9 @@ const Cache = struct {
         const control = vk.VideoCodingControlInfoKHR{
             .p_next = @ptrCast(&rate),
             .flags = .{
-                .reset_bit_khr = true,
-                .encode_rate_control_bit_khr = true,
-                .encode_quality_level_bit_khr = true,
+                .reset_khr = true,
+                .encode_rate_control_khr = true,
+                .encode_quality_level_khr = true,
             },
         };
         device.cmdControlVideoCodingKHR(command_buffer, &control);
@@ -1233,7 +1243,7 @@ const Cache = struct {
             frame_index,
             self.key.gop_size,
             self.parameter_sets.sps.log_2_max_pic_order_cnt_lsb_minus_4,
-            self.key.rate_control.disabled_bit_khr,
+            self.key.rate_control.disabled_khr,
             if (idr) self.h264_quality_properties.preferred_constant_qp.qp_i else self.h264_quality_properties.preferred_constant_qp.qp_p,
         );
 
@@ -1255,7 +1265,7 @@ const Cache = struct {
             .{ .p_next = @ptrCast(&previous_codec_slot), .slot_index = @intCast(previous_dpb), .p_picture_resource = &previous_picture },
         };
 
-        try device.beginCommandBuffer(slot.encode_command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
+        try device.beginCommandBuffer(slot.encode_command_buffer, &.{ .flags = .{ .one_time_submit = true } });
         device.cmdResetQueryPool(slot.encode_command_buffer, slot.query_pool, 0, 1);
         const h264_layer = vk.VideoEncodeH264RateControlLayerInfoKHR{
             .use_min_qp = .false,
@@ -1269,7 +1279,7 @@ const Cache = struct {
         const layer = vk.VideoEncodeRateControlLayerInfoKHR{
             .p_next = @ptrCast(&h264_layer),
             .average_bitrate = self.key.bitrate,
-            .max_bitrate = if (self.key.rate_control.cbr_bit_khr) self.key.bitrate else max_bitrate,
+            .max_bitrate = if (self.key.rate_control.cbr_khr) self.key.bitrate else max_bitrate,
             .frame_rate_numerator = self.key.frame_rate.numerator,
             .frame_rate_denominator = self.key.frame_rate.denominator,
         };
@@ -1278,13 +1288,13 @@ const Cache = struct {
             .gop_frame_count = self.key.gop_size,
             .idr_period = self.key.gop_size,
             .consecutive_b_frame_count = 0,
-            .temporal_layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
+            .temporal_layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
         };
         const rate = vk.VideoEncodeRateControlInfoKHR{
             .p_next = @ptrCast(&h264_rate),
             .rate_control_mode = self.key.rate_control,
-            .layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
-            .p_layers = if (self.key.rate_control.disabled_bit_khr) null else @ptrCast(&layer),
+            .layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
+            .p_layers = if (self.key.rate_control.disabled_khr) null else @ptrCast(&layer),
             .virtual_buffer_size_in_ms = 1000,
             .initial_virtual_buffer_size_in_ms = 500,
         };
@@ -1298,8 +1308,8 @@ const Cache = struct {
         const input_ready = vk.ImageMemoryBarrier2{
             .src_stage_mask = .{},
             .src_access_mask = .{},
-            .dst_stage_mask = .{ .video_encode_bit_khr = true },
-            .dst_access_mask = .{ .video_encode_read_bit_khr = true },
+            .dst_stage_mask = .{ .video_encode_khr = true },
+            .dst_access_mask = .{ .video_encode_read_khr = true },
             .old_layout = .video_encode_src_khr,
             .new_layout = .video_encode_src_khr,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1340,7 +1350,7 @@ const Cache = struct {
         const previous_dpb: usize = if (idr) 0 else (gop_index - 1) & 1;
         const preferred_qp = if (idr) self.h265_quality_properties.preferred_constant_qp.qp_i else self.h265_quality_properties.preferred_constant_qp.qp_p;
         var frame: h265.FrameInfo = undefined;
-        frame.init(frame_index, self.key.gop_size, self.key.rate_control.disabled_bit_khr, preferred_qp);
+        frame.init(frame_index, self.key.gop_size, self.key.rate_control.disabled_khr, preferred_qp);
 
         var current_reference = std.mem.zeroes(vk.StdVideoEncodeH265ReferenceInfo);
         current_reference.pic_type = if (idr) .idr else .p;
@@ -1368,7 +1378,7 @@ const Cache = struct {
         const layer = vk.VideoEncodeRateControlLayerInfoKHR{
             .p_next = @ptrCast(&codec_layer),
             .average_bitrate = self.key.bitrate,
-            .max_bitrate = if (self.key.rate_control.cbr_bit_khr) self.key.bitrate else max_bitrate,
+            .max_bitrate = if (self.key.rate_control.cbr_khr) self.key.bitrate else max_bitrate,
             .frame_rate_numerator = self.key.frame_rate.numerator,
             .frame_rate_denominator = self.key.frame_rate.denominator,
         };
@@ -1377,17 +1387,17 @@ const Cache = struct {
             .gop_frame_count = self.key.gop_size,
             .idr_period = self.key.gop_size,
             .consecutive_b_frame_count = 0,
-            .sub_layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
+            .sub_layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
         };
         const rate = vk.VideoEncodeRateControlInfoKHR{
             .p_next = @ptrCast(&codec_rate),
             .rate_control_mode = self.key.rate_control,
-            .layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
-            .p_layers = if (self.key.rate_control.disabled_bit_khr) null else @ptrCast(&layer),
+            .layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
+            .p_layers = if (self.key.rate_control.disabled_khr) null else @ptrCast(&layer),
             .virtual_buffer_size_in_ms = 1000,
             .initial_virtual_buffer_size_in_ms = 500,
         };
-        try device.beginCommandBuffer(slot.encode_command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
+        try device.beginCommandBuffer(slot.encode_command_buffer, &.{ .flags = .{ .one_time_submit = true } });
         device.cmdResetQueryPool(slot.encode_command_buffer, slot.query_pool, 0, 1);
         device.cmdBeginVideoCodingKHR(slot.encode_command_buffer, &.{
             .p_next = @ptrCast(&rate),
@@ -1426,7 +1436,7 @@ const Cache = struct {
         const previous_dpb: usize = if (key) 0 else (gop_index - 1) & 1;
         const q = if (key) self.av1_quality_properties.preferred_constant_q_index.intra_q_index else self.av1_quality_properties.preferred_constant_q_index.predictive_q_index;
         var frame: av1.FrameInfo = undefined;
-        frame.init(frame_index, self.key.gop_size, self.key.rate_control.disabled_bit_khr, q);
+        frame.init(frame_index, self.key.gop_size, self.key.rate_control.disabled_khr, q);
         var current_reference = std.mem.zeroes(vk.StdVideoEncodeAV1ReferenceInfo);
         current_reference.frame_type = if (key) .key else .inter;
         current_reference.order_hint = @truncate(gop_index);
@@ -1453,7 +1463,7 @@ const Cache = struct {
         const layer = vk.VideoEncodeRateControlLayerInfoKHR{
             .p_next = @ptrCast(&codec_layer),
             .average_bitrate = self.key.bitrate,
-            .max_bitrate = if (self.key.rate_control.cbr_bit_khr) self.key.bitrate else max_bitrate,
+            .max_bitrate = if (self.key.rate_control.cbr_khr) self.key.bitrate else max_bitrate,
             .frame_rate_numerator = self.key.frame_rate.numerator,
             .frame_rate_denominator = self.key.frame_rate.denominator,
         };
@@ -1462,17 +1472,17 @@ const Cache = struct {
             .gop_frame_count = self.key.gop_size,
             .key_frame_period = self.key.gop_size,
             .consecutive_bipredictive_frame_count = 0,
-            .temporal_layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
+            .temporal_layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
         };
         const rate = vk.VideoEncodeRateControlInfoKHR{
             .p_next = @ptrCast(&codec_rate),
             .rate_control_mode = self.key.rate_control,
-            .layer_count = if (self.key.rate_control.disabled_bit_khr) 0 else 1,
-            .p_layers = if (self.key.rate_control.disabled_bit_khr) null else @ptrCast(&layer),
+            .layer_count = if (self.key.rate_control.disabled_khr) 0 else 1,
+            .p_layers = if (self.key.rate_control.disabled_khr) null else @ptrCast(&layer),
             .virtual_buffer_size_in_ms = 1000,
             .initial_virtual_buffer_size_in_ms = 500,
         };
-        try device.beginCommandBuffer(slot.encode_command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
+        try device.beginCommandBuffer(slot.encode_command_buffer, &.{ .flags = .{ .one_time_submit = true } });
         device.cmdResetQueryPool(slot.encode_command_buffer, slot.query_pool, 0, 1);
         device.cmdBeginVideoCodingKHR(slot.encode_command_buffer, &.{
             .p_next = @ptrCast(&rate),
@@ -1506,8 +1516,8 @@ const Cache = struct {
         const barrier = vk.ImageMemoryBarrier2{
             .src_stage_mask = .{},
             .src_access_mask = .{},
-            .dst_stage_mask = .{ .video_encode_bit_khr = true },
-            .dst_access_mask = .{ .video_encode_read_bit_khr = true },
+            .dst_stage_mask = .{ .video_encode_khr = true },
+            .dst_access_mask = .{ .video_encode_read_khr = true },
             .old_layout = .video_encode_src_khr,
             .new_layout = .video_encode_src_khr,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1558,9 +1568,9 @@ const Slot = struct {
             .extent = .{ .width = cache.key.extent.width, .height = cache.key.extent.height, .depth = 1 },
             .mip_levels = 1,
             .array_layers = 1,
-            .samples = .{ .@"1_bit" = true },
+            .samples = .{ .@"1" = true },
             .tiling = .optimal,
-            .usage = .{ .transfer_dst_bit = true, .storage_bit = true },
+            .usage = .{ .transfer_dst = true, .storage = true },
             .sharing_mode = if (source_queue_families[0] == source_queue_families[1]) .exclusive else .concurrent,
             .queue_family_index_count = if (source_queue_families[0] == source_queue_families[1]) 0 else 2,
             .p_queue_family_indices = if (source_queue_families[0] == source_queue_families[1]) null else &source_queue_families,
@@ -1569,7 +1579,7 @@ const Slot = struct {
         const source_requirements = device.getImageMemoryRequirements(self.source);
         self.source_memory = try device.allocateMemory(&.{
             .allocation_size = source_requirements.size,
-            .memory_type_index = try cache.video_device.findMemoryType(source_requirements.memory_type_bits, .{}, .{ .device_local_bit = true }),
+            .memory_type_index = try cache.video_device.findMemoryType(source_requirements.memory_type_bits, .{}, .{ .device_local = true }),
         }, null);
         try device.bindImageMemory(self.source, self.source_memory, 0);
         self.source_view = try device.createImageView(&.{
@@ -1583,15 +1593,15 @@ const Slot = struct {
         const queue_families = [_]u32{ cache.video_device.compute_queue_family, cache.video_device.encode_queue_family };
         self.encode_input = try device.createImage(&.{
             .p_next = @ptrCast(&cache.profile_list),
-            .flags = .{ .mutable_format_bit = true, .extended_usage_bit = true },
+            .flags = .{ .mutable_format = true, .extended_usage = true },
             .image_type = .@"2d",
             .format = cache.key.input_format,
             .extent = .{ .width = cache.key.extent.width, .height = cache.key.extent.height, .depth = 1 },
             .mip_levels = 1,
             .array_layers = 1,
-            .samples = .{ .@"1_bit" = true },
+            .samples = .{ .@"1" = true },
             .tiling = .optimal,
-            .usage = .{ .storage_bit = true, .video_encode_src_bit_khr = true },
+            .usage = .{ .storage = true, .video_encode_src_khr = true },
             .sharing_mode = if (queue_families[0] == queue_families[1]) .exclusive else .concurrent,
             .queue_family_index_count = if (queue_families[0] == queue_families[1]) 0 else 2,
             .p_queue_family_indices = if (queue_families[0] == queue_families[1]) null else &queue_families,
@@ -1600,10 +1610,10 @@ const Slot = struct {
         const input_requirements = device.getImageMemoryRequirements(self.encode_input);
         self.encode_input_memory = try device.allocateMemory(&.{
             .allocation_size = input_requirements.size,
-            .memory_type_index = try cache.video_device.findMemoryType(input_requirements.memory_type_bits, .{}, .{ .device_local_bit = true }),
+            .memory_type_index = try cache.video_device.findMemoryType(input_requirements.memory_type_bits, .{}, .{ .device_local = true }),
         }, null);
         try device.bindImageMemory(self.encode_input, self.encode_input_memory, 0);
-        var encode_usage = vk.ImageViewUsageCreateInfo{ .usage = .{ .video_encode_src_bit_khr = true } };
+        var encode_usage = vk.ImageViewUsageCreateInfo{ .usage = .{ .video_encode_src_khr = true } };
         self.encode_input_view = try device.createImageView(&.{
             .p_next = @ptrCast(&encode_usage),
             .image = self.encode_input,
@@ -1612,7 +1622,7 @@ const Slot = struct {
             .components = identityComponents(),
             .subresource_range = colorRange(),
         }, null);
-        var storage_usage = vk.ImageViewUsageCreateInfo{ .usage = .{ .storage_bit = true } };
+        var storage_usage = vk.ImageViewUsageCreateInfo{ .usage = .{ .storage = true } };
         self.luma_view = try device.createImageView(&.{
             .p_next = @ptrCast(&storage_usage),
             .image = self.encode_input,
@@ -1634,12 +1644,12 @@ const Slot = struct {
         self.bitstream_buffer = try device.createBuffer(&.{
             .p_next = @ptrCast(&cache.profile_list),
             .size = self.bitstream_size,
-            .usage = .{ .video_encode_dst_bit_khr = true },
+            .usage = .{ .video_encode_dst_khr = true },
             .sharing_mode = .exclusive,
         }, null);
         const buffer_requirements = device.getBufferMemoryRequirements(self.bitstream_buffer);
-        const memory_type = try cache.video_device.findMemoryType(buffer_requirements.memory_type_bits, .{ .host_visible_bit = true }, .{ .host_coherent_bit = true });
-        self.host_coherent = cache.video_device.memory_properties.memory_types[memory_type].property_flags.host_coherent_bit;
+        const memory_type = try cache.video_device.findMemoryType(buffer_requirements.memory_type_bits, .{ .host_visible = true }, .{ .host_coherent = true });
+        self.host_coherent = cache.video_device.memory_properties.memory_types[memory_type].property_flags.host_coherent;
         self.bitstream_memory = try device.allocateMemory(&.{
             .allocation_size = buffer_requirements.size,
             .memory_type_index = memory_type,
@@ -1650,8 +1660,8 @@ const Slot = struct {
         var feedback = vk.QueryPoolVideoEncodeFeedbackCreateInfoKHR{
             .p_next = @ptrCast(&cache.profile),
             .encode_feedback_flags = .{
-                .bitstream_buffer_offset_bit_khr = true,
-                .bitstream_bytes_written_bit_khr = true,
+                .bitstream_buffer_offset_khr = true,
+                .bitstream_bytes_written_khr = true,
             },
         };
         self.query_pool = try device.createQueryPool(&.{
@@ -1661,7 +1671,7 @@ const Slot = struct {
         }, null);
         self.copy_finished = try device.createSemaphore(&.{}, null);
         self.conversion_finished = try device.createSemaphore(&.{}, null);
-        self.encode_finished = try device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+        self.encode_finished = try device.createFence(&.{ .flags = .{ .signaled = true } }, null);
     }
 
     fn deinit(self: *Slot, cache: *Cache) void {
@@ -1798,8 +1808,8 @@ fn dpbInitialBarrier(image: vk.Image) vk.ImageMemoryBarrier2 {
     var result: vk.ImageMemoryBarrier2 = .{
         .src_stage_mask = .{},
         .src_access_mask = .{},
-        .dst_stage_mask = .{ .video_encode_bit_khr = true },
-        .dst_access_mask = .{ .video_encode_read_bit_khr = true, .video_encode_write_bit_khr = true },
+        .dst_stage_mask = .{ .video_encode_khr = true },
+        .dst_access_mask = .{ .video_encode_read_khr = true, .video_encode_write_khr = true },
         .old_layout = .undefined,
         .new_layout = .video_encode_dpb_khr,
         .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -1817,7 +1827,7 @@ fn identityComponents() vk.ComponentMapping {
 
 fn colorRange() vk.ImageSubresourceRange {
     return .{
-        .aspect_mask = .{ .color_bit = true },
+        .aspect_mask = .{ .color = true },
         .base_mip_level = 0,
         .level_count = 1,
         .base_array_layer = 0,
@@ -1827,7 +1837,7 @@ fn colorRange() vk.ImageSubresourceRange {
 
 fn planeRange(comptime plane: u2) vk.ImageSubresourceRange {
     return .{
-        .aspect_mask = if (plane == 0) .{ .plane_0_bit = true } else .{ .plane_1_bit = true },
+        .aspect_mask = if (plane == 0) .{ .plane_0 = true } else .{ .plane_1 = true },
         .base_mip_level = 0,
         .level_count = 1,
         .base_array_layer = 0,
@@ -1836,11 +1846,11 @@ fn planeRange(comptime plane: u2) vk.ImageSubresourceRange {
 }
 
 fn toCommandBuffer(command_buffer: low_vk.CommandBuffer) vk.CommandBuffer {
-    return @enumFromInt(@intFromPtr(command_buffer orelse return .null_handle));
+    return @fromBackingInt(@intCast(@intFromPtr(command_buffer orelse return .null_handle)));
 }
 
 fn toLowPhysicalDevice(device: vk.PhysicalDevice) low_vk.PhysicalDevice {
-    return @ptrFromInt(@intFromEnum(device));
+    return @ptrFromInt(@backingInt(device));
 }
 
 test "encoded feedback ranges cannot overflow the mapped buffer" {

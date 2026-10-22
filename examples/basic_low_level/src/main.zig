@@ -110,7 +110,7 @@ const RawTarget = struct {
         const format = chooseFormat(formats);
         const extent = chooseExtent(capabilities, window.getFramebufferSize());
         if (extent.width == 0 or extent.height == 0) return error.ZeroFramebuffer;
-        if (!capabilities.supported_usage_flags.transfer_dst_bit) return error.TransferDestinationUnsupported;
+        if (!capabilities.supported_usage_flags.transfer_dst) return error.TransferDestinationUnsupported;
 
         var image_count = capabilities.min_image_count + 1;
         if (capabilities.max_image_count != 0) image_count = @min(image_count, capabilities.max_image_count);
@@ -121,7 +121,7 @@ const RawTarget = struct {
             .image_color_space = format.color_space,
             .image_extent = extent,
             .image_array_layers = 1,
-            .image_usage = .{ .color_attachment_bit = true, .transfer_dst_bit = true },
+            .image_usage = .{ .color_attachment = true, .transfer_dst = true },
             .image_sharing_mode = .exclusive,
             .pre_transform = capabilities.current_transform,
             .composite_alpha = chooseCompositeAlpha(capabilities.supported_composite_alpha),
@@ -141,7 +141,7 @@ const RawTarget = struct {
                 .format = format.format,
                 .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
                 .subresource_range = .{
-                    .aspect_mask = .{ .color_bit = true },
+                    .aspect_mask = .{ .color = true },
                     .base_mip_level = 0,
                     .level_count = 1,
                     .base_array_layer = 0,
@@ -150,7 +150,7 @@ const RawTarget = struct {
             }, null);
         }
         result.command_pool = try device.createCommandPool(&.{
-            .flags = .{ .reset_command_buffer_bit = true },
+            .flags = .{ .reset_command_buffer = true },
             .queue_family_index = queue_family,
         }, null);
         var command_buffers: [1]vk.CommandBuffer = undefined;
@@ -162,7 +162,7 @@ const RawTarget = struct {
         result.command_buffer = command_buffers[0];
         result.image_available = try device.createSemaphore(&.{}, null);
         for (result.render_finished) |*semaphore| semaphore.* = try device.createSemaphore(&.{}, null);
-        result.in_flight = try device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+        result.in_flight = try device.createFence(&.{ .flags = .{ .signaled = true } }, null);
         return result;
     }
 
@@ -232,10 +232,10 @@ const RawTarget = struct {
         if (acquired.result == .timeout or acquired.result == .not_ready) return;
 
         try self.device.resetCommandBuffer(self.command_buffer, .{});
-        try self.device.beginCommandBuffer(self.command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
+        try self.device.beginCommandBuffer(self.command_buffer, &.{ .flags = .{ .one_time_submit = true } });
         const image = self.images[acquired.image_index];
         const range = vk.ImageSubresourceRange{
-            .aspect_mask = .{ .color_bit = true },
+            .aspect_mask = .{ .color = true },
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,
@@ -243,7 +243,7 @@ const RawTarget = struct {
         };
         const to_transfer = vk.ImageMemoryBarrier{
             .src_access_mask = .{},
-            .dst_access_mask = .{ .transfer_write_bit = true },
+            .dst_access_mask = .{ .transfer_write = true },
             .old_layout = .undefined,
             .new_layout = .transfer_dst_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -251,11 +251,11 @@ const RawTarget = struct {
             .image = image,
             .subresource_range = range,
         };
-        self.device.cmdPipelineBarrier(self.command_buffer, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &.{to_transfer});
+        self.device.cmdPipelineBarrier(self.command_buffer, .{ .top_of_pipe = true }, .{ .transfer = true }, .{}, null, null, &.{to_transfer});
         const clear = vk.ClearColorValue{ .float_32 = .{ 0.08, 0.12, 0.28, 1.0 } };
         self.device.cmdClearColorImage(self.command_buffer, image, .transfer_dst_optimal, &clear, &.{range});
         const to_present = vk.ImageMemoryBarrier{
-            .src_access_mask = .{ .transfer_write_bit = true },
+            .src_access_mask = .{ .transfer_write = true },
             .dst_access_mask = .{},
             .old_layout = .transfer_dst_optimal,
             .new_layout = .present_src_khr,
@@ -264,11 +264,11 @@ const RawTarget = struct {
             .image = image,
             .subresource_range = range,
         };
-        self.device.cmdPipelineBarrier(self.command_buffer, .{ .transfer_bit = true }, .{ .bottom_of_pipe_bit = true }, .{}, null, null, &.{to_present});
+        self.device.cmdPipelineBarrier(self.command_buffer, .{ .transfer = true }, .{ .bottom_of_pipe = true }, .{}, null, null, &.{to_present});
         try self.device.endCommandBuffer(self.command_buffer);
 
         const wait_semaphores = [_]vk.Semaphore{self.image_available};
-        const wait_stages = [_]vk.PipelineStageFlags{.{ .transfer_bit = true }};
+        const wait_stages = [_]vk.PipelineStageFlags{.{ .transfer = true }};
         const command_buffers = [_]vk.CommandBuffer{self.command_buffer};
         const signal_semaphores = [_]vk.Semaphore{self.render_finished[acquired.image_index]};
         // A waited fence remains signaled. Reset it immediately before giving
@@ -475,7 +475,7 @@ fn selectDevice(
         const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, allocator);
         defer allocator.free(families);
         for (families, 0..) |family, index| {
-            if (!family.queue_flags.graphics_bit) continue;
+            if (!family.queue_flags.graphics) continue;
             const supports_presentation = try low_instance.getPhysicalDevicePresentationSupportKHR(
                 low.vulkan.toPhysicalDevice(physical_device),
                 @intCast(index),
@@ -502,8 +502,8 @@ fn chooseExtent(capabilities: vk.SurfaceCapabilitiesKHR, size: low.Size) vk.Exte
 }
 
 fn chooseCompositeAlpha(supported: vk.CompositeAlphaFlagsKHR) vk.CompositeAlphaFlagsKHR {
-    if (supported.opaque_bit_khr) return .{ .opaque_bit_khr = true };
-    if (supported.pre_multiplied_bit_khr) return .{ .pre_multiplied_bit_khr = true };
-    if (supported.post_multiplied_bit_khr) return .{ .post_multiplied_bit_khr = true };
-    return .{ .inherit_bit_khr = true };
+    if (supported.opaque_khr) return .{ .opaque_khr = true };
+    if (supported.pre_multiplied_khr) return .{ .pre_multiplied_khr = true };
+    if (supported.post_multiplied_khr) return .{ .post_multiplied_khr = true };
+    return .{ .inherit_khr = true };
 }

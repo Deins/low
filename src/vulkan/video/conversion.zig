@@ -28,9 +28,9 @@ pub const Pipeline = struct {
         errdefer self.deinit(device);
 
         const bindings = [_]vk.DescriptorSetLayoutBinding{
-            .{ .binding = 0, .descriptor_type = .storage_image, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true } },
-            .{ .binding = 1, .descriptor_type = .storage_image, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true } },
-            .{ .binding = 2, .descriptor_type = .storage_image, .descriptor_count = 1, .stage_flags = .{ .compute_bit = true } },
+            .{ .binding = 0, .descriptor_type = .storage_image, .descriptor_count = 1, .stage_flags = .{ .compute = true } },
+            .{ .binding = 1, .descriptor_type = .storage_image, .descriptor_count = 1, .stage_flags = .{ .compute = true } },
+            .{ .binding = 2, .descriptor_type = .storage_image, .descriptor_count = 1, .stage_flags = .{ .compute = true } },
         };
         self.descriptor_set_layout = try device.createDescriptorSetLayout(&.{
             .binding_count = bindings.len,
@@ -49,7 +49,7 @@ pub const Pipeline = struct {
         var pipelines: [1]vk.Pipeline = undefined;
         _ = try device.createComputePipelines(.null_handle, &.{.{
             .stage = .{
-                .stage = .{ .compute_bit = true },
+                .stage = .{ .compute = true },
                 .module = shader,
                 .p_name = "main",
             },
@@ -119,8 +119,8 @@ pub const Pipeline = struct {
             // Slot reuse waits for the preceding encode fence on the CPU.
             .src_stage_mask = .{},
             .src_access_mask = .{},
-            .dst_stage_mask = .{ .all_transfer_bit = true },
-            .dst_access_mask = .{ .transfer_write_bit = true },
+            .dst_stage_mask = .{ .all_transfer = true },
+            .dst_access_mask = .{ .transfer_write = true },
             .old_layout = if (initialized) .general else .undefined,
             .new_layout = .transfer_dst_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -150,8 +150,8 @@ pub const Pipeline = struct {
         }}, .linear);
 
         const source_ready = vk.ImageMemoryBarrier2{
-            .src_stage_mask = .{ .all_transfer_bit = true },
-            .src_access_mask = .{ .transfer_write_bit = true },
+            .src_stage_mask = .{ .all_transfer = true },
+            .src_access_mask = .{ .transfer_write = true },
             .dst_stage_mask = .{},
             .dst_access_mask = .{},
             .old_layout = .transfer_dst_optimal,
@@ -177,7 +177,7 @@ pub const Pipeline = struct {
         initialized: bool,
     ) void {
         const plane_range = vk.ImageSubresourceRange{
-            .aspect_mask = .{ .plane_0_bit = true, .plane_1_bit = true },
+            .aspect_mask = .{ .plane_0 = true, .plane_1 = true },
             .base_mip_level = 0,
             .level_count = 1,
             .base_array_layer = 0,
@@ -187,8 +187,8 @@ pub const Pipeline = struct {
             .{
                 .src_stage_mask = .{},
                 .src_access_mask = .{},
-                .dst_stage_mask = .{ .compute_shader_bit = true },
-                .dst_access_mask = .{ .shader_storage_read_bit = true },
+                .dst_stage_mask = .{ .compute_shader = true },
+                .dst_access_mask = .{ .shader_storage_read = true },
                 .old_layout = .general,
                 .new_layout = .general,
                 .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -199,8 +199,8 @@ pub const Pipeline = struct {
             .{
                 .src_stage_mask = .{},
                 .src_access_mask = .{},
-                .dst_stage_mask = .{ .compute_shader_bit = true },
-                .dst_access_mask = .{ .shader_storage_write_bit = true },
+                .dst_stage_mask = .{ .compute_shader = true },
+                .dst_access_mask = .{ .shader_storage_write = true },
                 .old_layout = if (initialized) .video_encode_src_khr else .undefined,
                 .new_layout = .general,
                 .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
@@ -219,8 +219,8 @@ pub const Pipeline = struct {
         device.cmdDispatch(command_buffer, (coded_extent.width + 15) / 16, (coded_extent.height + 15) / 16, 1);
 
         const conversion_done = vk.ImageMemoryBarrier2{
-            .src_stage_mask = .{ .compute_shader_bit = true },
-            .src_access_mask = .{ .shader_storage_write_bit = true },
+            .src_stage_mask = .{ .compute_shader = true },
+            .src_access_mask = .{ .shader_storage_write = true },
             .dst_stage_mask = .{},
             .dst_access_mask = .{},
             .old_layout = .general,
@@ -258,7 +258,7 @@ pub fn letterboxRect(source: vk.Extent2D, destination: vk.Extent2D) FitRect {
 
 fn colorSubresourceRange() vk.ImageSubresourceRange {
     return .{
-        .aspect_mask = .{ .color_bit = true },
+        .aspect_mask = .{ .color = true },
         .base_mip_level = 0,
         .level_count = 1,
         .base_array_layer = 0,
@@ -267,7 +267,7 @@ fn colorSubresourceRange() vk.ImageSubresourceRange {
 }
 
 fn colorLayers() vk.ImageSubresourceLayers {
-    return .{ .aspect_mask = .{ .color_bit = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    return .{ .aspect_mask = .{ .color = true }, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
 }
 
 test "letterbox transform preserves aspect and centers content" {

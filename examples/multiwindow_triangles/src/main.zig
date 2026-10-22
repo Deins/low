@@ -84,7 +84,7 @@ const Renderer = struct {
         const low_device = device_resources.low_device;
 
         const command_pool = try device.createCommandPool(&.{
-            .flags = .{ .reset_command_buffer_bit = true },
+            .flags = .{ .reset_command_buffer = true },
             .queue_family_index = selection.graphics_queue_family,
         }, null);
         errdefer device.destroyCommandPool(command_pool, null);
@@ -338,7 +338,7 @@ const AppWindow = struct {
             .screen_size = .{ @floatFromInt(extent.width), @floatFromInt(extent.height) },
             .color = self.color,
         };
-        renderer.device.cmdPushConstants(command_buffer, renderer.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), @ptrCast(&push));
+        renderer.device.cmdPushConstants(command_buffer, renderer.pipeline_layout, .{ .vertex = true }, 0, @sizeOf(PushConstants), @ptrCast(&push));
         renderer.device.cmdDraw(command_buffer, 3, 1, 0, 0);
         renderer.device.cmdEndRendering(command_buffer);
         if (dump_path) |path| {
@@ -609,7 +609,7 @@ fn saveInputRecording(io: std.Io, path: []const u8, recording: *const low.replay
 
 fn createPipelineLayout(device: vk.DeviceProxy) !vk.PipelineLayout {
     const range = vk.PushConstantRange{
-        .stage_flags = .{ .vertex_bit = true },
+        .stage_flags = .{ .vertex = true },
         .offset = 0,
         .size = @sizeOf(PushConstants),
     };
@@ -632,8 +632,8 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
     defer device.destroyShaderModule(fragment_module, null);
 
     const stages = [_]vk.PipelineShaderStageCreateInfo{
-        .{ .stage = .{ .vertex_bit = true }, .module = vertex_module, .p_name = "main" },
-        .{ .stage = .{ .fragment_bit = true }, .module = fragment_module, .p_name = "main" },
+        .{ .stage = .{ .vertex = true }, .module = vertex_module, .p_name = "main" },
+        .{ .stage = .{ .fragment = true }, .module = fragment_module, .p_name = "main" },
     };
     const vertex_input = vk.PipelineVertexInputStateCreateInfo{};
     const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
@@ -657,7 +657,7 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
         .line_width = 1,
     };
     const multisampling = vk.PipelineMultisampleStateCreateInfo{
-        .rasterization_samples = .{ .@"1_bit" = true },
+        .rasterization_samples = .{ .@"1" = true },
         .sample_shading_enable = .false,
         .min_sample_shading = 1,
         .alpha_to_coverage_enable = .false,
@@ -671,7 +671,7 @@ fn createPipeline(device: vk.DeviceProxy, layout: vk.PipelineLayout, color_forma
         .src_alpha_blend_factor = .one,
         .dst_alpha_blend_factor = .zero,
         .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
     };
     const blend = vk.PipelineColorBlendStateCreateInfo{
         .logic_op_enable = .false,

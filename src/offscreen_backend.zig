@@ -8,7 +8,7 @@ pub const Backend = struct {
         allocator: std.mem.Allocator,
         mode: api.FrameMode,
         last_frame_ns: ?i128 = null,
-        windows: std.ArrayListUnmanaged(*api.Window) = .empty,
+        windows: std.ArrayList(*api.Window) = .empty,
     };
 
     pub fn init(allocator: std.mem.Allocator, options: api.OffscreenOptions) api.Error!*api.State {

@@ -444,8 +444,8 @@ const c = struct {
             .enter => |e| pointerEnter(data, pointer, e.serial, e.surface, e.surface_x, e.surface_y),
             .leave => |e| pointerLeave(data, pointer, e.serial, e.surface),
             .motion => |e| pointerMotion(data, pointer, e.time, e.surface_x, e.surface_y),
-            .button => |e| pointerButton(data, pointer, e.serial, e.time, e.button, @as(c_uint, @intCast(@intFromEnum(e.state)))),
-            .axis => |e| pointerAxis(data, pointer, e.time, @as(u32, @intCast(@intFromEnum(e.axis))), e.value),
+            .button => |e| pointerButton(data, pointer, e.serial, e.time, e.button, @as(c_uint, @intCast(@backingInt(e.state)))),
+            .axis => |e| pointerAxis(data, pointer, e.time, @as(u32, @intCast(@backingInt(e.axis))), e.value),
             .frame, .axis_source, .axis_stop, .axis_discrete => {},
         }
     }
@@ -461,10 +461,10 @@ const c = struct {
     }
     fn keyboardDispatch(keyboard: *wl_keyboard, event: wl.Keyboard.Event, data: ?*anyopaque) void {
         switch (event) {
-            .keymap => |e| keyboardKeymap(data, keyboard, @as(u32, @intCast(@intFromEnum(e.format))), e.fd, e.size),
+            .keymap => |e| keyboardKeymap(data, keyboard, @as(u32, @intCast(@backingInt(e.format))), e.fd, e.size),
             .enter => |e| keyboardEnter(data, keyboard, e.serial, e.surface, e.keys),
             .leave => |e| keyboardLeave(data, keyboard, e.serial, e.surface),
-            .key => |e| keyboardKey(data, keyboard, e.serial, e.time, e.key, @as(u32, @intCast(@intFromEnum(e.state)))),
+            .key => |e| keyboardKey(data, keyboard, e.serial, e.time, e.key, @as(u32, @intCast(@backingInt(e.state)))),
             .modifiers => |e| keyboardModifiers(data, keyboard, e.serial, e.mods_depressed, e.mods_latched, e.mods_locked, e.group),
             .repeat_info => |e| keyboardRepeatInfo(data, keyboard, e.rate, e.delay),
         }
@@ -605,7 +605,7 @@ const c = struct {
     }
     fn decorationDispatch(decoration: *zxdg_toplevel_decoration_v1, event: zxdg.ToplevelDecorationV1.Event, data: ?*anyopaque) void {
         switch (event) {
-            .configure => |e| decorationConfigure(data, decoration, @as(u32, @intCast(@intFromEnum(e.mode)))),
+            .configure => |e| decorationConfigure(data, decoration, @as(u32, @intCast(@backingInt(e.mode)))),
         }
     }
 
@@ -744,7 +744,7 @@ const ClipboardOffer = struct {
             .text
         else
             return;
-        if (self.mime == null or @intFromEnum(candidate) > @intFromEnum(self.mime.?)) self.mime = candidate;
+        if (self.mime == null or @backingInt(candidate) > @backingInt(self.mime.?)) self.mime = candidate;
     }
 };
 
@@ -777,13 +777,13 @@ pub const State = struct {
     clipboard_source: ?*c.wl_data_source = null,
     pending_clipboard_offer: ?*ClipboardOffer = null,
     clipboard_offer: ?*ClipboardOffer = null,
-    clipboard_text: std.ArrayListUnmanaged(u8) = .empty,
+    clipboard_text: std.ArrayList(u8) = .empty,
     owns_clipboard: bool = false,
     clipboard_selection_known: bool = false,
     side_modifiers: Modifiers = .{},
 
-    outputs: std.ArrayListUnmanaged(*Output) = .empty,
-    windows: std.ArrayListUnmanaged(*Window) = .empty,
+    outputs: std.ArrayList(*Output) = .empty,
+    windows: std.ArrayList(*Window) = .empty,
     pointer_window: ?*Window = null,
     keyboard_window: ?*Window = null,
     event_error_reported: bool = false,
@@ -809,7 +809,7 @@ pub const State = struct {
         }
         const wake_fd: std.posix.fd_t = @intCast(wake_raw);
 
-        const app_name = allocator.dupeZ(u8, options.app_name) catch {
+        const app_name = allocator.dupeSentinel(u8, options.app_name, 0) catch {
             _ = std.os.linux.close(wake_fd);
             c.wl_display_disconnect(display.?);
             return error.OutOfMemory;
@@ -939,7 +939,7 @@ pub const State = struct {
         c.wl_data_device_set_selection(device, source, self.input_serial);
         self.clipboard_source = source;
         self.owns_clipboard = true;
-        if (c.wl_display_flush(self.display) == -1 and @as(std.c.E, @enumFromInt(std.c._errno().*)) != .AGAIN) {
+        if (c.wl_display_flush(self.display) == -1 and @as(std.c.E, @fromBackingInt(@intCast(std.c._errno().*))) != .AGAIN) {
             self.owns_clipboard = false;
             log.warn("Wayland system clipboard publish failed; using in-process UTF-8 fallback", .{});
         }
@@ -958,7 +958,7 @@ pub const State = struct {
         _ = std.os.linux.close(write_fd);
         if (c.wl_display_flush(self.display) == -1) return null;
 
-        var result: std.ArrayListUnmanaged(u8) = .empty;
+        var result: std.ArrayList(u8) = .empty;
         defer result.deinit(allocator);
         var buffer: [4096]u8 = undefined;
         while (true) {
@@ -975,7 +975,7 @@ pub const State = struct {
         while (remaining.len != 0) {
             const result = std.c.write(fd, remaining.ptr, remaining.len);
             if (result < 0) {
-                const err: std.c.E = @enumFromInt(std.c._errno().*);
+                const err: std.c.E = @fromBackingInt(@intCast(std.c._errno().*));
                 if (err == .INTR) continue;
                 log.warn("Wayland clipboard transfer failed: {t}", .{err});
                 return;
@@ -1191,7 +1191,7 @@ pub const State = struct {
 
     fn flushWayland(self: *State) Error!bool {
         if (c.wl_display_flush(self.display) != -1) return false;
-        if (@as(std.c.E, @enumFromInt(std.c._errno().*)) == .AGAIN) return true;
+        if (@as(std.c.E, @fromBackingInt(@intCast(std.c._errno().*))) == .AGAIN) return true;
         return error.WaylandProtocolError;
     }
 
@@ -1717,10 +1717,10 @@ pub const Window = struct {
             const items = @as([*]const u32, @ptrCast(@alignCast(array.data)));
             for (items[0..count]) |state| {
                 switch (state) {
-                    @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_MAXIMIZED))) => self.maximized = true,
-                    @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_FULLSCREEN))) => self.fullscreen = true,
-                    @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_ACTIVATED))) => self.focused = true,
-                    @as(u32, @intCast(@intFromEnum(c.XDG_TOPLEVEL_STATE_SUSPENDED))) => render_suspended = true,
+                    @as(u32, @intCast(@backingInt(c.XDG_TOPLEVEL_STATE_MAXIMIZED))) => self.maximized = true,
+                    @as(u32, @intCast(@backingInt(c.XDG_TOPLEVEL_STATE_FULLSCREEN))) => self.fullscreen = true,
+                    @as(u32, @intCast(@backingInt(c.XDG_TOPLEVEL_STATE_ACTIVATED))) => self.focused = true,
+                    @as(u32, @intCast(@backingInt(c.XDG_TOPLEVEL_STATE_SUSPENDED))) => render_suspended = true,
                     else => {},
                 }
             }
@@ -1750,13 +1750,13 @@ fn waylandCursorShape(shape: CursorShape) c.wp_cursor_shape_device_v1_Shape {
 
 fn mapKeysymToKey(sym: c.xkb_keysym_t) Key {
     if (sym >= 'a' and sym <= 'z') {
-        return @enumFromInt(@as(u16, @intCast(@intFromEnum(Key.a))) + @as(u16, @intCast(sym - 'a')));
+        return @fromBackingInt(@intCast(@as(u16, @intCast(@backingInt(Key.a))) + @as(u16, @intCast(sym - 'a'))));
     }
     if (sym >= 'A' and sym <= 'Z') {
-        return @enumFromInt(@as(u16, @intCast(@intFromEnum(Key.a))) + @as(u16, @intCast(sym - 'A')));
+        return @fromBackingInt(@intCast(@as(u16, @intCast(@backingInt(Key.a))) + @as(u16, @intCast(sym - 'A'))));
     }
     if (sym >= '0' and sym <= '9') {
-        return @enumFromInt(@as(u16, @intCast(@intFromEnum(Key.zero))) + @as(u16, @intCast(sym - '0')));
+        return @fromBackingInt(@intCast(@as(u16, @intCast(@backingInt(Key.zero))) + @as(u16, @intCast(sym - '0'))));
     }
 
     return switch (sym) {
@@ -2026,7 +2026,7 @@ fn pointerButton(data: ?*anyopaque, pointer: ?*c.wl_pointer, serial: u32, time: 
         0x117 => MouseButton.eight,
         else => return,
     };
-    const action: Action = if (state == @as(c_uint, @intCast(@intFromEnum(c.WL_POINTER_BUTTON_STATE_PRESSED)))) .press else .release;
+    const action: Action = if (state == @as(c_uint, @intCast(@backingInt(c.WL_POINTER_BUTTON_STATE_PRESSED)))) .press else .release;
     window.updateMouseButton(btn, action, self.currentModifiers());
 }
 
@@ -2037,9 +2037,9 @@ fn pointerAxis(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, axis: u32,
     const window = self.pointer_window orelse return;
     // Wayland conventionally reports 10 axis units per wheel detent.
     const steps = -value.toDouble() / 10.0;
-    if (axis == @as(u32, @intCast(@intFromEnum(c.WL_POINTER_AXIS_VERTICAL_SCROLL)))) {
+    if (axis == @as(u32, @intCast(@backingInt(c.WL_POINTER_AXIS_VERTICAL_SCROLL)))) {
         window.updateScroll(0, steps);
-    } else if (axis == @as(u32, @intCast(@intFromEnum(c.WL_POINTER_AXIS_HORIZONTAL_SCROLL)))) {
+    } else if (axis == @as(u32, @intCast(@backingInt(c.WL_POINTER_AXIS_HORIZONTAL_SCROLL)))) {
         window.updateScroll(steps, 0);
     }
 }
@@ -2047,7 +2047,7 @@ fn pointerAxis(data: ?*anyopaque, pointer: ?*c.wl_pointer, time: u32, axis: u32,
 fn keyboardKeymap(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, format: u32, fd: c_int, size: u32) callconv(.c) void {
     _ = keyboard;
     const self = @as(*State, @ptrCast(@alignCast(data.?)));
-    if (format != @as(u32, @intCast(@intFromEnum(c.WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1)))) {
+    if (format != @as(u32, @intCast(@backingInt(c.WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1)))) {
         _ = std.os.linux.close(@intCast(fd));
         return;
     }
@@ -2092,8 +2092,8 @@ fn keyboardKey(data: ?*anyopaque, keyboard: ?*c.wl_keyboard, serial: u32, time: 
     const sym = c.xkb_state_key_get_one_sym(xkb_state, key + 8);
     const mapped_key = mapKeysymToKey(sym);
     const action: Action = switch (state) {
-        @as(u32, @intCast(@intFromEnum(c.WL_KEYBOARD_KEY_STATE_RELEASED))) => .release,
-        @as(u32, @intCast(@intFromEnum(c.WL_KEYBOARD_KEY_STATE_PRESSED))) => .press,
+        @as(u32, @intCast(@backingInt(c.WL_KEYBOARD_KEY_STATE_RELEASED))) => .release,
+        @as(u32, @intCast(@backingInt(c.WL_KEYBOARD_KEY_STATE_PRESSED))) => .press,
         c.WL_KEYBOARD_KEY_STATE_REPEATED => .repeat,
         else => return,
     };
@@ -2186,11 +2186,11 @@ fn decorationConfigure(data: ?*anyopaque, decoration: ?*c.zxdg_toplevel_decorati
     _ = decoration;
     const window = @as(*Window, @ptrCast(@alignCast(data.?)));
     switch (mode) {
-        @as(u32, @intCast(@intFromEnum(c.ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE))) => {
+        @as(u32, @intCast(@backingInt(c.ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE))) => {
             window.decoration_mode = .server_side;
             window.decorated = true;
         },
-        @as(u32, @intCast(@intFromEnum(c.ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE))) => {
+        @as(u32, @intCast(@backingInt(c.ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE))) => {
             window.decoration_mode = .client_side;
             window.decorated = false;
         },
